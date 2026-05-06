@@ -306,9 +306,23 @@
                                 <el-table-column label="已收租金" width="110">
                                     <template #default="s"><span class="num text-blue">¥{{ numberFormat(s.row.collected_rent) }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="状态" width="80">
+                                <el-table-column label="合同状态" width="90">
                                     <template #default="s">
                                         <span class="status-badge" :class="{'执行中':'badge-blue','已结清':'badge-green','逾期中':'badge-red'}[s.row.contract_status]||'badge-gray'">{{ s.row.contract_status }}</span>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="交付状态" width="110">
+                                    <template #default="s">
+                                        <span class="status-badge" :class="deliveryStatusClass(s.row.delivery_status)">{{ s.row.delivery_status || '-' }}</span>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="操作" width="150" fixed="right">
+                                    <template #default="s">
+                                        <el-button v-if="canInitiateInitialPayment(s.row)" type="warning" size="small" round @click="openInitialPayment(s.row)">
+                                            发起首次付款
+                                        </el-button>
+                                        <span v-else-if="s.row.initial_payment_status" style="font-size:12px;color:#6b7280">首付：{{ s.row.initial_payment_status }}</span>
+                                        <span v-else style="font-size:12px;color:#9ca3af">-</span>
                                     </template>
                                 </el-table-column>
                             </el-table>
@@ -519,7 +533,10 @@
                             <el-radio-group v-model="approvalFilter" @change="fetchApprovals">
                                 <el-radio-button label="">全部</el-radio-button>
                                 <el-radio-button label="contract_delivery">出库审批</el-radio-button>
-                                <el-radio-button label="sale_payment">支付核对</el-radio-button>
+                                <el-radio-button label="initial_payment">首次付款</el-radio-button>
+                                <el-radio-button label="sale_payment">支付核对(旧)</el-radio-button>
+                                <el-radio-button label="lock_request">锁车审批</el-radio-button>
+                                <el-radio-button label="return_stock">退车入库</el-radio-button>
                             </el-radio-group>
                             <el-button type="primary" :icon="Refresh" @click="fetchApprovals" style="margin-left:auto">刷新</el-button>
                         </div>
@@ -534,17 +551,20 @@
                             <!-- 头部信息 -->
                             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
                                 <div style="display:flex;align-items:center;gap:12px">
-                                    <span class="badge" :class="{'badge-blue': item.ref_type==='contract_delivery', 'badge-purple': item.ref_type==='sale_payment'}">
-                                        {{ item.ref_type === 'contract_delivery' ? '出库审批' : '支付核对' }}
+                                    <span class="badge" :class="approvalTypeClass(item.ref_type)">
+                                        {{ approvalTypeLabel(item.ref_type) }}
                                     </span>
                                     <span style="font-weight:700;font-size:16px">{{ item.plate_number }}</span>
-                                    <span class="badge badge-gray">{{ item.contract_type }}</span>
+                                    <span v-if="item.contract_type" class="badge badge-gray">{{ item.contract_type }}</span>
                                     <span class="badge" :class="{'badge-green': item.overall_status==='已完成', 'badge-red': item.overall_status==='已驳回', 'badge-blue': item.overall_status==='审批中'}">
                                         {{ item.overall_status }}
                                     </span>
                                 </div>
                                 <div>
-                                    <span v-if="item.contract_type==='销售'" style="font-weight:700;color:#2563eb;font-size:18px">售价 ¥{{ numberFormat(item.total_price) }}</span>
+                                    <span v-if="item.ref_type==='lock_request'" style="font-weight:700;color:#ef4444;font-size:18px">逾期 {{ item.overdue_days || 0 }} 天</span>
+                                    <span v-else-if="item.ref_type==='return_stock'" style="font-weight:700;color:#d97706;font-size:18px">{{ item.return_reason || '退车入库' }}</span>
+                                    <span v-else-if="item.ref_type==='initial_payment'" style="font-weight:700;color:#d97706;font-size:18px">首次付款 ¥{{ numberFormat(item.initial_payment_amount) }}</span>
+                                    <span v-else-if="item.contract_type==='销售'" style="font-weight:700;color:#2563eb;font-size:18px">售价 ¥{{ numberFormat(item.total_price) }}</span>
                                     <span v-else style="font-weight:700;color:#059669;font-size:18px">月租 ¥{{ numberFormat(item.rent) }}</span>
                                 </div>
                             </div>
@@ -556,8 +576,23 @@
                                     <div><span style="color:#9ca3af">车型：</span><b>{{ item.car_type }}</b></div>
                                     <div><span style="color:#9ca3af">VIN：</span><span style="font-family:monospace;font-size:12px">{{ item.vin }}</span></div>
                                     <div><span style="color:#9ca3af">客户：</span><b>{{ item.customer_name || '-' }}</b></div>
-                                    <div><span style="color:#9ca3af">电话：</span>{{ item.customer_phone || '-' }}</div>
-                                    <template v-if="item.contract_type==='销售'">
+                                    <div v-if="item.customer_phone"><span style="color:#9ca3af">电话：</span>{{ item.customer_phone || '-' }}</div>
+                                    <template v-if="item.ref_type==='lock_request'">
+                                        <div><span style="color:#9ca3af">逾期天数：</span><b style="color:#ef4444">{{ item.overdue_days || 0 }} 天</b></div>
+                                        <div><span style="color:#9ca3af">发起人：</span>{{ item.requested_by || '-' }}</div>
+                                        <div style="grid-column:1/-1"><span style="color:#9ca3af">锁车原因：</span>{{ item.reason || '-' }}</div>
+                                    </template>
+                                    <template v-else-if="item.ref_type==='return_stock'">
+                                        <div><span style="color:#9ca3af">退车原因：</span><b>{{ item.return_reason || '-' }}</b></div>
+                                        <div><span style="color:#9ca3af">验收状态：</span>{{ item.delivery_status || '-' }}</div>
+                                    </template>
+                                    <template v-else-if="item.ref_type==='initial_payment'">
+                                        <div><span style="color:#9ca3af">付款类型：</span><b>{{ item.initial_payment_type || '首次付款' }}</b></div>
+                                        <div><span style="color:#9ca3af">付款金额：</span><b style="color:#d97706">¥{{ numberFormat(item.initial_payment_amount) }}</b></div>
+                                        <div><span style="color:#9ca3af">发起人：</span>{{ item.requested_by || '-' }}</div>
+                                        <div style="grid-column:1/-1" v-if="item.initial_payment_remark"><span style="color:#9ca3af">备注：</span>{{ item.initial_payment_remark }}</div>
+                                    </template>
+                                    <template v-else-if="item.contract_type==='销售'">
                                         <div><span style="color:#9ca3af">售价：</span><b style="color:#2563eb">¥{{ numberFormat(item.total_price) }}</b></div>
                                     </template>
                                     <template v-else>
@@ -570,6 +605,20 @@
                                     <div v-if="item.deposit"><span style="color:#9ca3af">押金：</span>¥{{ numberFormat(item.deposit) }}</div>
                                     <div><span style="color:#9ca3af">业务模式：</span>{{ item.business_mode || '-' }}</div>
                                     <div v-if="item.created_at"><span style="color:#9ca3af">提交时间：</span>{{ item.created_at }}</div>
+                                </div>
+                                <!-- 首次付款附件 -->
+                                <div v-if="item.ref_type==='initial_payment'" style="margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0">
+                                    <span style="color:#9ca3af;font-size:12px">付款凭证：</span>
+                                    <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;align-items:center">
+                                        <a v-if="item.customer_screenshot_path" :href="item.customer_screenshot_path" target="_blank" class="badge badge-blue">客户付款截图</a>
+                                        <a v-if="item.bank_receipt_path" :href="item.bank_receipt_path" target="_blank" class="badge badge-green">公司收款回单</a>
+                                        <el-upload v-if="currentUser.role==='财务' && !item.bank_receipt_path && item.overall_status==='审批中'"
+                                            action="/api/upload" :show-file-list="false"
+                                            :on-success="(res) => onInitialReceiptUpload(item.initial_payment_id || item.ref_id, res)"
+                                            accept=".jpg,.jpeg,.png,.pdf">
+                                            <el-button size="small" type="primary" plain>上传公司回单</el-button>
+                                        </el-upload>
+                                    </div>
                                 </div>
                                 <!-- 合同附件 -->
                                 <div v-if="item.contract_file" style="margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0">
@@ -611,8 +660,8 @@
                                     }"></div>
                                 </template>
                                 <!-- 出库步骤（车管） -->
-                                <div v-if="item.ref_type==='contract_delivery' && item.delivery_status!=='已出库'" style="flex:0.6;height:2px;background:#e5e7eb"></div>
-                                <div v-if="item.ref_type==='contract_delivery'" style="flex:1;text-align:center;position:relative;z-index:1">
+                                <div v-if="['contract_delivery','sale_payment','initial_payment'].includes(item.ref_type) && item.delivery_status!=='已出库'" style="flex:0.6;height:2px;background:#e5e7eb"></div>
+                                <div v-if="['contract_delivery','sale_payment','initial_payment'].includes(item.ref_type)" style="flex:1;text-align:center;position:relative;z-index:1">
                                     <div :style="{
                                         width:'36px',height:'36px',borderRadius:'50%',margin:'0 auto 6px',
                                         display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700,fontSize:'14px',
@@ -640,7 +689,7 @@
                                     </template>
                                 </template>
                                 <!-- 车管出库按钮 -->
-                                <el-button v-if="item.delivery_status==='待出库' && (currentUser.role==='车管' || currentUser.role==='老板')"
+                                <el-button v-if="item.delivery_status==='待出库' && ['contract_delivery','sale_payment','initial_payment'].includes(item.ref_type) && (currentUser.role==='车管' || currentUser.role==='老板')"
                                     type="warning" size="small" @click="doDeliver(item)">
                                     <el-icon><Van/></el-icon> 确认出库
                                 </el-button>
@@ -649,41 +698,6 @@
                                     type="warning" size="small" plain @click="doResubmit(item.ref_id, item.ref_type)">
                                     <el-icon><RefreshRight/></el-icon> 重新提交
                                 </el-button>
-                            </div>
-                        </div>
-
-                        <!-- 锁车审批 -->
-                        <div style="margin-top:32px" v-if="lockRequests.length > 0">
-                            <h3 style="font-size:16px;font-weight:700;margin-bottom:12px;color:#374151">🔒 锁车审批</h3>
-                            <div v-for="lr in lockRequests" :key="lr.id" class="card" style="margin-bottom:12px;padding:16px 20px">
-                                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-                                    <span class="badge badge-red">锁车</span>
-                                    <b>{{ lr.plate_number }}</b>
-                                    <span style="color:#6b7280">{{ lr.car_type }}</span>
-                                    <span style="color:#ef4444;font-weight:600">逾期{{ lr.overdue_days }}天</span>
-                                    <span style="color:#9ca3af">申请人: {{ lr.requested_by }}</span>
-                                    <span class="badge" :class="{'badge-green': lr.approval_status==='已完成', 'badge-red': lr.approval_status==='已驳回', 'badge-blue': lr.approval_status==='审批中'}">
-                                        {{ lr.approval_status === '已完成' ? '已锁车' : lr.approval_status }}
-                                    </span>
-                                </div>
-                                <!-- 审批步骤 -->
-                                <div v-if="lr.approval_steps && lr.approval_steps.length" style="display:flex;gap:16px;margin-top:10px;flex-wrap:wrap">
-                                    <div v-for="s in lr.approval_steps" :key="s.id" style="display:flex;align-items:center;gap:4px;font-size:13px">
-                                        <span :style="{color: s.status==='已通过' ? '#059669' : s.status==='已驳回' ? '#ef4444' : '#9ca3af'}">
-                                            {{ s.status==='已通过' ? '✓' : s.status==='已驳回' ? '✗' : '○' }}
-                                        </span>
-                                        <span>{{ s.step_label }}</span>
-                                        <span v-if="s.operator_name" style="color:#9ca3af">({{ s.operator_name }})</span>
-                                    </div>
-                                </div>
-                                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
-                                    <template v-for="s in lr.approval_steps" :key="'lrbtn_'+s.id">
-                                        <template v-if="s.status==='待审批' && s.step_order===lr.approval_current_step && (currentUser.role===s.required_role || currentUser.role==='老板')">
-                                            <el-button type="primary" size="small" @click="doApprove(s.id, s.step_label)">通过</el-button>
-                                            <el-button type="danger" size="small" plain @click="doReject(s.id, s.step_label)">驳回</el-button>
-                                        </template>
-                                    </template>
-                                </div>
                             </div>
                         </div>
                     </div>
@@ -777,7 +791,7 @@
                                 <el-table-column prop="return_reason" label="退租原因" width="100"></el-table-column>
                                 <el-table-column prop="status" label="状态" width="80">
                                     <template #default="s">
-                                        <span class="status-badge" :class="{'待登记':'badge-orange','已登记':'badge-green'}[s.row.status]||'badge-gray'">{{ s.row.status }}</span>
+                                        <span class="status-badge" :class="returnStatusClass(s.row.status)">{{ s.row.status }}</span>
                                     </template>
                                 </el-table-column>
                                 <el-table-column label="合计扣款" width="110">
@@ -788,9 +802,11 @@
                                 </el-table-column>
                                 <el-table-column prop="created_by" label="登记人" width="80"></el-table-column>
                                 <el-table-column prop="created_at" label="登记时间" width="160"></el-table-column>
-                                <el-table-column label="操作" width="100">
+                                <el-table-column label="操作" width="240">
                                     <template #default="s">
                                         <el-button type="primary" link size="small" @click="viewReturnDetail(s.row)">查看</el-button>
+                                        <el-button v-if="canSubmitReturnApproval(s.row)" type="warning" link size="small" @click="submitReturnApproval(s.row)">提交审批</el-button>
+                                        <el-button v-if="canExecuteReturnStock(s.row)" type="success" link size="small" @click="executeReturnStock(s.row)">确认入库</el-button>
                                     </template>
                                 </el-table-column>
                             </el-table>
@@ -1118,6 +1134,41 @@
             </template>
         </el-dialog>
 
+        <!-- ========== 首次付款 DIALOG ========== -->
+        <el-dialog v-model="showInitialPaymentDialog" title="发起首次付款" width="560" :close-on-click-modal="false">
+            <div v-if="initialPaymentTarget" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 16px;margin-bottom:16px">
+                <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px">
+                    <span>车牌：<b>{{ initialPaymentTarget.plate_number }}</b></span>
+                    <span>客户：<b>{{ initialPaymentTarget.customer_name || '-' }}</b></span>
+                    <span>类型：<b>{{ initialPaymentTarget.contract_type }}</b></span>
+                </div>
+            </div>
+            <el-form :model="initialPaymentForm" label-position="top">
+                <el-form-item label="付款类型">
+                    <el-input v-model="initialPaymentForm.payment_type"></el-input>
+                </el-form-item>
+                <el-form-item label="付款金额（元）">
+                    <el-input-number v-model="initialPaymentForm.amount" :min="0" :step="500" style="width:100%"></el-input-number>
+                    <div style="font-size:12px;color:#9ca3af;margin-top:4px">
+                        租赁/以租代售默认=押金+首付+首次租金；销售默认=售价。
+                    </div>
+                </el-form-item>
+                <el-form-item label="客户付款截图">
+                    <el-upload action="/api/upload" :show-file-list="false" :on-success="onInitialScreenshotUpload" accept=".jpg,.jpeg,.png,.pdf">
+                        <el-button type="warning" plain>上传客户付款截图</el-button>
+                    </el-upload>
+                    <a v-if="initialPaymentForm.customer_screenshot_path" :href="initialPaymentForm.customer_screenshot_path" target="_blank" style="margin-left:10px;color:#2563eb">已上传，点击查看</a>
+                </el-form-item>
+                <el-form-item label="备注">
+                    <el-input v-model="initialPaymentForm.remark" type="textarea" :rows="2" placeholder="可填写客户付款说明"></el-input>
+                </el-form-item>
+            </el-form>
+            <template #footer>
+                <el-button @click="showInitialPaymentDialog = false">取消</el-button>
+                <el-button type="primary" @click="submitInitialPayment" :loading="submitting">提交首次付款</el-button>
+            </template>
+        </el-dialog>
+
         <!-- ========== 退还车辆验收单 DIALOG ========== -->
         <el-dialog v-model="showReturnDialog" title="退还车辆验收单" width="820" :close-on-click-modal="false" top="3vh">
             <el-form :model="returnForm" label-position="top" label-width="100px" size="default">
@@ -1267,13 +1318,14 @@
             const quickAccounts = [
                 { username: 'boss', label: '老板(超管)', bg: '#dbeafe', color: '#2563eb' },
                 { username: 'ops', label: '运营', bg: '#fef3c7', color: '#d97706' },
+                { username: 'legal', label: '法务', bg: '#f3e8ff', color: '#9333ea' },
                 { username: 'fin', label: '财务', bg: '#d1fae5', color: '#059669' },
                 { username: 'fleet', label: '车管', bg: '#fee2e2', color: '#ef4444' },
                 { username: 'sales', label: '销售', bg: '#ede9fe', color: '#7c3aed' },
             ];
 
             function roleColor(role) {
-                return { '老板': '#2563eb', '运营': '#d97706', '财务': '#059669', '车管': '#ef4444', '销售': '#7c3aed' }[role] || '#6b7280';
+                return { '老板': '#2563eb', '运营': '#d97706', '法务': '#9333ea', '财务': '#059669', '车管': '#ef4444', '销售': '#7c3aed' }[role] || '#6b7280';
             }
 
             async function doLogin() {
@@ -1351,6 +1403,8 @@
             const showAddVehicle = ref(false);
             const showAddContract = ref(false);
             const showReturnDialog = ref(false);
+            const showInitialPaymentDialog = ref(false);
+            const initialPaymentTarget = ref(null);
             const submitting = ref(false);
             // 审批中心
             const approvalList = ref([]);
@@ -1369,6 +1423,14 @@
                 start_date: '', loan_amount: 0, monthly_payment: 0, rent: 0,
                 loan_periods: 0, deposit: 0, down_payment: 0, total_price: 0,
                 contract_file: ''
+            });
+
+            const initialPaymentForm = reactive({
+                contract_id: null,
+                payment_type: '',
+                amount: 0,
+                customer_screenshot_path: '',
+                remark: ''
             });
 
             // 输入车架号后自动匹配库存车辆
@@ -1432,7 +1494,7 @@
                 dashboard: { title: '仪表盘', desc: '车辆资产运营数据总览', action: '' },
                 assets: { title: '车辆管理', desc: '管理所有车辆的入库、信息维护与状态跟踪', action: '车辆入库' },
                 contracts: { title: '合同管理', desc: '管理所有合同、生成还款计划、跟踪执行状态', action: '新建合同' },
-                approvals: { title: '审批中心', desc: '出库审批 · 支付核对 · 锁车审批 · 退车入库', action: '' },
+                approvals: { title: '审批中心', desc: '合同审批 · 首次付款 · 锁车审批 · 退车入库', action: '' },
                 bills: { title: '账单管理', desc: '查看、核销和管理所有财务账单', action: '' },
                 reconciliation: { title: '对账单', desc: '三位一体核销：销售截图 + 银行回单 + 流水号', action: '' },
                 risk: { title: '锁车管理', desc: '逾期预警与锁车审批管理', action: '' },
@@ -1443,9 +1505,10 @@
 
             const roles = [
                 { name: '老板', desc: '资产全局看板、动态指导价终审、锁车终审', bg: '#dbeafe', color: '#2563eb' },
+                { name: '法务', desc: '合同合规审核、审批中心法务节点把关', bg: '#f3e8ff', color: '#9333ea' },
                 { name: '财务', desc: '银行入账流水上传、账单核销审核、折旧参数', bg: '#d1fae5', color: '#059669' },
                 { name: '运营/内勤', desc: '租期监控、还款提醒、违章录入、锁车执行', bg: '#fef3c7', color: '#d97706' },
-                { name: '销售', desc: '合同录入、还款凭证上传、逾期催收', bg: '#ede9fe', color: '#7c3aed' },
+                { name: '销售', desc: '合同录入、首次付款发起、对账发起、逾期催收', bg: '#ede9fe', color: '#7c3aed' },
                 { name: '车管', desc: '车辆入库登记、现场校验、退车验收', bg: '#fee2e2', color: '#ef4444' },
             ];
 
@@ -1613,6 +1676,64 @@
                 if (days >= 3) return { label: '中度逾期', cls: 'badge-orange', color: '#d97706' };
                 return { label: '轻度逾期', cls: 'badge-yellow', color: '#eab308' };
             }
+            function approvalTypeLabel(type) {
+                return {
+                    contract_delivery: '出库审批',
+                    initial_payment: '首次付款',
+                    sale_payment: '支付核对',
+                    lock_request: '锁车审批',
+                    return_stock: '退车入库',
+                }[type] || type;
+            }
+            function approvalTypeClass(type) {
+                return {
+                    contract_delivery: 'badge-blue',
+                    initial_payment: 'badge-orange',
+                    sale_payment: 'badge-purple',
+                    lock_request: 'badge-red',
+                    return_stock: 'badge-orange',
+                }[type] || 'badge-gray';
+            }
+            function deliveryStatusClass(status) {
+                return {
+                    '待审批': 'badge-orange',
+                    '审批中': 'badge-blue',
+                    '已驳回': 'badge-red',
+                    '待首付款': 'badge-orange',
+                    '首付审批中': 'badge-blue',
+                    '首付已驳回': 'badge-red',
+                    '待出库': 'badge-purple',
+                    '已出库': 'badge-green',
+                }[status] || 'badge-gray';
+            }
+            function initialPaymentAmount(row) {
+                if (!row) return 0;
+                if (row.contract_type === '销售') return Number(row.total_price || row.down_payment || 0);
+                return Number(row.deposit || 0) + Number(row.down_payment || 0) + Number(row.rent || 0);
+            }
+            function initialPaymentType(row) {
+                return row && row.contract_type === '销售' ? '卖车付款审核' : '押金及首次支付审核';
+            }
+            function canInitiateInitialPayment(row) {
+                return currentUser.value && ['销售', '老板'].includes(currentUser.value.role)
+                    && ['待首付款', '首付已驳回'].includes(row.delivery_status);
+            }
+            function returnStatusClass(status) {
+                return {
+                    '待登记': 'badge-orange',
+                    '已登记': 'badge-blue',
+                    '待审批': 'badge-orange',
+                    '待入库': 'badge-purple',
+                    '已入库': 'badge-green',
+                    '已驳回': 'badge-red',
+                }[status] || 'badge-gray';
+            }
+            function canSubmitReturnApproval(row) {
+                return ['已登记', '已驳回'].includes(row.status) && ['销售', '车管', '老板'].includes(currentUser.value.role);
+            }
+            function canExecuteReturnStock(row) {
+                return row.status === '待入库' && ['车管', '老板'].includes(currentUser.value.role);
+            }
 
             // ===== Actions =====
             function handleMenuSelect(key) { currentPage.value = key; }
@@ -1694,16 +1815,20 @@
                 } else { ElementPlus.ElMessage.error(data.message); }
             }
             async function confirmRepayment(row) {
-                await fetch(`/api/repayments/${row.id}/confirm`, { method: 'POST' });
-                ElementPlus.ElMessage.success('客户还款核销成功');
+                const res = await fetch(`/api/repayments/${row.id}/confirm`, { method: 'POST' });
+                const data = await res.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '客户还款核销失败');
+                ElementPlus.ElMessage.success(data.message || '客户还款核销成功');
                 fetchAll();
                 if (currentPage.value === 'risk') fetchOverdue();
                 if (currentPage.value === 'contracts') fetchContracts();
                 if (currentPage.value === 'bills') fetchBills();
             }
             async function confirmFactoryRepayment(row) {
-                await fetch(`/api/factory-repayments/${row.id}/confirm`, { method: 'POST' });
-                ElementPlus.ElMessage.success('厂家月供核销成功');
+                const res = await fetch(`/api/factory-repayments/${row.id}/confirm`, { method: 'POST' });
+                const data = await res.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '厂家月供核销失败');
+                ElementPlus.ElMessage.success(data.message || '厂家月供核销成功');
                 if (currentPage.value === 'contracts') fetchContracts();
             }
             async function submitContract() {
@@ -1725,6 +1850,53 @@
                     Object.assign(newContract, { vehicle_id: '', vin: '', car_type: '', plate_number: '', vehicle_status: '', invoice_price: 0, customer_name: '', customer_phone: '', contract_type: '租赁', business_mode: '转租', rental_method: '经营租赁', repayment_day: 1, start_date: '', loan_amount: 0, monthly_payment: 0, rent: 0, loan_periods: 0, deposit: 0, down_payment: 0, total_price: 0, contract_file: '' });
                     fetchAll(); fetchContracts();
                 } else { ElementPlus.ElMessage.error(data.message); }
+            }
+
+            function openInitialPayment(row) {
+                initialPaymentTarget.value = row;
+                Object.assign(initialPaymentForm, {
+                    contract_id: row.id,
+                    payment_type: initialPaymentType(row),
+                    amount: initialPaymentAmount(row),
+                    customer_screenshot_path: '',
+                    remark: ''
+                });
+                showInitialPaymentDialog.value = true;
+            }
+            function onInitialScreenshotUpload(res) {
+                if (!res.success) return ElementPlus.ElMessage.error('客户付款截图上传失败');
+                initialPaymentForm.customer_screenshot_path = res.url;
+                ElementPlus.ElMessage.success('客户付款截图已上传');
+            }
+            async function submitInitialPayment() {
+                if (!initialPaymentForm.contract_id) return ElementPlus.ElMessage.warning('请选择合同');
+                if (!initialPaymentForm.amount || initialPaymentForm.amount <= 0) return ElementPlus.ElMessage.warning('请填写首次付款金额');
+                if (!initialPaymentForm.customer_screenshot_path) return ElementPlus.ElMessage.warning('请上传客户付款截图');
+                submitting.value = true;
+                const res = await fetch(`/api/contracts/${initialPaymentForm.contract_id}/initial-payment`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify(initialPaymentForm)
+                });
+                const data = await res.json();
+                submitting.value = false;
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '首次付款提交失败');
+                ElementPlus.ElMessage.success(data.message || '首次付款已提交');
+                showInitialPaymentDialog.value = false;
+                fetchContracts();
+                fetchApprovals();
+            }
+            async function onInitialReceiptUpload(paymentId, res) {
+                if (!res.success) return ElementPlus.ElMessage.error('公司收款回单上传失败');
+                const apiRes = await fetch(`/api/initial-payments/${paymentId}/receipt`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ bank_receipt_path: res.url })
+                });
+                const data = await apiRes.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '公司收款回单上传失败');
+                ElementPlus.ElMessage.success(data.message || '公司收款回单已上传');
+                fetchApprovals();
             }
 
             // ===== 对账核销操作 =====
@@ -1768,26 +1940,28 @@
             function requestLock(row) {
                 ElementPlus.ElMessageBox.confirm(`确认对 ${row.plate_number} (逾期${calcOverdueDays(row.due_date)}天) 发起锁车？`, '锁车审批', { type: 'warning' })
                     .then(async () => {
-                        await fetch('/api/lock-requests', {
+                        const res = await fetch('/api/lock-requests', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
-                                vehicle_id: row.vehicle_id,
-                                contract_id: row.contract_id,
                                 repayment_id: row.id,
-                                overdue_days: calcOverdueDays(row.due_date),
                                 reason: `逾期${calcOverdueDays(row.due_date)}天`
                             })
                         });
-                        ElementPlus.ElMessage.success('锁车申请已提交');
+                        const data = await res.json();
+                        if (!data.success) return ElementPlus.ElMessage.error(data.message || '锁车申请失败');
+                        ElementPlus.ElMessage.success(data.message || '锁车申请已提交');
+                        fetchApprovals();
                     }).catch(() => {});
             }
 
             // ===== 出库 =====
             async function deliverVehicle(row) {
                 await ElementPlus.ElMessageBox.confirm(`确认对 ${row.plate_number} 执行出库？`, '车辆出库', { type: 'warning' });
-                await fetch(`/api/vehicles/${row.id}/deliver`, { method: 'POST' });
-                ElementPlus.ElMessage.success('车辆已出库');
+                const res = await fetch(`/api/vehicles/${row.id}/deliver`, { method: 'POST' });
+                const data = await res.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '车辆出库失败');
+                ElementPlus.ElMessage.success(data.message || '车辆已出库');
                 fetchAll();
             }
 
@@ -1797,7 +1971,7 @@
                 approvalList.value = await (await fetch(url)).json();
             };
             const fetchLockRequests = async () => {
-                lockRequests.value = await (await fetch('/api/lock-requests')).json();
+                lockRequests.value = [];
             };
 
             async function doApprove(flowId, label) {
@@ -1812,7 +1986,7 @@
                 const data = await res.json();
                 if (data.success) {
                     ElementPlus.ElMessage.success(data.message);
-                    fetchApprovals(); fetchLockRequests(); fetchAll();
+                    fetchApprovals(); fetchAll(); fetchReturns();
                 } else { ElementPlus.ElMessage.error(data.message); }
             }
 
@@ -1828,7 +2002,7 @@
                 const data = await res.json();
                 if (data.success) {
                     ElementPlus.ElMessage.success(data.message);
-                    fetchApprovals(); fetchLockRequests(); fetchAll();
+                    fetchApprovals(); fetchAll(); fetchReturns();
                 } else { ElementPlus.ElMessage.error(data.message); }
             }
 
@@ -1841,19 +2015,14 @@
                 const data = await res.json();
                 if (data.success) {
                     ElementPlus.ElMessage.success(data.message);
-                    fetchApprovals();
+                    fetchApprovals(); fetchReturns();
                 } else { ElementPlus.ElMessage.error(data.message); }
             }
 
             async function doDeliver(item) {
-                // 通过合同ID找到vehicle_id
                 await ElementPlus.ElMessageBox.confirm(`确认对 ${item.plate_number} 执行出库？`, '车辆出库', { type: 'warning' });
-                // 需要通过合同找到vehicle_id
-                const cRes = await fetch(`/api/contracts`);
-                const allContracts = await cRes.json();
-                const ct = allContracts.find(c => c.id === item.ref_id);
-                if (!ct) { ElementPlus.ElMessage.error('合同未找到'); return; }
-                const res = await fetch(`/api/vehicles/${ct.vehicle_id}/deliver`, { method: 'POST' });
+                if (!item.vehicle_id) { ElementPlus.ElMessage.error('车辆未找到'); return; }
+                const res = await fetch(`/api/vehicles/${item.vehicle_id}/deliver`, { method: 'POST' });
                 const data = await res.json();
                 if (data.success) {
                     ElementPlus.ElMessage.success(data.message);
@@ -1864,8 +2033,10 @@
             // ===== 租期结束入库 =====
             async function returnStockVehicle(row) {
                 await ElementPlus.ElMessageBox.confirm(`确认 ${row.plate_number} 租期结束入库？`, '车辆入库', { type: 'warning' });
-                await fetch(`/api/vehicles/${row.id}/return-stock`, { method: 'POST' });
-                ElementPlus.ElMessage.success('车辆已入库');
+                const res = await fetch(`/api/vehicles/${row.id}/return-stock`, { method: 'POST' });
+                const data = await res.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '车辆入库失败');
+                ElementPlus.ElMessage.success(data.message || '车辆已入库');
                 fetchAll();
             }
 
@@ -1897,6 +2068,25 @@
                     fetchReturns(); fetchAll();
                 } else { ElementPlus.ElMessage.error(data.message); }
             }
+            async function submitReturnApproval(row) {
+                await ElementPlus.ElMessageBox.confirm(`确认提交 ${row.plate_number} 的退车入库审批？`, '提交审批', { type: 'warning' });
+                const res = await fetch(`/api/return-inspections/${row.id}/submit-approval`, { method: 'POST' });
+                const data = await res.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '提交审批失败');
+                ElementPlus.ElMessage.success(data.message || '已提交审批');
+                fetchReturns();
+                fetchApprovals();
+            }
+            async function executeReturnStock(row) {
+                await ElementPlus.ElMessageBox.confirm(`确认对 ${row.plate_number} 执行旧车入库？`, '确认入库', { type: 'warning' });
+                const res = await fetch(`/api/return-inspections/${row.id}/execute-stock`, { method: 'POST' });
+                const data = await res.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '旧车入库失败');
+                ElementPlus.ElMessage.success(data.message || '旧车已入库');
+                fetchReturns();
+                fetchApprovals();
+                fetchAll();
+            }
             function viewReturnDetail(row) {
                 // 查看已有验收单：用数据回填表单
                 Object.assign(returnForm, {
@@ -1923,7 +2113,8 @@
                 showVerifyDialog, verifyTarget, verifySerial,
                 currentRepayments, currentFactoryRepayments, repaymentTab,
                 repaymentLoading, showAddVehicle, showAddContract, showReturnDialog,
-                newVehicle, newContract, returnForm, submitting,
+                showInitialPaymentDialog, initialPaymentTarget,
+                newVehicle, newContract, initialPaymentForm, returnForm, submitting,
                 // 审批中心
                 approvalList, approvalFilter, lockRequests,
                 fetchApprovals, fetchLockRequests,
@@ -1931,10 +2122,13 @@
                 // UI
                 statCards, statusDistribution, filteredVehicles, filteredContracts,
                 numberFormat, statusClass, repayClass, calcOverdueDays, riskLevel,
+                approvalTypeLabel, approvalTypeClass, deliveryStatusClass, returnStatusClass,
+                initialPaymentAmount, initialPaymentType, canInitiateInitialPayment, canSubmitReturnApproval, canExecuteReturnStock,
                 handleMenuSelect, handlePageAction, handleContractExpand, editPrice, deleteVehicle,
                 submitVehicle, submitContract, confirmRepayment, confirmFactoryRepayment, requestLock,
                 deliverVehicle, returnStockVehicle, matchContractVehicle,
-                openReturnForm, onReturnVehicleSelect, submitReturnInspection, viewReturnDetail,
+                openInitialPayment, onInitialScreenshotUpload, submitInitialPayment, onInitialReceiptUpload,
+                openReturnForm, onReturnVehicleSelect, submitReturnInspection, submitReturnApproval, executeReturnStock, viewReturnDetail,
                 onInvoiceUploadSuccess, beforeInvoiceUpload, onContractFileSuccess, beforeContractFileUpload,
                 onReconUpload, openVerifyDialog, submitVerify,
             };

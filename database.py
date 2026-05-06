@@ -173,7 +173,26 @@ def init_db():
     )
     ''')
 
-    # ====== 通用审批流程表（出库审批 / 卖车支付核对 / 锁车审批 / 旧车入库审批）======
+    # ====== 合同首付款/首次支付审核（销售发起 → 财务 → 老板）======
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS contract_initial_payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id INTEGER NOT NULL,
+        payment_type TEXT DEFAULT '首付款',
+        amount REAL DEFAULT 0,
+        customer_screenshot_path TEXT,
+        bank_receipt_path TEXT,
+        status TEXT DEFAULT '待审批',
+        requested_by TEXT,
+        approved_by TEXT,
+        approved_at TEXT,
+        remark TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        FOREIGN KEY (contract_id) REFERENCES contracts (id)
+    )
+    ''')
+
+    # ====== 通用审批流程表（出库审批 / 首付款审核 / 锁车审批 / 旧车入库审批）======
     c.execute('''
     CREATE TABLE IF NOT EXISTS approval_flows (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -326,19 +345,21 @@ def seed_data():
     c = conn.cursor()
 
     # ====== 默认用户（幂等）======
-    c.execute("SELECT COUNT(*) as cnt FROM users")
-    if c.fetchone()['cnt'] == 0:
-        default_users = [
-            ('boss',   '123456', '王老板', '老板'),
-            ('ops',    '123456', '李运营', '运营'),
-            ('fin',    '123456', '张财务', '财务'),
-            ('fleet',  '123456', '赵车管', '车管'),
-            ('sales',  '123456', '周销售', '销售'),
-        ]
-        for u in default_users:
-            c.execute("INSERT INTO users (username, password, display_name, role) VALUES (?,?,?,?)", u)
+    default_users = [
+        ('boss',   '123456', '王老板', '老板'),
+        ('ops',    '123456', '李运营', '运营'),
+        ('legal',  '123456', '刘法务', '法务'),
+        ('fin',    '123456', '张财务', '财务'),
+        ('fleet',  '123456', '赵车管', '车管'),
+        ('sales',  '123456', '周销售', '销售'),
+    ]
+    created_users = 0
+    for u in default_users:
+        c.execute("INSERT OR IGNORE INTO users (username, password, display_name, role) VALUES (?,?,?,?)", u)
+        created_users += c.rowcount
+    if created_users:
         conn.commit()
-        print("Default users created.")
+        print("Default users ensured.")
 
     c.execute("SELECT COUNT(*) as cnt FROM vehicles")
     if c.fetchone()['cnt'] > 0:

@@ -20,18 +20,20 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 ROLE_PAGES = {
     '老板': ['dashboard', 'assets', 'contracts', 'approvals', 'bills', 'reconciliation', 'risk', 'return', 'profit', 'settings'],
     '运营': ['dashboard', 'assets', 'contracts', 'approvals', 'risk', 'return'],
+    '法务': ['dashboard', 'assets', 'contracts', 'approvals'],
     '财务': ['dashboard', 'assets', 'contracts', 'approvals', 'bills', 'reconciliation', 'profit', 'return'],
     '车管': ['dashboard', 'assets', 'contracts', 'approvals', 'return'],
-    '销售': ['dashboard', 'assets', 'contracts', 'approvals', 'bills', 'risk'],
+    '销售': ['dashboard', 'assets', 'contracts', 'approvals', 'bills', 'reconciliation', 'risk', 'return'],
 }
 
 # 每个角色可执行的操作
 ROLE_ACTIONS = {
     '老板': ['*'],
     '运营': ['view_contracts', 'view_overdue', 'lock_vehicle', 'execute_lock', 'confirm_repayment', 'initiate_return'],
-    '财务': ['view_contracts', 'confirm_repayment', 'confirm_factory', 'view_bills', 'view_profit', 'upload_receipt', 'collect_payment', 'verify_return'],
+    '法务': ['view_contracts', 'approve_contract'],
+    '财务': ['view_contracts', 'confirm_repayment', 'confirm_factory', 'view_bills', 'view_profit', 'upload_receipt', 'collect_payment', 'verify_return', 'upload_initial_receipt'],
     '车管': ['add_vehicle', 'update_vehicle', 'activate_vehicle', 'return_inspect', 'deliver_vehicle', 'return_stock'],
-    '销售': ['create_contract', 'view_contracts', 'upload_screenshot', 'view_overdue'],
+    '销售': ['create_contract', 'view_contracts', 'upload_screenshot', 'view_overdue', 'initiate_return', 'request_lock', 'initiate_initial_payment'],
 }
 
 # ======================== 通用审批流程配置 ========================
@@ -39,11 +41,16 @@ APPROVAL_CONFIGS = {
     'contract_delivery': [
         {'step': 1, 'role': '运营', 'label': '运营审核'},
         {'step': 2, 'role': '财务', 'label': '财务审核'},
-        {'step': 3, 'role': '老板', 'label': '老板审批'},
+        {'step': 3, 'role': '法务', 'label': '法务审核'},
+        {'step': 4, 'role': '老板', 'label': '老板审批'},
     ],
     'sale_payment': [
         {'step': 1, 'role': '运营', 'label': '运营发起支付核对'},
         {'step': 2, 'role': '财务', 'label': '财务核对平账'},
+    ],
+    'initial_payment': [
+        {'step': 1, 'role': '财务', 'label': '财务审核收款'},
+        {'step': 2, 'role': '老板', 'label': '老板确认付款'},
     ],
     'lock_request': [
         {'step': 1, 'role': '财务', 'label': '财务审核历史数据'},
@@ -60,7 +67,7 @@ APPROVAL_CONFIGS = {
 def create_approval_flow(conn, ref_type, ref_id):
     """创建审批流程，返回 batch_no"""
     config = APPROVAL_CONFIGS.get(ref_type, [])
-    batch_no = f"{ref_type}_{ref_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    batch_no = f"{ref_type}_{ref_id}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
     for step_cfg in config:
         conn.execute(
             "INSERT INTO approval_flows (ref_type, ref_id, batch_no, step_order, required_role, step_label) VALUES (?,?,?,?,?,?)",
@@ -102,6 +109,20 @@ def get_current_user():
     user = c.fetchone()
     conn.close()
     return dict(user) if user else None
+
+
+def get_initial_payment_amount(contract):
+    """根据合同类型计算首次付款默认金额。"""
+    contract_type = contract['contract_type'] if contract else ''
+    if contract_type == '销售':
+        return float(contract['total_price'] or contract['down_payment'] or 0)
+    return float(contract['deposit'] or 0) + float(contract['down_payment'] or 0) + float(contract['rent'] or 0)
+
+
+def initial_payment_label(contract):
+    if not contract:
+        return '首付款审核'
+    return '卖车付款审核' if contract['contract_type'] == '销售' else '押金及首次支付审核'
 
 
 def login_required(f):
@@ -193,25 +214,12 @@ def log_audit(conn, action, target_type, target_id, detail, operator='系统'):
 
 # ======================== 自动逾期检测 + T+7锁车 ========================
 def check_overdue():
-    """扫描所有到期未还的记录，自动标记为逾期；T+7自动标记锁车"""
+    """扫描所有到期未还的记录，自动标记为逾期。"""
     conn = get_db()
     c = conn.cursor()
     today = datetime.now().strftime('%Y-%m-%d')
     c.execute("UPDATE repayments SET status='逾期' WHERE status='待还款' AND due_date < ?", (today,))
     c.execute("UPDATE factory_repayments SET status='逾期' WHERE status='待还款' AND due_date < ?", (today,))
-
-    # PRD: T+7 自动将车辆状态置为"已锁车"
-    seven_days_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-    c.execute("""
-        SELECT DISTINCT c.vehicle_id FROM repayments r
-        JOIN contracts c ON c.id = r.contract_id
-        JOIN vehicles v ON v.id = c.vehicle_id
-        WHERE r.status = '逾期' AND r.due_date <= ? AND v.status NOT IN ('已锁车', '已结清')
-    """, (seven_days_ago,))
-    lock_vehicles = [row['vehicle_id'] for row in c.fetchall()]
-    for vid in lock_vehicles:
-        c.execute("UPDATE vehicles SET status='已锁车' WHERE id=?", (vid,))
-        log_audit(conn, '自动锁车', 'vehicle', vid, f'逾期超7天系统自动锁车')
 
     conn.commit()
     conn.close()
@@ -478,7 +486,10 @@ def get_contracts():
     c = conn.cursor()
     c.execute("""
         SELECT c.*, v.vin, v.plate_number, v.car_type, v.status as vehicle_status,
-               cu.name as customer_name, cu.phone as customer_phone
+               cu.name as customer_name, cu.phone as customer_phone,
+               (SELECT ip.id FROM contract_initial_payments ip WHERE ip.contract_id=c.id ORDER BY ip.id DESC LIMIT 1) as initial_payment_id,
+               (SELECT ip.status FROM contract_initial_payments ip WHERE ip.contract_id=c.id ORDER BY ip.id DESC LIMIT 1) as initial_payment_status,
+               (SELECT ip.amount FROM contract_initial_payments ip WHERE ip.contract_id=c.id ORDER BY ip.id DESC LIMIT 1) as initial_payment_amount
         FROM contracts c
         JOIN vehicles v ON v.id = c.vehicle_id
         LEFT JOIN customers cu ON cu.id = c.customer_id
@@ -609,6 +620,9 @@ def confirm_repayment(rid):
     if not row:
         conn.close()
         return jsonify({'success': False, 'message': '记录不存在'}), 404
+    if row['status'] == '已还款':
+        conn.close()
+        return jsonify({'success': False, 'message': '该笔客户还款已核销，请勿重复操作'}), 400
     old_status = row['status']
     amount = row['amount']
     contract_id = row['contract_id']
@@ -646,6 +660,9 @@ def confirm_factory_repayment(rid):
     if not row:
         conn.close()
         return jsonify({'success': False, 'message': '记录不存在'}), 404
+    if row['status'] == '已还款':
+        conn.close()
+        return jsonify({'success': False, 'message': '该笔厂家月供已核销，请勿重复操作'}), 400
     old_status = row['status']
     amount = row['amount']
     contract_id = row['contract_id']
@@ -783,6 +800,7 @@ def get_reconciliation_list():
 
 
 @app.route('/api/reconciliation/<int:rid>/screenshot', methods=['POST'])
+@require_role('销售')
 def upload_screenshot(rid):
     """步骤1：销售上传客户付款截图"""
     data = request.json
@@ -799,6 +817,7 @@ def upload_screenshot(rid):
 
 
 @app.route('/api/reconciliation/<int:rid>/receipt', methods=['POST'])
+@require_role('财务')
 def upload_receipt(rid):
     """步骤2：财务上传银行回单"""
     data = request.json
@@ -830,14 +849,20 @@ def verify_reconciliation(rid):
     if not row:
         conn.close()
         return jsonify({'success': False, 'message': '记录不存在'}), 404
+    if row['status'] == '已还款':
+        conn.close()
+        return jsonify({'success': False, 'message': '该笔账单已核销，请勿重复操作'}), 400
     if not row['screenshot_path']:
         conn.close()
         return jsonify({'success': False, 'message': '请先上传付款截图'}), 400
     if not row['bank_receipt_path']:
         conn.close()
         return jsonify({'success': False, 'message': '请先上传银行回单'}), 400
+    if len(bank_serial) < 4:
+        conn.close()
+        return jsonify({'success': False, 'message': '银行流水号至少填写4位'}), 400
 
-    user = session.get('user', {}).get('name', '系统')
+    user = request.current_user['display_name']
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     contract_id = row['contract_id']
     amount = row['amount']
@@ -892,6 +917,93 @@ def collect_payment(cid):
     return jsonify({'success': True, 'message': '收款确认成功'})
 
 
+# ======================== 合同首次付款（销售发起 → 财务收款 → 老板确认）========================
+@app.route('/api/contracts/<int:cid>/initial-payment', methods=['POST'])
+@require_role('销售')
+def create_initial_payment(cid):
+    """合同审批完成后，销售发起首次付款审核。"""
+    data = request.json or {}
+    user = request.current_user
+    screenshot_path = data.get('customer_screenshot_path') or data.get('screenshot_path') or ''
+    if not screenshot_path:
+        return jsonify({'success': False, 'message': '请先上传客户付款截图'}), 400
+
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM contracts WHERE id=?", (cid,))
+        contract = c.fetchone()
+        if not contract:
+            return jsonify({'success': False, 'message': '合同不存在'}), 404
+        if contract['delivery_status'] not in ('待首付款', '首付已驳回'):
+            return jsonify({'success': False, 'message': f'当前状态为{contract["delivery_status"]}，不能发起首次付款'}), 400
+
+        c.execute("""
+            SELECT id, status FROM contract_initial_payments
+            WHERE contract_id=? AND status IN ('待审批', '审批中', '已通过')
+            ORDER BY id DESC LIMIT 1
+        """, (cid,))
+        existing = c.fetchone()
+        if existing:
+            return jsonify({'success': False, 'message': f'已有首次付款记录（状态: {existing["status"]}），请勿重复发起'}), 400
+
+        default_amount = get_initial_payment_amount(contract)
+        amount = data.get('amount', default_amount)
+        try:
+            amount = float(amount or 0)
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'message': '付款金额格式不正确'}), 400
+        if amount <= 0:
+            return jsonify({'success': False, 'message': '首次付款金额必须大于0'}), 400
+
+        payment_type = data.get('payment_type') or initial_payment_label(contract)
+        c.execute("""
+            INSERT INTO contract_initial_payments
+                (contract_id, payment_type, amount, customer_screenshot_path, status, requested_by, remark)
+            VALUES (?, ?, ?, ?, '审批中', ?, ?)
+        """, (cid, payment_type, amount, screenshot_path, user['display_name'], data.get('remark', '')))
+        payment_id = c.lastrowid
+        create_approval_flow(conn, 'initial_payment', payment_id)
+        c.execute("UPDATE contracts SET delivery_status='首付审批中' WHERE id=?", (cid,))
+        log_audit(conn, '发起首次付款', 'initial_payment', payment_id,
+                  f'合同{cid} {payment_type} 金额{amount} 销售{user["display_name"]}', user['display_name'])
+        conn.commit()
+        return jsonify({'success': True, 'id': payment_id, 'message': '首次付款已提交，等待财务审核收款'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 400
+    finally:
+        conn.close()
+
+
+@app.route('/api/initial-payments/<int:pid>/receipt', methods=['POST'])
+@require_role('财务')
+def upload_initial_payment_receipt(pid):
+    """财务上传公司到账/银行回单，之后才能审核通过首付款。"""
+    data = request.json or {}
+    receipt_path = data.get('bank_receipt_path') or data.get('receipt_path') or ''
+    if not receipt_path:
+        return jsonify({'success': False, 'message': '请上传公司收款回单'}), 400
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM contract_initial_payments WHERE id=?", (pid,))
+    payment = c.fetchone()
+    if not payment:
+        conn.close()
+        return jsonify({'success': False, 'message': '首次付款记录不存在'}), 404
+    if payment['status'] == '已通过':
+        conn.close()
+        return jsonify({'success': False, 'message': '该首次付款已审核通过，不能重复上传回单'}), 400
+
+    c.execute("UPDATE contract_initial_payments SET bank_receipt_path=? WHERE id=?", (receipt_path, pid))
+    log_audit(conn, '上传首次付款回单', 'initial_payment', pid,
+              f'财务上传公司收款回单 {receipt_path}', request.current_user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '公司收款回单已上传'})
+
+
 # ======================== 租期结束车辆入库（车管操作）========================
 @app.route('/api/vehicles/<int:vid>/return-stock', methods=['POST'])
 @require_role('车管')
@@ -918,6 +1030,7 @@ def get_return_inspections():
 
 
 @app.route('/api/return-inspections', methods=['POST'])
+@require_role('销售', '车管')
 def create_return_inspection():
     data = request.json
     conn = get_db()
@@ -966,15 +1079,6 @@ def create_return_inspection():
 
     rid = c.lastrowid
 
-    # 车辆标记为二手车入库
-    if vehicle_id:
-        c.execute("UPDATE vehicles SET status='在库', is_new='二手车' WHERE id=?", (vehicle_id,))
-
-    # 合同标记已结清
-    contract_id = data.get('contract_id')
-    if contract_id:
-        c.execute("UPDATE contracts SET contract_status='已结清' WHERE id=?", (contract_id,))
-
     log_audit(conn, '退还车辆验收', 'return_inspection', rid,
               f"车牌{data.get('plate_number','')} 客户{data.get('customer_name','')} 原因{data.get('return_reason','')}")
     conn.commit()
@@ -1014,74 +1118,214 @@ def get_approvals():
     ref_type = request.args.get('ref_type', '')
     conn = get_db()
     c = conn.cursor()
-    user = request.current_user
-
-    query = """
-        SELECT af.*, c.vehicle_id, c.contract_type, c.total_price, c.rent, c.monthly_payment,
-               c.loan_periods, c.deposit, c.down_payment, c.start_date, c.end_date,
-               c.contract_file, c.business_mode, c.created_at as contract_created_at,
-               v.vin, v.plate_number, v.car_type,
-               cu.name as customer_name, cu.phone as customer_phone,
-               c.delivery_status
-        FROM approval_flows af
-        JOIN contracts c ON c.id = af.ref_id AND af.ref_type IN ('contract_delivery','sale_payment')
-        JOIN vehicles v ON v.id = c.vehicle_id
-        LEFT JOIN customers cu ON cu.id = c.customer_id
-    """
     params = []
-    conditions = []
+    query = "SELECT * FROM approval_flows"
     if ref_type:
-        conditions.append("af.ref_type = ?")
+        query += " WHERE ref_type = ?"
         params.append(ref_type)
-
-    # 所有角色都能看到全部审批流程（前端按角色控制操作按钮）
-
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY af.batch_no DESC, af.step_order ASC"
+    query += " ORDER BY id DESC"
 
     c.execute(query, params)
     rows = [dict(r) for r in c.fetchall()]
 
-    # 按 ref_type+ref_id 分组，附加当前步骤信息
     grouped = {}
-    for r in rows:
-        key = f"{r['ref_type']}_{r['ref_id']}"
-        if key not in grouped:
-            grouped[key] = {
-                'ref_type': r['ref_type'], 'ref_id': r['ref_id'],
-                'plate_number': r['plate_number'], 'car_type': r['car_type'],
-                'vin': r['vin'],
-                'customer_name': r['customer_name'],
-                'customer_phone': r.get('customer_phone', ''),
-                'contract_type': r['contract_type'],
-                'delivery_status': r['delivery_status'],
-                'total_price': r['total_price'], 'rent': r['rent'],
-                'monthly_payment': r.get('monthly_payment', 0),
-                'loan_periods': r.get('loan_periods', 0),
-                'deposit': r.get('deposit', 0),
-                'down_payment': r.get('down_payment', 0),
-                'start_date': r.get('start_date', ''),
-                'end_date': r.get('end_date', ''),
-                'contract_file': r.get('contract_file', ''),
-                'business_mode': r.get('business_mode', ''),
-                'created_at': r.get('contract_created_at', ''),
-                'steps': [], 'current_step': 0, 'overall_status': '已完成'
-            }
-        grouped[key]['steps'].append(r)
+    latest_batches = {}
+    for row in rows:
+        key = (row['ref_type'], row['ref_id'])
+        if key not in latest_batches:
+            latest_batches[key] = row['batch_no']
+            grouped[key] = []
+        if row['batch_no'] == latest_batches[key]:
+            grouped[key].append(row)
+
+    def build_item(base_ref_type, base_ref_id):
+        item = {
+            'ref_type': base_ref_type,
+            'ref_id': base_ref_id,
+            'vehicle_id': None,
+            'plate_number': '',
+            'car_type': '',
+            'vin': '',
+            'customer_name': '',
+            'customer_phone': '',
+            'contract_type': '',
+            'delivery_status': '',
+            'total_price': 0,
+            'rent': 0,
+            'monthly_payment': 0,
+            'loan_periods': 0,
+            'deposit': 0,
+            'down_payment': 0,
+            'start_date': '',
+            'end_date': '',
+            'contract_file': '',
+            'business_mode': '',
+            'created_at': '',
+            'return_reason': '',
+            'reason': '',
+            'overdue_days': 0,
+            'requested_by': '',
+            'steps': [],
+            'current_step': 0,
+            'overall_status': '已完成',
+        }
+
+        if base_ref_type in ('contract_delivery', 'sale_payment'):
+            c.execute("""
+                SELECT c.*, v.vin, v.plate_number, v.car_type,
+                       cu.name as customer_name, cu.phone as customer_phone
+                FROM contracts c
+                JOIN vehicles v ON v.id = c.vehicle_id
+                LEFT JOIN customers cu ON cu.id = c.customer_id
+                WHERE c.id = ?
+            """, (base_ref_id,))
+            row = c.fetchone()
+            if not row:
+                return item
+            row = dict(row)
+            item.update({
+                'vehicle_id': row['vehicle_id'],
+                'plate_number': row['plate_number'],
+                'car_type': row['car_type'],
+                'vin': row['vin'],
+                'customer_name': row.get('customer_name', ''),
+                'customer_phone': row.get('customer_phone', ''),
+                'contract_type': row.get('contract_type', ''),
+                'delivery_status': row.get('delivery_status', ''),
+                'total_price': row.get('total_price', 0),
+                'rent': row.get('rent', 0),
+                'monthly_payment': row.get('monthly_payment', 0),
+                'loan_periods': row.get('loan_periods', 0),
+                'deposit': row.get('deposit', 0),
+                'down_payment': row.get('down_payment', 0),
+                'start_date': row.get('start_date', ''),
+                'end_date': row.get('end_date', ''),
+                'contract_file': row.get('contract_file', ''),
+                'business_mode': row.get('business_mode', ''),
+                'created_at': row.get('created_at', ''),
+            })
+            return item
+
+        if base_ref_type == 'initial_payment':
+            c.execute("""
+                SELECT ip.id as initial_payment_id, ip.payment_type, ip.amount as initial_payment_amount,
+                       ip.customer_screenshot_path, ip.bank_receipt_path, ip.status as initial_payment_status,
+                       ip.requested_by, ip.remark as initial_payment_remark, ip.created_at as initial_payment_created_at,
+                       c.*, v.vin, v.plate_number, v.car_type,
+                       cu.name as customer_name, cu.phone as customer_phone
+                FROM contract_initial_payments ip
+                JOIN contracts c ON c.id = ip.contract_id
+                JOIN vehicles v ON v.id = c.vehicle_id
+                LEFT JOIN customers cu ON cu.id = c.customer_id
+                WHERE ip.id = ?
+            """, (base_ref_id,))
+            row = c.fetchone()
+            if not row:
+                return item
+            row = dict(row)
+            item.update({
+                'vehicle_id': row['vehicle_id'],
+                'plate_number': row['plate_number'],
+                'car_type': row['car_type'],
+                'vin': row['vin'],
+                'customer_name': row.get('customer_name', ''),
+                'customer_phone': row.get('customer_phone', ''),
+                'contract_type': row.get('contract_type', ''),
+                'delivery_status': row.get('delivery_status', ''),
+                'total_price': row.get('total_price', 0),
+                'rent': row.get('rent', 0),
+                'monthly_payment': row.get('monthly_payment', 0),
+                'loan_periods': row.get('loan_periods', 0),
+                'deposit': row.get('deposit', 0),
+                'down_payment': row.get('down_payment', 0),
+                'start_date': row.get('start_date', ''),
+                'end_date': row.get('end_date', ''),
+                'contract_file': row.get('contract_file', ''),
+                'business_mode': row.get('business_mode', ''),
+                'created_at': row.get('initial_payment_created_at') or row.get('created_at', ''),
+                'initial_payment_id': row.get('initial_payment_id'),
+                'initial_payment_type': row.get('payment_type', ''),
+                'initial_payment_amount': row.get('initial_payment_amount', 0),
+                'initial_payment_status': row.get('initial_payment_status', ''),
+                'customer_screenshot_path': row.get('customer_screenshot_path', ''),
+                'bank_receipt_path': row.get('bank_receipt_path', ''),
+                'requested_by': row.get('requested_by', ''),
+                'initial_payment_remark': row.get('initial_payment_remark', ''),
+            })
+            return item
+
+        if base_ref_type == 'lock_request':
+            c.execute("""
+                SELECT lr.*, v.vin, v.plate_number, v.car_type,
+                       cu.name as customer_name, cu.phone as customer_phone,
+                       c.contract_type, c.business_mode
+                FROM lock_requests lr
+                JOIN vehicles v ON v.id = lr.vehicle_id
+                LEFT JOIN contracts c ON c.id = lr.contract_id
+                LEFT JOIN customers cu ON cu.id = c.customer_id
+                WHERE lr.id = ?
+            """, (base_ref_id,))
+            row = c.fetchone()
+            if not row:
+                return item
+            row = dict(row)
+            item.update({
+                'vehicle_id': row['vehicle_id'],
+                'plate_number': row.get('plate_number', ''),
+                'car_type': row.get('car_type', ''),
+                'vin': row.get('vin', ''),
+                'customer_name': row.get('customer_name', ''),
+                'customer_phone': row.get('customer_phone', ''),
+                'contract_type': row.get('contract_type', ''),
+                'business_mode': row.get('business_mode', ''),
+                'created_at': row.get('created_at', ''),
+                'reason': row.get('reason', ''),
+                'overdue_days': row.get('overdue_days', 0),
+                'requested_by': row.get('requested_by', ''),
+            })
+            return item
+
+        if base_ref_type == 'return_stock':
+            c.execute("""
+                SELECT ri.*, v.vin as vehicle_vin, v.plate_number as vehicle_plate_number, v.car_type as vehicle_car_type
+                FROM return_inspections ri
+                LEFT JOIN vehicles v ON v.id = ri.vehicle_id
+                WHERE ri.id = ?
+            """, (base_ref_id,))
+            row = c.fetchone()
+            if not row:
+                return item
+            row = dict(row)
+            item.update({
+                'vehicle_id': row.get('vehicle_id'),
+                'plate_number': row.get('plate_number') or row.get('vehicle_plate_number', ''),
+                'car_type': row.get('car_type') or row.get('vehicle_car_type', ''),
+                'vin': row.get('vin') or row.get('vehicle_vin', ''),
+                'customer_name': row.get('customer_name', ''),
+                'contract_type': '退车入库',
+                'created_at': row.get('created_at', ''),
+                'return_reason': row.get('return_reason', ''),
+                'delivery_status': row.get('status', ''),
+            })
+            return item
+
+        return item
 
     result = []
-    for key, g in grouped.items():
-        latest_batch = g['steps'][0]['batch_no']
-        g['steps'] = [s for s in g['steps'] if s['batch_no'] == latest_batch]
-        for s in g['steps']:
+    for (base_ref_type, base_ref_id), steps in grouped.items():
+        steps.sort(key=lambda s: s['step_order'])
+        item = build_item(base_ref_type, base_ref_id)
+        item['steps'] = steps
+        for s in steps:
             if s['status'] == '已驳回':
-                g['overall_status'] = '已驳回'
+                item['overall_status'] = '已驳回'
                 break
-            if s['status'] == '待审批' and g['current_step'] == 0:
-                g['current_step'] = s['step_order']
-                g['overall_status'] = '审批中'
-        result.append(g)
+            if s['status'] == '待审批' and item['current_step'] == 0:
+                item['current_step'] = s['step_order']
+                item['overall_status'] = '审批中'
+        result.append(item)
+
+    result.sort(key=lambda x: x['created_at'] or '', reverse=True)
 
     conn.close()
     return jsonify(result)
@@ -1108,7 +1352,7 @@ def approve_step(flow_id):
         return jsonify({'success': False, 'message': '该步骤已处理'}), 400
 
     # 检查前序步骤是否都已通过
-    c.execute("SELECT * FROM approval_flows WHERE batch_no=? AND step_order<? AND status!='已通过'",
+    c.execute("SELECT * FROM approval_flows WHERE batch_no=? AND step_order<? AND status NOT IN ('已通过', '已取消')",
               (flow['batch_no'], flow['step_order']))
     if c.fetchone():
         conn.close()
@@ -1117,6 +1361,14 @@ def approve_step(flow_id):
     if user['role'] != flow['required_role'] and user['role'] != '老板':
         conn.close()
         return jsonify({'success': False, 'message': f'需要{flow["required_role"]}角色审批'}), 403
+
+    # 首次付款的财务审核必须先上传公司到账/银行回单。
+    if flow['ref_type'] == 'initial_payment' and flow['required_role'] == '财务':
+        c.execute("SELECT bank_receipt_path FROM contract_initial_payments WHERE id=?", (flow['ref_id'],))
+        payment = c.fetchone()
+        if not payment or not payment['bank_receipt_path']:
+            conn.close()
+            return jsonify({'success': False, 'message': '请先上传公司收款回单，再进行财务审核'}), 400
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     c.execute("UPDATE approval_flows SET status='已通过', operator_id=?, operator_name=?, comment=?, acted_at=? WHERE id=?",
@@ -1134,21 +1386,68 @@ def approve_step(flow_id):
     if pending == 0:
         # 所有步骤都已通过
         if ref_type == 'contract_delivery':
-            c.execute("SELECT contract_type, vehicle_id FROM contracts WHERE id=?", (ref_id,))
-            ct = c.fetchone()
-            if ct and ct['contract_type'] == '销售':
-                # 卖车合同 → 进入支付核对
-                c.execute("UPDATE contracts SET delivery_status='待支付核对' WHERE id=?", (ref_id,))
-                create_approval_flow(conn, 'sale_payment', ref_id)
-                message = '出库审批通过，卖车合同进入支付核对流程'
-            else:
-                # 租赁/以租代售 → 待出库
-                c.execute("UPDATE contracts SET delivery_status='待出库' WHERE id=?", (ref_id,))
-                message = '出库审批通过，等待车管出库'
+            # 流程图要求：销售发起的合同（租赁/销售/以租代售）审批全走完后，
+            # 不能直接出库，必须先由销售发起首次付款。
+            c.execute("UPDATE contracts SET delivery_status='待首付款' WHERE id=?", (ref_id,))
+            message = '合同审批通过，请销售发起首次付款'
         elif ref_type == 'sale_payment':
             # 支付核对完成 → 待出库
             c.execute("UPDATE contracts SET delivery_status='待出库' WHERE id=?", (ref_id,))
             message = '支付核对完成，等待车管出库'
+        elif ref_type == 'initial_payment':
+            c.execute("""
+                SELECT ip.*, c.contract_type, c.deposit, c.down_payment, c.rent
+                FROM contract_initial_payments ip
+                JOIN contracts c ON c.id = ip.contract_id
+                WHERE ip.id=?
+            """, (ref_id,))
+            payment = c.fetchone()
+            if payment:
+                contract_id = payment['contract_id']
+                updates = ["delivery_status='待出库'"]
+                params = []
+                if (payment['deposit'] or 0) > 0:
+                    updates.append("deposit_status='已收'")
+                    updates.append("collected_deposit=?")
+                    params.append(payment['deposit'])
+                if (payment['down_payment'] or 0) > 0 or payment['contract_type'] == '销售':
+                    updates.append("down_payment_status='已收'")
+                if payment['contract_type'] != '销售' and (payment['rent'] or 0) > 0:
+                    updates.append("collected_rent=COALESCE(collected_rent,0)+?")
+                    params.append(payment['rent'])
+                params.append(contract_id)
+                c.execute(f"UPDATE contracts SET {', '.join(updates)} WHERE id=?", params)
+                if payment['contract_type'] != '销售' and (payment['rent'] or 0) > 0:
+                    # 首次付款包含“首次支付金额/首期租金”时，直接核销第 1 期客户还款，
+                    # 避免后续对账再核销同一笔租金造成重复入账。
+                    c.execute("""
+                        UPDATE repayments
+                        SET status='已还款',
+                            paid_at=?,
+                            screenshot_path=COALESCE(screenshot_path, ?),
+                            bank_receipt_path=COALESCE(bank_receipt_path, ?),
+                            bank_serial=COALESCE(bank_serial, ?),
+                            verified_by=COALESCE(verified_by, ?),
+                            verified_at=COALESCE(verified_at, ?),
+                            remark=COALESCE(remark, '首次付款审核自动核销首期租金')
+                        WHERE id=(
+                            SELECT id FROM repayments
+                            WHERE contract_id=? AND status!='已还款'
+                            ORDER BY period ASC
+                            LIMIT 1
+                        )
+                    """, (
+                        datetime.now().strftime('%Y-%m-%d'),
+                        payment['customer_screenshot_path'],
+                        payment['bank_receipt_path'],
+                        f"INITIAL-{ref_id}",
+                        user['display_name'],
+                        now,
+                        contract_id,
+                    ))
+                c.execute("UPDATE contract_initial_payments SET status='已通过', approved_by=?, approved_at=? WHERE id=?",
+                          (user['display_name'], now, ref_id))
+            message = '首次付款审核完成，等待车管出库'
         elif ref_type == 'lock_request':
             c.execute("UPDATE lock_requests SET status='已通过', approved_by=?, approved_at=? WHERE id=?",
                       (user['display_name'], now, ref_id))
@@ -1168,6 +1467,12 @@ def approve_step(flow_id):
         # 更新合同状态显示当前审批进度
         if ref_type == 'contract_delivery':
             c.execute("UPDATE contracts SET delivery_status='审批中' WHERE id=?", (ref_id,))
+        elif ref_type == 'initial_payment':
+            c.execute("""
+                UPDATE contracts
+                SET delivery_status='首付审批中'
+                WHERE id=(SELECT contract_id FROM contract_initial_payments WHERE id=?)
+            """, (ref_id,))
 
     log_audit(conn, '审批通过', ref_type, ref_id,
               f'{user["display_name"]}({user["role"]}) 通过 {flow["step_label"]}')
@@ -1213,6 +1518,13 @@ def reject_step(flow_id):
     # 更新父实体状态
     if ref_type in ('contract_delivery', 'sale_payment'):
         c.execute("UPDATE contracts SET delivery_status='已驳回' WHERE id=?", (ref_id,))
+    elif ref_type == 'initial_payment':
+        c.execute("UPDATE contract_initial_payments SET status='已驳回' WHERE id=?", (ref_id,))
+        c.execute("""
+            UPDATE contracts
+            SET delivery_status='首付已驳回'
+            WHERE id=(SELECT contract_id FROM contract_initial_payments WHERE id=?)
+        """, (ref_id,))
     elif ref_type == 'lock_request':
         c.execute("UPDATE lock_requests SET status='已驳回' WHERE id=?", (ref_id,))
     elif ref_type == 'return_stock':
@@ -1236,6 +1548,13 @@ def resubmit_approval(ref_id):
 
     if ref_type in ('contract_delivery', 'sale_payment'):
         c.execute("UPDATE contracts SET delivery_status='待审批' WHERE id=?", (ref_id,))
+    elif ref_type == 'initial_payment':
+        c.execute("UPDATE contract_initial_payments SET status='审批中' WHERE id=?", (ref_id,))
+        c.execute("""
+            UPDATE contracts
+            SET delivery_status='首付审批中'
+            WHERE id=(SELECT contract_id FROM contract_initial_payments WHERE id=?)
+        """, (ref_id,))
     elif ref_type == 'return_stock':
         c.execute("UPDATE return_inspections SET status='待审批' WHERE id=?", (ref_id,))
 
@@ -1248,12 +1567,16 @@ def resubmit_approval(ref_id):
 
 @app.route('/api/contracts/<int:cid>/approval-status', methods=['GET'])
 def get_contract_approval_status(cid):
-    """获取合同的审批状态（出库审批+支付核对）"""
+    """获取合同的审批状态（合同审批+首次付款/兼容旧支付核对）"""
     conn = get_db()
     delivery = get_approval_status(conn, 'contract_delivery', cid)
     payment = get_approval_status(conn, 'sale_payment', cid)
+    c = conn.cursor()
+    c.execute("SELECT id FROM contract_initial_payments WHERE contract_id=? ORDER BY id DESC LIMIT 1", (cid,))
+    initial_row = c.fetchone()
+    initial_payment = get_approval_status(conn, 'initial_payment', initial_row['id']) if initial_row else {'overall_status': '未开始', 'steps': []}
     conn.close()
-    return jsonify({'delivery': delivery, 'payment': payment})
+    return jsonify({'delivery': delivery, 'payment': payment, 'initial_payment': initial_payment})
 
 
 # ======================== 车辆出库（车管确认 - 需审批通过后）========================
@@ -1364,30 +1687,50 @@ def get_lock_requests():
 
 
 @app.route('/api/lock-requests', methods=['POST'])
-@login_required
+@require_role('销售')
 def create_lock_request():
     """销售 T+5 发起锁车申请"""
-    data = request.json
+    data = request.json or {}
     user = request.current_user
     conn = get_db()
     c = conn.cursor()
 
-    # 验证逾期天数 >= 5
-    overdue_days = data.get('overdue_days', 0)
+    repayment_id = data.get('repayment_id')
+    c.execute("""
+        SELECT r.id, r.contract_id, r.due_date, r.status, c.vehicle_id
+        FROM repayments r
+        JOIN contracts c ON c.id = r.contract_id
+        WHERE r.id = ?
+    """, (repayment_id,))
+    repayment = c.fetchone()
+    if not repayment:
+        conn.close()
+        return jsonify({'success': False, 'message': '还款记录不存在'}), 404
+
+    overdue_days = max(0, (datetime.now() - datetime.strptime(repayment['due_date'], '%Y-%m-%d')).days)
     if overdue_days < 5 and user['role'] != '老板':
         conn.close()
         return jsonify({'success': False, 'message': 'T+5 之后才能发起锁车申请'}), 400
 
+    c.execute("""
+        SELECT id FROM lock_requests
+        WHERE repayment_id=? AND status IN ('待审批', '已通过')
+        ORDER BY id DESC LIMIT 1
+    """, (repayment_id,))
+    if c.fetchone():
+        conn.close()
+        return jsonify({'success': False, 'message': '该笔逾期已存在有效锁车申请'}), 400
+
     c.execute("""INSERT INTO lock_requests (vehicle_id, contract_id, repayment_id, reason, overdue_days, requested_by)
                  VALUES (?, ?, ?, ?, ?, ?)""",
-              (data.get('vehicle_id'), data.get('contract_id'), data.get('repayment_id'),
+              (repayment['vehicle_id'], repayment['contract_id'], repayment_id,
                data.get('reason', '逾期锁车'), overdue_days, user['display_name']))
     lr_id = c.lastrowid
 
     # 创建锁车审批流（财务→老板）
     create_approval_flow(conn, 'lock_request', lr_id)
 
-    log_audit(conn, '锁车申请', 'vehicle', data.get('vehicle_id'),
+    log_audit(conn, '锁车申请', 'vehicle', repayment['vehicle_id'],
               f'逾期{overdue_days}天 发起人:{user["display_name"]}')
     conn.commit()
     conn.close()
@@ -1396,7 +1739,7 @@ def create_lock_request():
 
 # ======================== 旧车入库审批（退车后：运营→财务→老板→车管）========================
 @app.route('/api/return-inspections/<int:rid>/submit-approval', methods=['POST'])
-@login_required
+@require_role('销售', '车管')
 def submit_return_approval(rid):
     """验收单提交审批"""
     conn = get_db()
