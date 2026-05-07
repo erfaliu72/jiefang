@@ -94,13 +94,19 @@ class FullFlowTestCase(unittest.TestCase):
             "vehicle_id": vehicle_id,
             "customer_name": f"测试客户{vehicle_id}",
             "customer_phone": f"1380000{vehicle_id:04d}",
+            "company": "陕西金聚源汽车服务有限公司",
+            "yard": "西安一号车场",
             "contract_type": contract_type,
             "business_mode": business_mode,
             "rental_method": "经营租赁",
             "repayment_day": 15,
             "start_date": "2026-01-01",
             "loan_periods": 12,
+            "customer_loan_amount": 24000,
             "rent": 3000,
+            "factory_guarantee_deposit": 1500,
+            "factory_repayment_months": 12,
+            "factory_periods": 12,
             "monthly_payment": 2500,
             "deposit": 2000,
             "down_payment": 1000,
@@ -197,7 +203,24 @@ class FullFlowTestCase(unittest.TestCase):
         self.approve_latest_flow("initial_payment", payment_id)
         return payment_id
 
+    def upload_delivery_files(self, contract_id, username="fleet"):
+        self.login(username)
+        response = self.client.post(
+            f"/api/contracts/{contract_id}/delivery-files",
+            json={
+                "delivery_photo_path": "/uploads/delivery-photo.png",
+                "delivery_document_path": "/uploads/delivery-document.png",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.logout()
+
     def deliver_vehicle(self, vehicle_id):
+        contract_id = self.db_value(
+            "SELECT id FROM contracts WHERE vehicle_id=? ORDER BY id DESC LIMIT 1",
+            (vehicle_id,),
+        )
+        self.upload_delivery_files(contract_id)
         self.login("fleet")
         response = self.client.post(f"/api/vehicles/{vehicle_id}/deliver", json={})
         self.assertEqual(response.status_code, 200, response.get_json())
@@ -270,6 +293,9 @@ class FullFlowTestCase(unittest.TestCase):
             self.db_value("SELECT delivery_status FROM contracts WHERE id=?", (contract_id,)),
             "待首付款",
         )
+        contract_clause = self.db_value("SELECT company, yard FROM contracts WHERE id=?", (contract_id,))
+        self.assertEqual(contract_clause["company"], "陕西金聚源汽车服务有限公司")
+        self.assertEqual(contract_clause["yard"], "西安一号车场")
 
         self.login("fleet")
         premature_delivery = self.client.post(f"/api/vehicles/{vehicle_id}/deliver", json={})
@@ -290,6 +316,11 @@ class FullFlowTestCase(unittest.TestCase):
             self.db_value("SELECT delivery_status FROM contracts WHERE id=?", (contract_id,)),
             "待出库",
         )
+
+        self.login("fleet")
+        delivery_without_files = self.client.post(f"/api/vehicles/{vehicle_id}/deliver", json={})
+        self.assertEqual(delivery_without_files.status_code, 400, delivery_without_files.get_json())
+        self.logout()
 
         self.deliver_vehicle(vehicle_id)
         self.assertEqual(
@@ -603,7 +634,7 @@ class FullFlowTestCase(unittest.TestCase):
 
         legal_user = self.login("legal")
         self.assertEqual(legal_user["role"], "法务")
-        self.assertIn("contracts", legal_user["pages"])
+        self.assertNotIn("contracts", legal_user["pages"])
         self.assertIn("approvals", legal_user["pages"])
         self.assertNotIn("reconciliation", legal_user["pages"])
         legal_recon = self.client.post(
@@ -611,6 +642,25 @@ class FullFlowTestCase(unittest.TestCase):
             json={"screenshot_path": "/uploads/legal-x.png"},
         )
         self.assertEqual(legal_recon.status_code, 403, legal_recon.get_json())
+        self.logout()
+
+        self.login("sales")
+        sales_delivery_files = self.client.post(
+            f"/api/contracts/{contract_id}/delivery-files",
+            json={"delivery_photo_path": "/uploads/not-allowed.png"},
+        )
+        self.assertEqual(sales_delivery_files.status_code, 403, sales_delivery_files.get_json())
+        self.logout()
+
+        self.login("boss")
+        boss_delivery_files = self.client.post(
+            f"/api/contracts/{contract_id}/delivery-files",
+            json={
+                "delivery_photo_path": "/uploads/boss-delivery-photo.png",
+                "delivery_document_path": "/uploads/boss-delivery-doc.png",
+            },
+        )
+        self.assertEqual(boss_delivery_files.status_code, 200, boss_delivery_files.get_json())
         self.logout()
 
         self.login("sales")

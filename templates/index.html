@@ -71,6 +71,7 @@
                        @click="handleMenuSelect(item.key)">
                         <span class="nav-icon" v-html="item.svg"></span>
                         <span class="nav-label">{{ item.label }}</span>
+                        <span v-if="item.key === 'approvals' && pendingApprovalCount" style="width:8px;height:8px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,0.14)"></span>
                     </a>
                 </nav>
 
@@ -98,9 +99,9 @@
                         <el-button v-if="pageMeta[currentPage].action && canAction(currentPage)" type="primary" class="primary-action-btn" @click="handlePageAction">
                             <el-icon><Plus/></el-icon> {{ pageMeta[currentPage].action }}
                         </el-button>
-                        <div class="header-notif" @click="hasPage('risk') && (currentPage='risk')">
+                        <div class="header-notif" @click="openApprovalReminderCenter">
                             <el-icon :size="20"><Bell/></el-icon>
-                            <span class="notif-dot" v-if="stats.overdue_count"></span>
+                            <span class="notif-dot" v-if="pendingApprovalCount"></span>
                         </div>
                         <div class="header-user">
                             <el-avatar :size="32" :style="{background: roleColor(currentUser.role)}">{{ currentUser.display_name[0] }}</el-avatar>
@@ -159,10 +160,11 @@
                                 <el-select v-model="assetFilter" placeholder="全部状态" clearable style="width: 140px">
                                     <el-option label="全部状态" value=""></el-option>
                                     <el-option label="在库" value="在库"></el-option>
-                                    <el-option label="租赁中" value="租赁中"></el-option>
-                                    <el-option label="以租代售" value="以租代售"></el-option>
-                                    <el-option label="已售" value="已售"></el-option>
-                                    <el-option label="经营租赁" value="经营租赁"></el-option>
+                                    <el-option label="待出库（合同流程中）" value="待出库（合同流程中）"></el-option>
+                                    <el-option label="待出库（首付款支付中）" value="待出库（首付款支付中）"></el-option>
+                                    <el-option label="已经出库（已售）" value="已经出库（已售）"></el-option>
+                                    <el-option label="已经出库（租赁）" value="已经出库（租赁）"></el-option>
+                                    <el-option label="已经出库（以租代售）" value="已经出库（以租代售）"></el-option>
                                     <el-option label="已锁车" value="已锁车"></el-option>
                                     <el-option label="已结清" value="已结清"></el-option>
                                 </el-select>
@@ -176,70 +178,19 @@
                         </div>
                         <div class="card" style="margin-top: 16px;">
                             <div class="card-title-row">
-                                <div class="card-title">车辆列表</div>
-                                <span class="card-count">共 {{ filteredVehicles.length }} 台车辆</span>
+                                <div class="card-title">车辆全景表</div>
+                                <span class="card-count">共 {{ filteredAssetRows.length }} 台车辆</span>
                             </div>
-                            <el-table :data="filteredVehicles" style="width: 100%" stripe>
-                                <el-table-column type="index" label="#" width="50"></el-table-column>
-                                <el-table-column prop="vin" label="车架号 (VIN)" width="200">
-                                    <template #default="s"><span class="mono-text">{{ s.row.vin }}</span></template>
-                                </el-table-column>
-                                <el-table-column prop="plate_number" label="车牌号" width="120"></el-table-column>
-                                <el-table-column prop="car_type" label="车型" width="160"></el-table-column>
-                                <el-table-column prop="is_new" label="类型" width="80">
-                                    <template #default="s">
-                                        <el-tag :type="s.row.is_new==='新车' ? 'primary' : 'info'" size="small" round>{{ s.row.is_new }}</el-tag>
-                                    </template>
-                                </el-table-column>
-                                <el-table-column prop="invoice_date" label="开票日期" width="110"></el-table-column>
-                                <el-table-column label="发票价" width="110" sortable sort-by="invoice_price">
-                                    <template #default="s"><span class="num">¥{{ numberFormat(s.row.invoice_price) }}</span></template>
-                                </el-table-column>
-                                <el-table-column prop="status" label="状态" width="110">
-                                    <template #default="s">
-                                        <span class="status-badge" :class="statusClass(s.row.status)">{{ s.row.status }}</span>
-                                    </template>
-                                </el-table-column>
-                                <el-table-column label="操作" width="200" fixed="right">
-                                    <template #default="s">
-                                        <el-button v-if="['车管','老板'].includes(currentUser.role) && ['以租代售','租赁中','经营租赁'].includes(s.row.status)" type="warning" size="small" round @click="deliverVehicle(s.row)">出库</el-button>
-                                        <el-button v-if="['车管','老板'].includes(currentUser.role) && ['租赁中','经营租赁'].includes(s.row.status)" type="success" size="small" round @click="returnStockVehicle(s.row)">入库</el-button>
-                                        <el-popconfirm v-if="currentUser.role==='老板'" title="确认删除？" @confirm="deleteVehicle(s.row.id)">
-                                            <template #reference>
-                                                <el-button link type="danger" size="small"><el-icon><Delete/></el-icon></el-button>
-                                            </template>
-                                        </el-popconfirm>
-                                    </template>
-                                </el-table-column>
-                            </el-table>
-                        </div>
-                    </div>
-
-
-                    <!-- ================== CONTRACTS ================== -->
-                    <div v-if="currentPage === 'contracts'" class="page fade-in">
-                        <div class="card">
-                            <div class="card-toolbar">
-                                <el-input v-model="contractSearch" placeholder="搜索客户姓名、车牌号..." class="toolbar-search" clearable>
-                                    <template #prefix><el-icon><Search/></el-icon></template>
-                                </el-input>
-                                <el-select v-model="contractFilter" placeholder="业务模式" clearable style="width: 140px">
-                                    <el-option label="全部模式" value=""></el-option>
-                                    <el-option label="转租" value="转租"></el-option>
-                                    <el-option label="以租代售" value="以租代售"></el-option>
-                                    <el-option label="卖车" value="卖车"></el-option>
-                                </el-select>
-                            </div>
-                        </div>
-                        <div class="card" style="margin-top: 16px;">
-                            <div class="card-title-row">
-                                <div class="card-title">合同列表</div>
-                                <span class="card-count">共 {{ filteredContracts.length }} 份合同</span>
-                            </div>
-                            <el-table :data="filteredContracts" style="width: 100%" stripe @expand-change="handleContractExpand">
+                            <el-table
+                                :data="filteredAssetRows"
+                                class="asset-panorama-table"
+                                style="width: 100%"
+                                stripe
+                                max-height="calc(100vh - 300px)"
+                                @expand-change="handleContractExpand">
                                 <el-table-column type="expand">
                                     <template #default="props">
-                                        <div class="expand-box" v-loading="repaymentLoading">
+                                        <div v-if="props.row.contract_id" class="expand-box" v-loading="repaymentLoading">
                                             <div style="display:flex;gap:24px;margin-bottom:12px;">
                                                 <el-radio-group v-model="repaymentTab" size="small">
                                                     <el-radio-button label="customer">客户还款（客户→公司）</el-radio-button>
@@ -267,22 +218,38 @@
                                                 </el-table-column>
                                             </el-table>
                                         </div>
+                                        <div v-else style="padding:18px 8px;color:#9ca3af">当前车辆暂无合同明细</div>
                                     </template>
                                 </el-table-column>
-                                <el-table-column prop="plate_number" label="车牌号" width="110"></el-table-column>
-                                <el-table-column prop="vin" label="车架号" width="180">
-                                    <template #default="s"><span style="font-family:monospace;font-size:12px">{{ s.row.vin || '-' }}</span></template>
+                                <el-table-column type="index" label="#" width="50"></el-table-column>
+                                <el-table-column prop="vin" label="车架号 (VIN)" width="190">
+                                    <template #default="s"><span class="mono-text">{{ s.row.vin }}</span></template>
                                 </el-table-column>
-                                <el-table-column prop="customer_name" label="客户" width="80">
+                                <el-table-column prop="plate_number" label="车牌号" width="110"></el-table-column>
+                                <el-table-column prop="car_type" label="车型" width="160"></el-table-column>
+                                <el-table-column prop="is_new" label="类型" width="80">
+                                    <template #default="s">
+                                        <el-tag :type="s.row.is_new==='新车' ? 'primary' : 'info'" size="small" round>{{ s.row.is_new }}</el-tag>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column prop="customer_name" label="客户" width="90">
                                     <template #default="s">{{ s.row.customer_name || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="contract_type" label="合同类型" width="100">
+                                    <template #default="s">{{ s.row.contract_type || '-' }}</template>
                                 </el-table-column>
                                 <el-table-column prop="business_mode" label="模式" width="80">
                                     <template #default="s">
-                                        <el-tag size="small" :type="{'转租':'primary','以租代售':'warning','卖车':'success'}[s.row.business_mode]||'info'" round>{{ s.row.business_mode }}</el-tag>
+                                        <el-tag v-if="s.row.business_mode" size="small" :type="{'转租':'primary','以租代售':'warning','卖车':'success'}[s.row.business_mode]||'info'" round>{{ s.row.business_mode }}</el-tag>
+                                        <span v-else style="color:#9ca3af">-</span>
                                     </template>
                                 </el-table-column>
+                                <el-table-column prop="invoice_date" label="开票日期" width="110"></el-table-column>
+                                <el-table-column label="发票价" width="110" sortable sort-by="invoice_price">
+                                    <template #default="s"><span class="num">¥{{ numberFormat(s.row.invoice_price) }}</span></template>
+                                </el-table-column>
                                 <el-table-column label="出厂价" width="100">
-                                    <template #default="s"><span class="num">¥{{ numberFormat(s.row.snapshot_invoice_price || s.row.invoice_price) }}</span></template>
+                                    <template #default="s"><span class="num">¥{{ numberFormat(s.row.snapshot_invoice_price || s.row.invoice_price || 0) }}</span></template>
                                 </el-table-column>
                                 <el-table-column label="售价/总价" width="100">
                                     <template #default="s"><span class="num" style="font-weight:600;color:#2563eb">{{ s.row.total_price ? '¥' + numberFormat(s.row.total_price) : '-' }}</span></template>
@@ -306,29 +273,43 @@
                                 <el-table-column label="已收租金" width="110">
                                     <template #default="s"><span class="num text-blue">¥{{ numberFormat(s.row.collected_rent) }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="合同状态" width="90">
+                                <el-table-column label="状态" width="180">
                                     <template #default="s">
-                                        <span class="status-badge" :class="{'执行中':'badge-blue','已结清':'badge-green','逾期中':'badge-red'}[s.row.contract_status]||'badge-gray'">{{ s.row.contract_status }}</span>
+                                        <span class="status-badge" :class="assetStatusClass(s.row.asset_status)">{{ s.row.asset_status }}</span>
                                     </template>
                                 </el-table-column>
-                                <el-table-column label="交付状态" width="110">
+                                <el-table-column label="合同状态" width="100">
                                     <template #default="s">
-                                        <span class="status-badge" :class="deliveryStatusClass(s.row.delivery_status)">{{ s.row.delivery_status || '-' }}</span>
+                                        <span v-if="s.row.contract_status" class="status-badge" :class="{'执行中':'badge-blue','已结清':'badge-green','逾期中':'badge-red'}[s.row.contract_status]||'badge-gray'">{{ s.row.contract_status }}</span>
+                                        <span v-else style="color:#9ca3af">-</span>
                                     </template>
                                 </el-table-column>
-                                <el-table-column label="操作" width="150" fixed="right">
+                                <el-table-column label="交付状态" width="120">
                                     <template #default="s">
-                                        <el-button v-if="canInitiateInitialPayment(s.row)" type="warning" size="small" round @click="openInitialPayment(s.row)">
-                                            发起首次付款
-                                        </el-button>
-                                        <span v-else-if="s.row.initial_payment_status" style="font-size:12px;color:#6b7280">首付：{{ s.row.initial_payment_status }}</span>
+                                        <span v-if="s.row.delivery_status" class="status-badge" :class="deliveryStatusClass(s.row.delivery_status)">{{ s.row.delivery_status }}</span>
+                                        <span v-else style="color:#9ca3af">-</span>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="首次支付状态" width="120">
+                                    <template #default="s">
+                                        <span v-if="s.row.initial_payment_status" class="status-badge" :class="deliveryStatusClass(s.row.initial_payment_status)">{{ s.row.initial_payment_status }}</span>
                                         <span v-else style="font-size:12px;color:#9ca3af">-</span>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="操作" width="200" fixed="right">
+                                    <template #default="s">
+                                        <el-button v-if="['车管','老板'].includes(currentUser.role) && s.row.delivery_status==='待出库'" type="warning" size="small" round @click="doDeliver(s.row)">出库</el-button>
+                                        <el-button v-if="['车管','老板'].includes(currentUser.role) && ['租赁中','经营租赁'].includes(s.row.vehicle_status)" type="success" size="small" round @click="returnStockVehicle(s.row)">入库</el-button>
+                                        <el-popconfirm v-if="currentUser.role==='老板'" title="确认删除？" @confirm="deleteVehicle(s.row.id)">
+                                            <template #reference>
+                                                <el-button link type="danger" size="small"><el-icon><Delete/></el-icon></el-button>
+                                            </template>
+                                        </el-popconfirm>
                                     </template>
                                 </el-table-column>
                             </el-table>
                         </div>
                     </div>
-
                     <!-- ================== BILLS ================== -->
                     <div v-if="currentPage === 'bills'" class="page fade-in">
                         <div class="stat-cards three-cols">
@@ -428,73 +409,136 @@
                         <div style="display:flex;gap:12px;margin-top:16px">
                             <div class="card" style="flex:1;padding:16px;cursor:pointer" @click="reconFilter=''" :style="reconFilter===''?'border:2px solid #3b82f6':''">
                                 <div style="font-size:13px;color:#6b7280">全部</div>
-                                <div style="font-size:24px;font-weight:700">{{ reconList.length }}</div>
+                                <div style="font-size:24px;font-weight:700">{{ reconSummary.totalGroups }}</div>
+                                <div style="font-size:12px;color:#9ca3af;margin-top:4px">{{ reconSummary.totalItems }} 期分期</div>
                             </div>
                             <div class="card" style="flex:1;padding:16px;cursor:pointer" @click="reconFilter='待核销'" :style="reconFilter==='待核销'?'border:2px solid #f59e0b':''">
                                 <div style="font-size:13px;color:#d97706">待核销</div>
-                                <div style="font-size:24px;font-weight:700;color:#d97706">{{ reconList.filter(r=>r.status!=='已还款').length }}</div>
+                                <div style="font-size:24px;font-weight:700;color:#d97706">{{ reconSummary.pendingGroups }}</div>
+                                <div style="font-size:12px;color:#f59e0b;margin-top:4px">{{ reconSummary.pendingItems }} 期待处理</div>
                             </div>
                             <div class="card" style="flex:1;padding:16px;cursor:pointer" @click="reconFilter='已核销'" :style="reconFilter==='已核销'?'border:2px solid #16a34a':''">
                                 <div style="font-size:13px;color:#16a34a">已核销</div>
-                                <div style="font-size:24px;font-weight:700;color:#16a34a">{{ reconList.filter(r=>r.status==='已还款').length }}</div>
+                                <div style="font-size:24px;font-weight:700;color:#16a34a">{{ reconSummary.doneGroups }}</div>
+                                <div style="font-size:12px;color:#16a34a;margin-top:4px">{{ reconSummary.doneItems }} 期已核销</div>
                             </div>
                         </div>
                         <!-- 对账单列表 -->
                         <div class="card" style="margin-top: 16px">
                             <div class="card-title-row">
-                                <div class="card-title">对账单列表</div>
+                                <div class="card-title">对账单列表（按客户归并）</div>
                                 <el-input v-model="reconSearch" placeholder="搜索车牌号、客户..." clearable style="width:220px">
                                     <template #prefix><el-icon><Search/></el-icon></template>
                                 </el-input>
                             </div>
-                            <el-table :data="filteredReconList" style="width:100%" stripe max-height="600" v-if="filteredReconList.length">
-                                <el-table-column prop="plate_number" label="车牌号" width="110"></el-table-column>
-                                <el-table-column prop="customer_name" label="客户" width="90">
+                            <el-table ref="reconTableRef" :data="filteredGroupedReconList" style="width:100%" stripe max-height="600" row-key="group_key" :expand-row-keys="reconExpandedKeys" @expand-change="onReconExpandChange" v-if="filteredGroupedReconList.length">
+                                <el-table-column type="expand" width="56">
+                                    <template #default="scope">
+                                        <div style="padding:8px 12px 4px 12px;background:#fafafa;border-radius:12px">
+                                            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+                                                <div style="font-size:13px;color:#4b5563">
+                                                    <b style="color:#111827">{{ scope.row.customer_name || '-' }}</b>
+                                                    <span style="margin:0 8px;color:#d1d5db">|</span>
+                                                    <span>{{ scope.row.plate_number || '未绑定车牌' }}</span>
+                                                    <span style="margin:0 8px;color:#d1d5db">|</span>
+                                                    <span>{{ scope.row.period_summary }}</span>
+                                                </div>
+                                                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                                                    <span class="status-badge badge-orange">待核销 {{ scope.row.pending_count }} 期</span>
+                                                    <span class="status-badge badge-green">已核销 {{ scope.row.done_count }} 期</span>
+                                                </div>
+                                            </div>
+                                            <el-table :data="scope.row.items" size="small" stripe style="width:100%">
+                                                <el-table-column prop="period" label="期数" width="70"></el-table-column>
+                                                <el-table-column prop="due_date" label="应还日期" width="120"></el-table-column>
+                                                <el-table-column label="金额" width="110">
+                                                    <template #default="s"><span class="num">¥{{ numberFormat(s.row.amount) }}</span></template>
+                                                </el-table-column>
+                                                <el-table-column label="核销进度" min-width="190">
+                                                    <template #default="s">
+                                                        <div style="display:flex;align-items:center;gap:4px">
+                                                            <span :style="{width:'24px',height:'24px',borderRadius:'50%',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:'12px',background: s.row.reconciliation_step>=1?'#16a34a':'#e5e7eb',color: s.row.reconciliation_step>=1?'#fff':'#9ca3af'}">📸</span>
+                                                            <span style="color:#d1d5db">→</span>
+                                                            <span :style="{width:'24px',height:'24px',borderRadius:'50%',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:'12px',background: s.row.reconciliation_step>=2?'#16a34a':'#e5e7eb',color: s.row.reconciliation_step>=2?'#fff':'#9ca3af'}">🏦</span>
+                                                            <span style="color:#d1d5db">→</span>
+                                                            <span :style="{width:'24px',height:'24px',borderRadius:'50%',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:'12px',background: s.row.reconciliation_step>=3?'#16a34a':'#e5e7eb',color: s.row.reconciliation_step>=3?'#fff':'#9ca3af'}">🔢</span>
+                                                            <span style="color:#d1d5db">→</span>
+                                                            <span :style="{width:'24px',height:'24px',borderRadius:'50%',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:'12px',background: s.row.reconciliation_step>=4?'#16a34a':'#e5e7eb',color: s.row.reconciliation_step>=4?'#fff':'#9ca3af'}">✅</span>
+                                                        </div>
+                                                    </template>
+                                                </el-table-column>
+                                                <el-table-column label="状态" width="100">
+                                                    <template #default="s">
+                                                        <span class="status-badge" :class="s.row.status==='已还款'?'badge-green':s.row.status==='逾期'?'badge-red':'badge-orange'">{{ s.row.status }}</span>
+                                                    </template>
+                                                </el-table-column>
+                                                <el-table-column label="操作" min-width="220">
+                                                    <template #default="s">
+                                                        <div style="display:flex;gap:6px;flex-wrap:wrap">
+                                                            <el-upload v-if="!s.row.screenshot_path" action="/api/upload" :show-file-list="false"
+                                                                :on-success="(res) => onReconUpload(s.row.id, 'screenshot', res)" accept=".jpg,.jpeg,.png">
+                                                                <el-button size="small" type="warning" plain>📸 上传截图</el-button>
+                                                            </el-upload>
+                                                            <el-button v-else size="small" type="success" plain disabled>📸 已上传</el-button>
+                                                            <el-upload v-if="s.row.screenshot_path && !s.row.bank_receipt_path" action="/api/upload" :show-file-list="false"
+                                                                :on-success="(res) => onReconUpload(s.row.id, 'receipt', res)" accept=".jpg,.jpeg,.png,.pdf">
+                                                                <el-button size="small" type="primary" plain>🏦 上传回单</el-button>
+                                                            </el-upload>
+                                                            <el-button v-else-if="s.row.bank_receipt_path" size="small" type="success" plain disabled>🏦 已上传</el-button>
+                                                            <el-button v-if="s.row.bank_receipt_path && !s.row.bank_serial && s.row.status!=='已还款'"
+                                                                size="small" type="danger" @click="openVerifyDialog(s.row)">🔢 录入流水号</el-button>
+                                                            <el-button v-else-if="s.row.bank_serial" size="small" type="success" plain disabled>✅ {{ s.row.bank_serial }}</el-button>
+                                                        </div>
+                                                    </template>
+                                                </el-table-column>
+                                            </el-table>
+                                        </div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column prop="plate_number" label="车牌号" width="120"></el-table-column>
+                                <el-table-column prop="customer_name" label="客户" width="110">
                                     <template #default="s">{{ s.row.customer_name || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="period" label="期数" width="60"></el-table-column>
-                                <el-table-column prop="due_date" label="应还日期" width="110"></el-table-column>
-                                <el-table-column label="金额" width="100">
-                                    <template #default="s"><span class="num">¥{{ numberFormat(s.row.amount) }}</span></template>
-                                </el-table-column>
-                                <el-table-column label="核销进度" width="200">
+                                <el-table-column label="分期概览" min-width="170">
                                     <template #default="s">
-                                        <div style="display:flex;align-items:center;gap:4px">
-                                            <span :style="{width:'24px',height:'24px',borderRadius:'50%',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:'12px',background: s.row.reconciliation_step>=1?'#16a34a':'#e5e7eb',color: s.row.reconciliation_step>=1?'#fff':'#9ca3af'}">📸</span>
-                                            <span style="color:#d1d5db">→</span>
-                                            <span :style="{width:'24px',height:'24px',borderRadius:'50%',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:'12px',background: s.row.reconciliation_step>=2?'#16a34a':'#e5e7eb',color: s.row.reconciliation_step>=2?'#fff':'#9ca3af'}">🏦</span>
-                                            <span style="color:#d1d5db">→</span>
-                                            <span :style="{width:'24px',height:'24px',borderRadius:'50%',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:'12px',background: s.row.reconciliation_step>=3?'#16a34a':'#e5e7eb',color: s.row.reconciliation_step>=3?'#fff':'#9ca3af'}">🔢</span>
-                                            <span style="color:#d1d5db">→</span>
-                                            <span :style="{width:'24px',height:'24px',borderRadius:'50%',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:'12px',background: s.row.reconciliation_step>=4?'#16a34a':'#e5e7eb',color: s.row.reconciliation_step>=4?'#fff':'#9ca3af'}">✅</span>
+                                        <div style="display:flex;flex-direction:column;gap:4px">
+                                            <span style="font-weight:600;color:#1f2937">{{ s.row.period_summary }}</span>
+                                            <span style="font-size:12px;color:#9ca3af">点击左侧箭头查看每一期</span>
                                         </div>
                                     </template>
                                 </el-table-column>
-                                <el-table-column label="状态" width="90">
+                                <el-table-column label="最近待处理" width="140">
                                     <template #default="s">
-                                        <span class="status-badge" :class="s.row.status==='已还款'?'badge-green':s.row.status==='逾期'?'badge-red':'badge-orange'">{{ s.row.status }}</span>
+                                        <span>{{ s.row.next_due_date || s.row.latest_due_date || '-' }}</span>
                                     </template>
                                 </el-table-column>
-                                <el-table-column label="操作" min-width="220">
+                                <el-table-column label="待核销金额" width="130">
                                     <template #default="s">
-                                        <div style="display:flex;gap:6px;flex-wrap:wrap">
-                                            <!-- 步骤1: 上传截图 -->
-                                            <el-upload v-if="!s.row.screenshot_path" action="/api/upload" :show-file-list="false"
-                                                :on-success="(res) => onReconUpload(s.row.id, 'screenshot', res)" accept=".jpg,.jpeg,.png">
-                                                <el-button size="small" type="warning" plain>📸 上传截图</el-button>
-                                            </el-upload>
-                                            <el-button v-else size="small" type="success" plain disabled>📸 已上传</el-button>
-                                            <!-- 步骤2: 上传回单 -->
-                                            <el-upload v-if="s.row.screenshot_path && !s.row.bank_receipt_path" action="/api/upload" :show-file-list="false"
-                                                :on-success="(res) => onReconUpload(s.row.id, 'receipt', res)" accept=".jpg,.jpeg,.png,.pdf">
-                                                <el-button size="small" type="primary" plain>🏦 上传回单</el-button>
-                                            </el-upload>
-                                            <el-button v-else-if="s.row.bank_receipt_path" size="small" type="success" plain disabled>🏦 已上传</el-button>
-                                            <!-- 步骤3: 录入流水号 -->
-                                            <el-button v-if="s.row.bank_receipt_path && !s.row.bank_serial && s.row.status!=='已还款'"
-                                                size="small" type="danger" @click="openVerifyDialog(s.row)">🔢 录入流水号</el-button>
-                                            <el-button v-else-if="s.row.bank_serial" size="small" type="success" plain disabled>✅ {{ s.row.bank_serial }}</el-button>
+                                        <div style="display:flex;flex-direction:column">
+                                            <span class="num">¥{{ numberFormat(s.row.pending_amount) }}</span>
+                                            <span style="font-size:12px;color:#9ca3af">总额 ¥{{ numberFormat(s.row.total_amount) }}</span>
                                         </div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="进度概览" min-width="180">
+                                    <template #default="s">
+                                        <div style="display:flex;flex-wrap:wrap;gap:6px">
+                                            <span class="status-badge" style="background:#eff6ff;color:#2563eb">截图 {{ s.row.screenshot_count }}/{{ s.row.items.length }}</span>
+                                            <span class="status-badge" style="background:#ecfeff;color:#0891b2">回单 {{ s.row.receipt_count }}/{{ s.row.items.length }}</span>
+                                            <span class="status-badge" style="background:#f5f3ff;color:#7c3aed">流水 {{ s.row.serial_count }}/{{ s.row.items.length }}</span>
+                                        </div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="状态" width="120">
+                                    <template #default="s">
+                                        <span class="status-badge" :class="reconGroupStatusClass(s.row)">{{ reconGroupStatusText(s.row) }}</span>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="操作" width="120" fixed="right">
+                                    <template #default="s">
+                                        <el-button size="small" type="primary" plain @click="toggleReconGroup(s.row)">
+                                            {{ s.row.expanded ? '收起明细' : '查看明细' }}
+                                        </el-button>
                                     </template>
                                 </el-table-column>
                             </el-table>
@@ -528,11 +572,53 @@
 
                     <!-- ================== 审批中心 ================== -->
                     <div v-if="currentPage === 'approvals'" class="page fade-in">
+                        <div v-if="pendingApprovalCount" class="card" style="margin-bottom:20px;padding:18px 20px;border:1px solid #fecaca;background:linear-gradient(135deg,#fff7ed 0%,#ffffff 100%)">
+                            <div class="card-title-row" style="margin-bottom:12px">
+                                <div class="card-title" style="display:flex;align-items:center;gap:10px">
+                                    <span>提醒中心</span>
+                                    <span class="badge badge-red">待处理 {{ pendingApprovalCount }}</span>
+                                </div>
+                                <span class="card-count">点击即可跳转到对应审批卡片</span>
+                            </div>
+                            <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));gap:12px">
+                                <div v-for="item in pendingApprovalItems" :key="'reminder_' + item.ref_type + '_' + item.ref_id"
+                                    style="padding:14px 16px;border-radius:12px;border:1px solid #fed7aa;background:#ffffff;display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+                                    <div>
+                                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+                                            <span class="badge" :class="approvalTypeClass(item.ref_type)">{{ approvalTypeLabel(item.ref_type) }}</span>
+                                            <strong>{{ approvalVehicleLabel(item) }}</strong>
+                                        </div>
+                                        <div style="font-size:13px;color:#374151;margin-bottom:4px">{{ currentApprovalStepLabel(item) }}</div>
+                                        <div style="font-size:12px;color:#9ca3af">{{ item.customer_name || item.car_type || '请进入审批中心处理' }}</div>
+                                    </div>
+                                    <el-button type="danger" plain size="small" @click="focusApprovalItem(item)">去处理</el-button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div v-if="canLaunchApprovalActions" class="card" style="margin-bottom:20px;padding:18px 20px">
+                            <div class="card-title-row" style="margin-bottom:12px">
+                                <div class="card-title">发起审批</div>
+                                <span class="card-count">仅销售和超管可见</span>
+                            </div>
+                            <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+                                <el-button type="primary" @click="showAddContract = true">
+                                    <el-icon><Plus/></el-icon> 发起合同审批
+                                </el-button>
+                                <el-button type="warning" plain @click="openInitialPaymentPicker">
+                                    <el-icon><CreditCard/></el-icon> 首次支付审批
+                                </el-button>
+                                <span style="font-size:12px;color:#9ca3af">
+                                    首次支付审批会从“待首付款 / 首付已驳回”的合同中选择。
+                                </span>
+                            </div>
+                        </div>
+
                         <!-- 筛选 -->
                         <div class="card" style="margin-bottom:20px;padding:16px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
                             <el-radio-group v-model="approvalFilter" @change="fetchApprovals">
                                 <el-radio-button label="">全部</el-radio-button>
-                                <el-radio-button label="contract_delivery">出库审批</el-radio-button>
+                                <el-radio-button label="contract_delivery">合同审批</el-radio-button>
                                 <el-radio-button label="initial_payment">首次付款</el-radio-button>
                                 <el-radio-button label="sale_payment">支付核对(旧)</el-radio-button>
                                 <el-radio-button label="lock_request">锁车审批</el-radio-button>
@@ -547,14 +633,22 @@
                             <p style="font-size:16px;margin:0">暂无待审批事项</p>
                         </div>
 
-                        <div v-for="item in approvalList" :key="item.ref_type+'_'+item.ref_id" class="card" style="margin-bottom:16px;padding:20px">
+                        <div v-for="item in approvalList" :key="item.ref_type+'_'+item.ref_id"
+                            :id="approvalCardId(item)"
+                            class="card"
+                            :style="{
+                                marginBottom:'16px',
+                                padding:'20px',
+                                border: isPendingApproval(item) ? '1px solid #fdba74' : '1px solid transparent',
+                                boxShadow: isPendingApproval(item) ? '0 12px 32px rgba(249,115,22,0.08)' : ''
+                            }">
                             <!-- 头部信息 -->
                             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
                                 <div style="display:flex;align-items:center;gap:12px">
                                     <span class="badge" :class="approvalTypeClass(item.ref_type)">
                                         {{ approvalTypeLabel(item.ref_type) }}
                                     </span>
-                                    <span style="font-weight:700;font-size:16px">{{ item.plate_number }}</span>
+                                    <span style="font-weight:700;font-size:16px">{{ approvalVehicleLabel(item) }}</span>
                                     <span v-if="item.contract_type" class="badge badge-gray">{{ item.contract_type }}</span>
                                     <span class="badge" :class="{'badge-green': item.overall_status==='已完成', 'badge-red': item.overall_status==='已驳回', 'badge-blue': item.overall_status==='审批中'}">
                                         {{ item.overall_status }}
@@ -631,6 +725,13 @@
                                         </a>
                                     </div>
                                 </div>
+                                <div v-if="item.delivery_photo_path || item.delivery_document_path" style="margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0">
+                                    <span style="color:#9ca3af;font-size:12px">出库资料：</span>
+                                    <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;align-items:center">
+                                        <a v-if="item.delivery_photo_path" :href="item.delivery_photo_path" target="_blank" class="badge badge-orange">出库照片</a>
+                                        <a v-if="item.delivery_document_path" :href="item.delivery_document_path" target="_blank" class="badge badge-blue">出库单照片</a>
+                                    </div>
+                                </div>
                             </div>
 
                             <!-- 审批进度条 -->
@@ -660,8 +761,8 @@
                                     }"></div>
                                 </template>
                                 <!-- 出库步骤（车管） -->
-                                <div v-if="['contract_delivery','sale_payment','initial_payment'].includes(item.ref_type) && item.delivery_status!=='已出库'" style="flex:0.6;height:2px;background:#e5e7eb"></div>
-                                <div v-if="['contract_delivery','sale_payment','initial_payment'].includes(item.ref_type)" style="flex:1;text-align:center;position:relative;z-index:1">
+                                <div v-if="['sale_payment','initial_payment'].includes(item.ref_type) && item.delivery_status!=='已出库'" style="flex:0.6;height:2px;background:#e5e7eb"></div>
+                                <div v-if="['sale_payment','initial_payment'].includes(item.ref_type)" style="flex:1;text-align:center;position:relative;z-index:1">
                                     <div :style="{
                                         width:'36px',height:'36px',borderRadius:'50%',margin:'0 auto 6px',
                                         display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700,fontSize:'14px',
@@ -1053,10 +1154,41 @@
                             </el-form-item>
                         </el-col>
                     </el-row>
+                    <el-divider content-position="left">合同条款</el-divider>
+                    <el-row :gutter="16">
+                        <el-col :span="8">
+                            <el-form-item label="公司">
+                                <el-input v-model="newContract.company" placeholder="请输入公司名称"></el-input>
+                            </el-form-item>
+                        </el-col>
+                        <el-col :span="8">
+                            <el-form-item label="车场">
+                                <el-input v-model="newContract.yard" placeholder="请输入车场名称"></el-input>
+                            </el-form-item>
+                        </el-col>
+                        <el-col :span="8">
+                            <el-form-item label="贷款金额">
+                                <el-input-number v-model="newContract.loan_amount" :min="0" :step="1000" style="width:100%"></el-input-number>
+                            </el-form-item>
+                        </el-col>
+                    </el-row>
+                    <el-row :gutter="16">
+                        <el-col :span="8">
+                            <el-form-item label="首付款">
+                                <el-input-number v-model="newContract.down_payment" :min="0" :step="1000" style="width:100%"></el-input-number>
+                            </el-form-item>
+                        </el-col>
+                        <el-col :span="8">
+                            <el-form-item label="押金">
+                                <el-input-number v-model="newContract.deposit" :min="0" :step="500" style="width:100%"></el-input-number>
+                            </el-form-item>
+                        </el-col>
+                    </el-row>
                 </template>
                 <!-- 以租代售 和 租赁 都需要还款信息 -->
                 <template v-else>
                     <el-divider content-position="left">合同条款</el-divider>
+                    <div style="margin-bottom:14px;font-size:13px;font-weight:700;color:#1f2937">一、金聚源给客户分期</div>
                     <el-row :gutter="16">
                         <el-col :span="8">
                             <el-form-item label="T日（每月还款日）">
@@ -1074,28 +1206,8 @@
                             </el-form-item>
                         </el-col>
                     </el-row>
-                    <el-divider content-position="left">还款信息</el-divider>
                     <el-row :gutter="16">
                         <el-col :span="8">
-                            <el-form-item label="客户每期还款（客户→公司）">
-                                <el-input-number v-model="newContract.rent" :min="0" :step="100" style="width:100%"></el-input-number>
-                            </el-form-item>
-                        </el-col>
-                        <el-col :span="8">
-                            <el-form-item label="厂家月供（公司→解放）">
-                                <el-input-number v-model="newContract.monthly_payment" :min="0" :step="100" style="width:100%"></el-input-number>
-                            </el-form-item>
-                        </el-col>
-                        <el-col :span="8">
-                            <el-form-item label="月利差预估">
-                                <div style="line-height:32px;font-size:18px;font-weight:700" :style="{color: (newContract.rent - newContract.monthly_payment) >= 0 ? '#059669' : '#ef4444'}">
-                                    ¥{{ (newContract.rent - newContract.monthly_payment).toLocaleString() }}
-                                </div>
-                            </el-form-item>
-                        </el-col>
-                    </el-row>
-                    <el-row :gutter="16">
-                        <el-col :span="8" v-if="newContract.contract_type === '以租代售'">
                             <el-form-item label="首付款">
                                 <el-input-number v-model="newContract.down_payment" :min="0" :step="1000" style="width:100%"></el-input-number>
                             </el-form-item>
@@ -1106,8 +1218,54 @@
                             </el-form-item>
                         </el-col>
                         <el-col :span="8">
+                            <el-form-item label="客户贷款额度">
+                                <el-input-number v-model="newContract.customer_loan_amount" :min="0" :step="1000" style="width:100%"></el-input-number>
+                            </el-form-item>
+                        </el-col>
+                    </el-row>
+                    <el-row :gutter="16">
+                        <el-col :span="8">
+                            <el-form-item label="每期贷款额">
+                                <el-input-number v-model="newContract.rent" :min="0" :step="100" style="width:100%"></el-input-number>
+                                <div style="font-size:12px;color:#9ca3af;margin-top:4px">
+                                    不能低于客户贷款额度 ÷ 期数
+                                </div>
+                            </el-form-item>
+                        </el-col>
+                    </el-row>
+
+                    <el-divider content-position="left">车场分期</el-divider>
+                    <div style="margin-bottom:14px;font-size:13px;font-weight:700;color:#1f2937">二、金聚源和解放车场的分期</div>
+                    <el-row :gutter="16">
+                        <el-col :span="8">
+                            <el-form-item label="保障金">
+                                <el-input-number v-model="newContract.factory_guarantee_deposit" :min="0" :step="500" style="width:100%"></el-input-number>
+                            </el-form-item>
+                        </el-col>
+                        <el-col :span="8">
                             <el-form-item label="贷款金额">
                                 <el-input-number v-model="newContract.loan_amount" :min="0" :step="1000" style="width:100%"></el-input-number>
+                            </el-form-item>
+                        </el-col>
+                    </el-row>
+                    <el-row :gutter="16">
+                        <el-col :span="8">
+                            <el-form-item label="期数">
+                                <el-input-number v-model="newContract.factory_periods" :min="0" :max="120" style="width:100%"></el-input-number>
+                            </el-form-item>
+                        </el-col>
+                        <el-col :span="8">
+                            <el-form-item label="每月还款金额">
+                                <el-input-number v-model="newContract.monthly_payment" :min="0" :step="100" style="width:100%"></el-input-number>
+                            </el-form-item>
+                        </el-col>
+                    </el-row>
+                    <el-row :gutter="16">
+                        <el-col :span="8">
+                            <el-form-item label="月利差预估">
+                                <div style="line-height:32px;font-size:18px;font-weight:700" :style="{color: (newContract.rent - newContract.monthly_payment) >= 0 ? '#059669' : '#ef4444'}">
+                                    ¥{{ (newContract.rent - newContract.monthly_payment).toLocaleString() }}
+                                </div>
                             </el-form-item>
                         </el-col>
                     </el-row>
@@ -1166,6 +1324,75 @@
             <template #footer>
                 <el-button @click="showInitialPaymentDialog = false">取消</el-button>
                 <el-button type="primary" @click="submitInitialPayment" :loading="submitting">提交首次付款</el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog v-model="showInitialPaymentPicker" title="选择首次支付审批合同" width="820" :close-on-click-modal="false">
+            <div v-if="eligibleInitialPaymentContracts.length === 0" style="padding:24px 0;text-align:center;color:#9ca3af">
+                暂无可发起首次支付审批的合同
+            </div>
+            <el-table v-else :data="eligibleInitialPaymentContracts" style="width:100%" stripe>
+                <el-table-column prop="plate_number" label="车牌号" width="110"></el-table-column>
+                <el-table-column prop="vin" label="车架号" width="180">
+                    <template #default="s"><span style="font-family:monospace;font-size:12px">{{ s.row.vin || '-' }}</span></template>
+                </el-table-column>
+                <el-table-column prop="customer_name" label="客户" width="100"></el-table-column>
+                <el-table-column prop="contract_type" label="合同类型" width="100"></el-table-column>
+                <el-table-column prop="business_mode" label="业务模式" width="100"></el-table-column>
+                <el-table-column prop="delivery_status" label="交付状态" width="120">
+                    <template #default="s">
+                        <span class="status-badge" :class="deliveryStatusClass(s.row.delivery_status)">{{ s.row.delivery_status }}</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="默认首次支付金额" width="150">
+                    <template #default="s">
+                        <span class="num text-blue">¥{{ numberFormat(initialPaymentAmount(s.row)) }}</span>
+                    </template>
+                </el-table-column>
+                <el-table-column label="操作" width="140" fixed="right">
+                    <template #default="s">
+                        <el-button type="warning" size="small" round @click="selectInitialPaymentContract(s.row)">发起首次支付</el-button>
+                    </template>
+                </el-table-column>
+            </el-table>
+            <template #footer>
+                <el-button @click="showInitialPaymentPicker = false">关闭</el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog v-model="showDeliveryDialog" title="出库资料与出库确认" width="560" :close-on-click-modal="false">
+            <div v-if="deliveryTarget" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 16px;margin-bottom:16px">
+                <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px">
+                    <span>车牌：<b>{{ deliveryTarget.plate_number }}</b></span>
+                    <span>客户：<b>{{ deliveryTarget.customer_name || '-' }}</b></span>
+                    <span>交付状态：<b>{{ deliveryTarget.delivery_status || '-' }}</b></span>
+                </div>
+                <div style="font-size:12px;color:#9ca3af;margin-top:6px">
+                    车管端和老板端需先上传出库照片、出库单照片，保存后才能正式出库。
+                </div>
+            </div>
+            <el-form :model="deliveryForm" label-position="top">
+                <el-form-item label="出库照片">
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+                        <el-upload action="/api/upload" :show-file-list="false" :on-success="onDeliveryFileUpload('delivery_photo_path')" accept=".jpg,.jpeg,.png,.pdf">
+                            <el-button type="warning" plain>上传出库照片</el-button>
+                        </el-upload>
+                        <a v-if="deliveryForm.delivery_photo_path" :href="deliveryForm.delivery_photo_path" target="_blank" class="badge badge-orange">已上传，点击查看</a>
+                    </div>
+                </el-form-item>
+                <el-form-item label="出库单照片">
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+                        <el-upload action="/api/upload" :show-file-list="false" :on-success="onDeliveryFileUpload('delivery_document_path')" accept=".jpg,.jpeg,.png,.pdf">
+                            <el-button type="primary" plain>上传出库单照片</el-button>
+                        </el-upload>
+                        <a v-if="deliveryForm.delivery_document_path" :href="deliveryForm.delivery_document_path" target="_blank" class="badge badge-blue">已上传，点击查看</a>
+                    </div>
+                </el-form-item>
+            </el-form>
+            <template #footer>
+                <el-button @click="showDeliveryDialog = false">取消</el-button>
+                <el-button @click="saveDeliveryFiles" :loading="submitting">先保存资料</el-button>
+                <el-button type="warning" @click="submitDelivery" :loading="submitting">确认出库</el-button>
             </template>
         </el-dialog>
 
@@ -1339,6 +1566,7 @@
                         currentPage.value = data.user.pages[0] || 'dashboard';
                         ElementPlus.ElMessage.success(`欢迎，${data.user.display_name}（${data.user.role}）`);
                         fetchAll();
+                        fetchApprovalReminders();
                     } else { ElementPlus.ElMessage.error(data.message || '登录失败'); }
                 } catch (e) { ElementPlus.ElMessage.error('网络错误'); }
                 loginLoading.value = false;
@@ -1360,7 +1588,10 @@
                 try {
                     const res = await fetch('/api/auth/me');
                     const data = await res.json();
-                    if (data.success) { currentUser.value = data.user; }
+                    if (data.success) {
+                        currentUser.value = data.user;
+                        fetchApprovalReminders();
+                    }
                 } catch (e) {}
             }
 
@@ -1370,7 +1601,6 @@
                 if (!currentUser.value) return false;
                 if (currentUser.value.role === '老板') return true;
                 if (page === 'assets') return currentUser.value.role === '车管';
-                if (page === 'contracts') return ['运营', '财务', '销售'].includes(currentUser.value.role);
                 return false;
             }
 
@@ -1393,6 +1623,8 @@
             const reconList = ref([]);
             const reconFilter = ref('');
             const reconSearch = ref('');
+            const reconTableRef = ref(null);
+            const reconExpandedKeys = ref([]);
             const showVerifyDialog = ref(false);
             const verifyTarget = ref(null);
             const verifySerial = ref('');
@@ -1404,10 +1636,14 @@
             const showAddContract = ref(false);
             const showReturnDialog = ref(false);
             const showInitialPaymentDialog = ref(false);
+            const showInitialPaymentPicker = ref(false);
+            const showDeliveryDialog = ref(false);
             const initialPaymentTarget = ref(null);
+            const deliveryTarget = ref(null);
             const submitting = ref(false);
             // 审批中心
             const approvalList = ref([]);
+            const approvalReminders = ref([]);
             const approvalFilter = ref('');
             const lockRequests = ref([]);
 
@@ -1420,8 +1656,8 @@
                 vehicle_id: '', vin: '', car_type: '', plate_number: '', vehicle_status: '',
                 invoice_price: 0, customer_name: '', customer_phone: '',
                 contract_type: '租赁', business_mode: '转租', rental_method: '经营租赁', repayment_day: 1,
-                start_date: '', loan_amount: 0, monthly_payment: 0, rent: 0,
-                loan_periods: 0, deposit: 0, down_payment: 0, total_price: 0,
+                start_date: '', company: '', yard: '', customer_loan_amount: 0, loan_amount: 0, monthly_payment: 0, rent: 0,
+                loan_periods: 0, factory_guarantee_deposit: 0, factory_repayment_months: 0, factory_periods: 0, deposit: 0, down_payment: 0, total_price: 0,
                 contract_file: ''
             });
 
@@ -1431,6 +1667,13 @@
                 amount: 0,
                 customer_screenshot_path: '',
                 remark: ''
+            });
+
+            const deliveryForm = reactive({
+                contract_id: null,
+                vehicle_id: null,
+                delivery_photo_path: '',
+                delivery_document_path: ''
             });
 
             // 输入车架号后自动匹配库存车辆
@@ -1444,6 +1687,7 @@
                         newContract.plate_number = v.plate_number || '';
                         newContract.invoice_price = v.invoice_price || 0;
                         newContract.vehicle_status = v.status || '';
+                        newContract.company = v.company || '';
                         return;
                     }
                 }
@@ -1453,6 +1697,7 @@
                 newContract.plate_number = '';
                 newContract.invoice_price = 0;
                 newContract.vehicle_status = '';
+                newContract.company = '';
             }
 
             const returnFormDefault = {
@@ -1474,7 +1719,6 @@
             const menuItems = [
                 { key: 'dashboard', label: '仪表盘', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>' },
                 { key: 'assets', label: '车辆管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-2-2.1-3.2C13.2 5.9 12.2 5.5 11.1 5.5H5c-1.1 0-2 .9-2 2v7.5c0 .6.4 1 1 1h1"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/></svg>' },
-                { key: 'contracts', label: '合同管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>' },
                 { key: 'approvals', label: '审批中心', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
                 { key: 'bills', label: '账单管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>' },
                 { key: 'reconciliation', label: '对账单', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22,4 12,14.01 9,11.01"/></svg>' },
@@ -1493,7 +1737,6 @@
             const pageMeta = {
                 dashboard: { title: '仪表盘', desc: '车辆资产运营数据总览', action: '' },
                 assets: { title: '车辆管理', desc: '管理所有车辆的入库、信息维护与状态跟踪', action: '车辆入库' },
-                contracts: { title: '合同管理', desc: '管理所有合同、生成还款计划、跟踪执行状态', action: '新建合同' },
                 approvals: { title: '审批中心', desc: '合同审批 · 首次付款 · 锁车审批 · 退车入库', action: '' },
                 bills: { title: '账单管理', desc: '查看、核销和管理所有财务账单', action: '' },
                 reconciliation: { title: '对账单', desc: '三位一体核销：销售截图 + 银行回单 + 流水号', action: '' },
@@ -1538,7 +1781,18 @@
             const fetchBills = async () => { pendingBills.value = await (await fetch('/api/bills/pending')).json(); };
             const fetchProfit = async () => { profitData.value = await (await fetch('/api/profit/by-vehicle')).json(); };
             const fetchReturns = async () => { returnList.value = await (await fetch('/api/return-inspections')).json(); };
-            const fetchRecon = async () => { reconList.value = await (await fetch('/api/reconciliation/list')).json(); };
+            const fetchRecon = async () => {
+                reconList.value = await (await fetch('/api/reconciliation/list')).json();
+                const validKeys = new Set(reconList.value.map(item => String(item.contract_id || `${item.customer_name || '-'}__${item.plate_number || '-'}__${item.customer_phone || '-'}`)));
+                reconExpandedKeys.value = reconExpandedKeys.value.filter(key => validKeys.has(key));
+            };
+            const fetchApprovalReminders = async () => {
+                if (!currentUser.value || !hasPage('approvals')) {
+                    approvalReminders.value = [];
+                    return;
+                }
+                approvalReminders.value = await (await fetch('/api/approvals')).json();
+            };
 
             let assetChart = null, statusChartInst = null;
             const initCharts = () => {
@@ -1588,8 +1842,8 @@
 
             watch(currentPage, (page) => {
                 if (page === 'dashboard') setTimeout(initCharts, 100);
-                if (page === 'contracts') fetchContracts();
-                if (page === 'approvals') { fetchApprovals(); fetchLockRequests(); }
+                if (page === 'assets') fetchContracts();
+                if (page === 'approvals') { fetchApprovals(); fetchApprovalReminders(); fetchLockRequests(); fetchContracts(); }
                 if (page === 'risk') fetchOverdue();
                 if (page === 'bills') fetchBills();
                 if (page === 'profit') fetchProfit();
@@ -1621,21 +1875,72 @@
                 if (currentUser.value) {
                     fetchAll().then(() => setTimeout(initCharts, 200));
                     fetchCarTypes();
+                    fetchApprovalReminders();
                 }
             });
 
             // ===== Computed =====
-            const filteredVehicles = computed(() => {
-                let list = vehicles.value;
-                if (assetFilter.value) list = list.filter(v => v.status === assetFilter.value);
-                if (carTypeFilter.value) list = list.filter(v => v.car_type === carTypeFilter.value);
+            const latestContractsByVehicle = computed(() => {
+                const map = {};
+                for (const contract of contracts.value) {
+                    const current = map[contract.vehicle_id];
+                    if (!current || contract.id > current.id) map[contract.vehicle_id] = contract;
+                }
+                return map;
+            });
+            function assetLifecycleStatus(row) {
+                if (row.vehicle_status === '已锁车') return '已锁车';
+                if (row.contract_status === '已结清') return '已结清';
+                if (row.vehicle_status === '已售') return '已经出库（已售）';
+                if (['租赁中', '经营租赁'].includes(row.vehicle_status)) return '已经出库（租赁）';
+                if (row.vehicle_status === '以租代售') return '已经出库（以租代售）';
+                if (['待审批', '审批中', '已驳回'].includes(row.delivery_status)) return '待出库（合同流程中）';
+                if (['待首付款', '首付审批中', '首付已驳回', '待出库'].includes(row.delivery_status)) return '待出库（首付款支付中）';
+                if (row.vehicle_status === '在库') return '在库';
+                return row.vehicle_status || '在库';
+            }
+            const assetRows = computed(() => vehicles.value.map(vehicle => {
+                const contract = latestContractsByVehicle.value[vehicle.id];
+                const row = {
+                    ...vehicle,
+                    vehicle_id: vehicle.id,
+                    contract_id: contract ? contract.id : null,
+                    vehicle_status: vehicle.status,
+                    customer_name: contract ? contract.customer_name : '',
+                    customer_phone: contract ? contract.customer_phone : '',
+                    contract_type: contract ? contract.contract_type : '',
+                    business_mode: contract ? contract.business_mode : '',
+                    total_price: contract ? contract.total_price : 0,
+                    monthly_payment: contract ? contract.monthly_payment : 0,
+                    rent: contract ? contract.rent : 0,
+                    loan_periods: contract ? contract.loan_periods : 0,
+                    delivery_status: contract ? contract.delivery_status : '',
+                    contract_status: contract ? contract.contract_status : '',
+                    loan_balance: contract ? contract.loan_balance : '',
+                    collected_rent: contract ? contract.collected_rent : 0,
+                    snapshot_invoice_price: contract ? contract.snapshot_invoice_price : 0,
+                    initial_payment_status: contract ? contract.initial_payment_status : '',
+                    delivery_photo_path: contract ? contract.delivery_photo_path : '',
+                    delivery_document_path: contract ? contract.delivery_document_path : '',
+                };
+                row.asset_status = assetLifecycleStatus(row);
+                return row;
+            }));
+            const filteredAssetRows = computed(() => {
+                let list = assetRows.value;
+                if (assetFilter.value) list = list.filter(row => row.asset_status === assetFilter.value);
+                if (carTypeFilter.value) list = list.filter(row => row.car_type === carTypeFilter.value);
                 if (search.value) {
                     const q = search.value.toLowerCase();
-                    list = list.filter(v => (v.vin && v.vin.toLowerCase().includes(q)) || (v.plate_number && v.plate_number.includes(q)) || (v.car_type && v.car_type.includes(q)));
+                    list = list.filter(row =>
+                        (row.vin && row.vin.toLowerCase().includes(q)) ||
+                        (row.plate_number && row.plate_number.includes(q)) ||
+                        (row.car_type && row.car_type.includes(q)) ||
+                        (row.customer_name && row.customer_name.toLowerCase().includes(q))
+                    );
                 }
                 return list;
             });
-
             const filteredContracts = computed(() => {
                 let list = contracts.value;
                 if (contractFilter.value) list = list.filter(c => c.business_mode === contractFilter.value);
@@ -1645,17 +1950,112 @@
                 }
                 return list;
             });
+            const eligibleInitialPaymentContracts = computed(() =>
+                contracts.value.filter(c => ['待首付款', '首付已驳回'].includes(c.delivery_status))
+            );
+            const canLaunchApprovalActions = computed(() =>
+                !!(currentUser.value && ['销售', '老板'].includes(currentUser.value.role))
+            );
+            const pendingApprovalItems = computed(() => {
+                if (!currentUser.value) return [];
+                return approvalReminders.value.filter(item => {
+                    const currentStep = (item.steps || []).find(step =>
+                        step.status === '待审批' && step.step_order === item.current_step
+                    );
+                    if (!currentStep) return false;
+                    return currentUser.value.role === '老板' || currentUser.value.role === currentStep.required_role;
+                });
+            });
+            const pendingApprovalCount = computed(() => pendingApprovalItems.value.length);
 
-            const filteredReconList = computed(() => {
-                let list = reconList.value;
-                if (reconFilter.value === '待核销') list = list.filter(r => r.status !== '已还款');
-                if (reconFilter.value === '已核销') list = list.filter(r => r.status === '已还款');
+            function buildReconGroups(list) {
+                const groups = {};
+                list.forEach(item => {
+                    const groupKey = String(item.contract_id || `${item.customer_name || '-'}__${item.plate_number || '-'}__${item.customer_phone || '-'}`);
+                    if (!groups[groupKey]) {
+                        groups[groupKey] = {
+                            group_key: groupKey,
+                            contract_id: item.contract_id,
+                            plate_number: item.plate_number,
+                            customer_name: item.customer_name,
+                            customer_phone: item.customer_phone,
+                            items: []
+                        };
+                    }
+                    groups[groupKey].items.push(item);
+                });
+
+                return Object.values(groups).map(group => {
+                    const items = [...group.items].sort((a, b) => {
+                        if ((a.status === '已还款') !== (b.status === '已还款')) return a.status === '已还款' ? 1 : -1;
+                        return (a.due_date || '').localeCompare(b.due_date || '');
+                    });
+                    const pendingItems = items.filter(item => item.status !== '已还款');
+                    const doneItems = items.filter(item => item.status === '已还款');
+                    const periods = items.map(item => Number(item.period)).filter(num => !Number.isNaN(num));
+                    const dueDates = items.map(item => item.due_date).filter(Boolean).sort((a, b) => a.localeCompare(b));
+                    const minPeriod = periods.length ? Math.min(...periods) : null;
+                    const maxPeriod = periods.length ? Math.max(...periods) : null;
+
+                    return {
+                        ...group,
+                        items,
+                        expanded: reconExpandedKeys.value.includes(group.group_key),
+                        pending_count: pendingItems.length,
+                        done_count: doneItems.length,
+                        pending_amount: pendingItems.reduce((sum, item) => sum + Number(item.amount || 0), 0),
+                        total_amount: items.reduce((sum, item) => sum + Number(item.amount || 0), 0),
+                        screenshot_count: items.filter(item => item.screenshot_path).length,
+                        receipt_count: items.filter(item => item.bank_receipt_path).length,
+                        serial_count: items.filter(item => item.bank_serial).length,
+                        next_due_date: pendingItems.length ? pendingItems[0].due_date : '',
+                        latest_due_date: dueDates.length ? dueDates[dueDates.length - 1] : '',
+                        period_summary: periods.length <= 1
+                            ? `${maxPeriod || '-'}期`
+                            : `${minPeriod}-${maxPeriod}期，共${items.length}笔`
+                    };
+                }).sort((a, b) => {
+                    if ((a.pending_count > 0) !== (b.pending_count > 0)) return a.pending_count > 0 ? -1 : 1;
+                    return (a.next_due_date || a.latest_due_date || '').localeCompare(b.next_due_date || b.latest_due_date || '');
+                });
+            }
+
+            const groupedReconList = computed(() => buildReconGroups(reconList.value));
+
+            const reconSummary = computed(() => ({
+                totalGroups: groupedReconList.value.length,
+                totalItems: reconList.value.length,
+                pendingGroups: groupedReconList.value.filter(group => group.pending_count > 0).length,
+                pendingItems: reconList.value.filter(item => item.status !== '已还款').length,
+                doneGroups: groupedReconList.value.filter(group => group.pending_count === 0 && group.done_count > 0).length,
+                doneItems: reconList.value.filter(item => item.status === '已还款').length,
+            }));
+
+            const filteredGroupedReconList = computed(() => {
+                let list = groupedReconList.value;
+                if (reconFilter.value === '待核销') list = list.filter(group => group.pending_count > 0);
+                if (reconFilter.value === '已核销') list = list.filter(group => group.pending_count === 0 && group.done_count > 0);
                 if (reconSearch.value) {
                     const q = reconSearch.value.toLowerCase();
-                    list = list.filter(r => (r.plate_number && r.plate_number.includes(q)) || (r.customer_name && r.customer_name.toLowerCase().includes(q)));
+                    list = list.filter(group =>
+                        (group.plate_number && group.plate_number.toLowerCase().includes(q)) ||
+                        (group.customer_name && group.customer_name.toLowerCase().includes(q))
+                    );
                 }
                 return list;
             });
+
+            function reconGroupStatusText(group) {
+                if (group.pending_count === 0) return '全部已核销';
+                if (group.done_count === 0) return `待核销 ${group.pending_count}期`;
+                return `部分完成 ${group.done_count}/${group.items.length}`;
+            }
+
+            function reconGroupStatusClass(group) {
+                if (group.pending_count === 0) return 'badge-green';
+                if (group.done_count === 0) return 'badge-orange';
+                return 'badge-blue';
+            }
 
             // ===== Formatters =====
             function numberFormat(n) {
@@ -1678,7 +2078,7 @@
             }
             function approvalTypeLabel(type) {
                 return {
-                    contract_delivery: '出库审批',
+                    contract_delivery: '合同审批',
                     initial_payment: '首次付款',
                     sale_payment: '支付核对',
                     lock_request: '锁车审批',
@@ -1694,6 +2094,15 @@
                     return_stock: 'badge-orange',
                 }[type] || 'badge-gray';
             }
+            function approvalVehicleLabel(item) {
+                if (!item) return '未关联车辆';
+                const vin = (item.vin || '').trim();
+                const plate = (item.plate_number || '').trim();
+                if (vin && plate) return `${vin} / ${plate}`;
+                if (vin) return vin;
+                if (plate) return plate;
+                return '未关联车辆';
+            }
             function deliveryStatusClass(status) {
                 return {
                     '待审批': 'badge-orange',
@@ -1704,6 +2113,18 @@
                     '首付已驳回': 'badge-red',
                     '待出库': 'badge-purple',
                     '已出库': 'badge-green',
+                }[status] || 'badge-gray';
+            }
+            function assetStatusClass(status) {
+                return {
+                    '在库': 'badge-gray',
+                    '待出库（合同流程中）': 'badge-orange',
+                    '待出库（首付款支付中）': 'badge-purple',
+                    '已经出库（已售）': 'badge-green',
+                    '已经出库（租赁）': 'badge-blue',
+                    '已经出库（以租代售）': 'badge-purple',
+                    '已锁车': 'badge-red',
+                    '已结清': 'badge-green',
                 }[status] || 'badge-gray';
             }
             function initialPaymentAmount(row) {
@@ -1734,21 +2155,53 @@
             function canExecuteReturnStock(row) {
                 return row.status === '待入库' && ['车管', '老板'].includes(currentUser.value.role);
             }
+            function currentApprovalStepLabel(item) {
+                const step = (item.steps || []).find(x => x.status === '待审批' && x.step_order === item.current_step);
+                return step ? `${step.required_role}待处理: ${step.step_label}` : '待处理审批';
+            }
+            function isPendingApproval(item) {
+                if (!currentUser.value) return false;
+                const step = (item.steps || []).find(x => x.status === '待审批' && x.step_order === item.current_step);
+                if (!step) return false;
+                return currentUser.value.role === '老板' || currentUser.value.role === step.required_role;
+            }
+            function approvalCardId(item) {
+                return `approval-card-${item.ref_type}-${item.ref_id}`;
+            }
+            function focusApprovalItem(item) {
+                approvalFilter.value = '';
+                currentPage.value = 'approvals';
+                fetchApprovals();
+                fetchApprovalReminders();
+                setTimeout(() => {
+                    const el = document.getElementById(approvalCardId(item));
+                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }, 180);
+            }
+            function openApprovalReminderCenter() {
+                if (!hasPage('approvals')) return;
+                approvalFilter.value = '';
+                currentPage.value = 'approvals';
+                fetchApprovals();
+                fetchApprovalReminders();
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            }
 
             // ===== Actions =====
             function handleMenuSelect(key) { currentPage.value = key; }
             function handlePageAction() {
                 if (currentPage.value === 'assets') showAddVehicle.value = true;
-                if (currentPage.value === 'contracts') showAddContract.value = true;
             }
             async function handleContractExpand(row, expandedRows) {
+                const contractId = row.contract_id || row.id;
+                if (!contractId) return;
                 if (expandedRows.includes(row)) {
                     repaymentLoading.value = true;
                     repaymentTab.value = 'customer';
                     try {
                         const [cr, fr] = await Promise.all([
-                            fetch(`/api/contracts/${row.id}/repayments`).then(r => r.json()),
-                            fetch(`/api/contracts/${row.id}/factory-repayments`).then(r => r.json())
+                            fetch(`/api/contracts/${contractId}/repayments`).then(r => r.json()),
+                            fetch(`/api/contracts/${contractId}/factory-repayments`).then(r => r.json())
                         ]);
                         currentRepayments.value = cr;
                         currentFactoryRepayments.value = fr;
@@ -1821,7 +2274,6 @@
                 ElementPlus.ElMessage.success(data.message || '客户还款核销成功');
                 fetchAll();
                 if (currentPage.value === 'risk') fetchOverdue();
-                if (currentPage.value === 'contracts') fetchContracts();
                 if (currentPage.value === 'bills') fetchBills();
             }
             async function confirmFactoryRepayment(row) {
@@ -1829,11 +2281,26 @@
                 const data = await res.json();
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '厂家月供核销失败');
                 ElementPlus.ElMessage.success(data.message || '厂家月供核销成功');
-                if (currentPage.value === 'contracts') fetchContracts();
             }
             async function submitContract() {
                 if (!newContract.vehicle_id) return ElementPlus.ElMessage.warning('请选择车辆');
                 if (newContract.contract_type !== '销售' && !newContract.rent && !newContract.monthly_payment) return ElementPlus.ElMessage.warning('请填写月租或月供');
+                if (newContract.contract_type !== '销售') {
+                    if (!newContract.start_date) return ElementPlus.ElMessage.warning('请填写合同起始日');
+                    if (!newContract.loan_periods || newContract.loan_periods <= 0) return ElementPlus.ElMessage.warning('请填写客户分期期数');
+                    if (newContract.customer_loan_amount > 0) {
+                        const minCustomerPayment = Number(newContract.customer_loan_amount || 0) / Number(newContract.loan_periods || 1);
+                        if (Number(newContract.rent || 0) < minCustomerPayment) {
+                            return ElementPlus.ElMessage.warning(`每期贷款额不能低于客户贷款额度/期数，至少 ¥${numberFormat(minCustomerPayment)}`);
+                        }
+                    }
+                    if (!newContract.factory_periods || newContract.factory_periods <= 0) {
+                        newContract.factory_periods = newContract.loan_periods;
+                    }
+                    if (!newContract.factory_repayment_months || newContract.factory_repayment_months <= 0) {
+                        newContract.factory_repayment_months = newContract.factory_periods;
+                    }
+                }
                 // 根据合同类型自动设置业务模式
                 if (newContract.contract_type === '销售') {
                     newContract.business_mode = '卖车';
@@ -1847,8 +2314,8 @@
                 if (data.success) {
                     ElementPlus.ElMessage.success('合同创建成功！');
                     showAddContract.value = false;
-                    Object.assign(newContract, { vehicle_id: '', vin: '', car_type: '', plate_number: '', vehicle_status: '', invoice_price: 0, customer_name: '', customer_phone: '', contract_type: '租赁', business_mode: '转租', rental_method: '经营租赁', repayment_day: 1, start_date: '', loan_amount: 0, monthly_payment: 0, rent: 0, loan_periods: 0, deposit: 0, down_payment: 0, total_price: 0, contract_file: '' });
-                    fetchAll(); fetchContracts();
+                    Object.assign(newContract, { vehicle_id: '', vin: '', car_type: '', plate_number: '', vehicle_status: '', invoice_price: 0, customer_name: '', customer_phone: '', contract_type: '租赁', business_mode: '转租', rental_method: '经营租赁', repayment_day: 1, start_date: '', company: '', yard: '', customer_loan_amount: 0, loan_amount: 0, monthly_payment: 0, rent: 0, loan_periods: 0, factory_guarantee_deposit: 0, factory_repayment_months: 0, factory_periods: 0, deposit: 0, down_payment: 0, total_price: 0, contract_file: '' });
+                    fetchAll(); fetchContracts(); fetchApprovals(); fetchApprovalReminders();
                 } else { ElementPlus.ElMessage.error(data.message); }
             }
 
@@ -1862,6 +2329,13 @@
                     remark: ''
                 });
                 showInitialPaymentDialog.value = true;
+            }
+            function openInitialPaymentPicker() {
+                showInitialPaymentPicker.value = true;
+            }
+            function selectInitialPaymentContract(row) {
+                showInitialPaymentPicker.value = false;
+                openInitialPayment(row);
             }
             function onInitialScreenshotUpload(res) {
                 if (!res.success) return ElementPlus.ElMessage.error('客户付款截图上传失败');
@@ -1885,6 +2359,7 @@
                 showInitialPaymentDialog.value = false;
                 fetchContracts();
                 fetchApprovals();
+                fetchApprovalReminders();
             }
             async function onInitialReceiptUpload(paymentId, res) {
                 if (!res.success) return ElementPlus.ElMessage.error('公司收款回单上传失败');
@@ -1897,6 +2372,7 @@
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '公司收款回单上传失败');
                 ElementPlus.ElMessage.success(data.message || '公司收款回单已上传');
                 fetchApprovals();
+                fetchApprovalReminders();
             }
 
             // ===== 对账核销操作 =====
@@ -1913,6 +2389,17 @@
                     ElementPlus.ElMessage.success(data.message);
                     fetchRecon();
                 } else { ElementPlus.ElMessage.error(data.message); }
+            }
+            function toggleReconGroup(row) {
+                if (!row || !row.group_key) return;
+                if (reconExpandedKeys.value.includes(row.group_key)) {
+                    reconExpandedKeys.value = reconExpandedKeys.value.filter(key => key !== row.group_key);
+                } else {
+                    reconExpandedKeys.value = [...reconExpandedKeys.value, row.group_key];
+                }
+            }
+            function onReconExpandChange(row, expandedRows) {
+                reconExpandedKeys.value = expandedRows.map(item => item.group_key);
             }
             function openVerifyDialog(row) {
                 verifyTarget.value = row;
@@ -1952,17 +2439,100 @@
                         if (!data.success) return ElementPlus.ElMessage.error(data.message || '锁车申请失败');
                         ElementPlus.ElMessage.success(data.message || '锁车申请已提交');
                         fetchApprovals();
+                        fetchApprovalReminders();
                     }).catch(() => {});
             }
 
             // ===== 出库 =====
+            function openDeliveryDialog(row) {
+                const contractId = row.contract_id || row.ref_id;
+                if (!contractId || !row.vehicle_id) {
+                    ElementPlus.ElMessage.error('未找到合同或车辆信息');
+                    return;
+                }
+                deliveryTarget.value = row;
+                Object.assign(deliveryForm, {
+                    contract_id: contractId,
+                    vehicle_id: row.vehicle_id,
+                    delivery_photo_path: row.delivery_photo_path || '',
+                    delivery_document_path: row.delivery_document_path || ''
+                });
+                showDeliveryDialog.value = true;
+            }
+            function onDeliveryFileUpload(field) {
+                return (res) => {
+                    if (!res.success) return ElementPlus.ElMessage.error('出库资料上传失败');
+                    deliveryForm[field] = res.url;
+                    ElementPlus.ElMessage.success(field === 'delivery_photo_path' ? '出库照片已上传' : '出库单照片已上传');
+                };
+            }
+            async function saveDeliveryFiles() {
+                if (!deliveryForm.contract_id) {
+                    ElementPlus.ElMessage.error('未找到合同信息');
+                    return false;
+                }
+                if (!deliveryForm.delivery_photo_path && !deliveryForm.delivery_document_path) {
+                    ElementPlus.ElMessage.warning('请先上传至少一项出库资料');
+                    return false;
+                }
+                submitting.value = true;
+                try {
+                    const res = await fetch(`/api/contracts/${deliveryForm.contract_id}/delivery-files`, {
+                        method: 'POST',
+                        headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify({
+                            delivery_photo_path: deliveryForm.delivery_photo_path,
+                            delivery_document_path: deliveryForm.delivery_document_path
+                        })
+                    });
+                    const data = await res.json().catch(() => ({
+                        success: false,
+                        message: `保存出库资料失败（接口状态 ${res.status}）`
+                    }));
+                    if (!data.success) {
+                        ElementPlus.ElMessage.error(data.message || '保存出库资料失败');
+                        return false;
+                    }
+                    ElementPlus.ElMessage.success(data.message || '出库资料已保存');
+                    fetchContracts();
+                    fetchApprovals();
+                    fetchApprovalReminders();
+                    fetchAll();
+                    return true;
+                } catch (error) {
+                    ElementPlus.ElMessage.error(`保存出库资料失败：${error.message || '网络异常'}`);
+                    return false;
+                } finally {
+                    submitting.value = false;
+                }
+            }
+            async function submitDelivery() {
+                if (!deliveryForm.delivery_photo_path || !deliveryForm.delivery_document_path) {
+                    return ElementPlus.ElMessage.warning('请先上传出库照片和出库单照片');
+                }
+                const saved = await saveDeliveryFiles();
+                if (!saved) return;
+                submitting.value = true;
+                try {
+                    const res = await fetch(`/api/vehicles/${deliveryForm.vehicle_id}/deliver`, { method: 'POST' });
+                    const data = await res.json().catch(() => ({
+                        success: false,
+                        message: `车辆出库失败（接口状态 ${res.status}）`
+                    }));
+                    if (!data.success) return ElementPlus.ElMessage.error(data.message || '车辆出库失败');
+                    ElementPlus.ElMessage.success(data.message || '车辆已出库');
+                    showDeliveryDialog.value = false;
+                    fetchApprovals();
+                    fetchApprovalReminders();
+                    fetchAll();
+                } catch (error) {
+                    ElementPlus.ElMessage.error(`车辆出库失败：${error.message || '网络异常'}`);
+                } finally {
+                    submitting.value = false;
+                }
+            }
             async function deliverVehicle(row) {
-                await ElementPlus.ElMessageBox.confirm(`确认对 ${row.plate_number} 执行出库？`, '车辆出库', { type: 'warning' });
-                const res = await fetch(`/api/vehicles/${row.id}/deliver`, { method: 'POST' });
-                const data = await res.json();
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '车辆出库失败');
-                ElementPlus.ElMessage.success(data.message || '车辆已出库');
-                fetchAll();
+                openDeliveryDialog(row);
             }
 
             // ===== 审批中心 =====
@@ -1986,7 +2556,7 @@
                 const data = await res.json();
                 if (data.success) {
                     ElementPlus.ElMessage.success(data.message);
-                    fetchApprovals(); fetchAll(); fetchReturns();
+                    fetchApprovals(); fetchApprovalReminders(); fetchAll(); fetchReturns();
                 } else { ElementPlus.ElMessage.error(data.message); }
             }
 
@@ -2002,7 +2572,7 @@
                 const data = await res.json();
                 if (data.success) {
                     ElementPlus.ElMessage.success(data.message);
-                    fetchApprovals(); fetchAll(); fetchReturns();
+                    fetchApprovals(); fetchApprovalReminders(); fetchAll(); fetchReturns();
                 } else { ElementPlus.ElMessage.error(data.message); }
             }
 
@@ -2015,19 +2585,12 @@
                 const data = await res.json();
                 if (data.success) {
                     ElementPlus.ElMessage.success(data.message);
-                    fetchApprovals(); fetchReturns();
+                    fetchApprovals(); fetchApprovalReminders(); fetchReturns();
                 } else { ElementPlus.ElMessage.error(data.message); }
             }
 
             async function doDeliver(item) {
-                await ElementPlus.ElMessageBox.confirm(`确认对 ${item.plate_number} 执行出库？`, '车辆出库', { type: 'warning' });
-                if (!item.vehicle_id) { ElementPlus.ElMessage.error('车辆未找到'); return; }
-                const res = await fetch(`/api/vehicles/${item.vehicle_id}/deliver`, { method: 'POST' });
-                const data = await res.json();
-                if (data.success) {
-                    ElementPlus.ElMessage.success(data.message);
-                    fetchApprovals(); fetchAll();
-                } else { ElementPlus.ElMessage.error(data.message); }
+                openDeliveryDialog(item);
             }
 
             // ===== 租期结束入库 =====
@@ -2076,6 +2639,7 @@
                 ElementPlus.ElMessage.success(data.message || '已提交审批');
                 fetchReturns();
                 fetchApprovals();
+                fetchApprovalReminders();
             }
             async function executeReturnStock(row) {
                 await ElementPlus.ElMessageBox.confirm(`确认对 ${row.plate_number} 执行旧车入库？`, '确认入库', { type: 'warning' });
@@ -2085,6 +2649,7 @@
                 ElementPlus.ElMessage.success(data.message || '旧车已入库');
                 fetchReturns();
                 fetchApprovals();
+                fetchApprovalReminders();
                 fetchAll();
             }
             function viewReturnDetail(row) {
@@ -2109,28 +2674,28 @@
                 search, assetFilter, carTypeFilter, contractSearch, contractFilter,
                 carTypeOptions, carTypeGroups,
                 vehicles, contracts, stats, overdueList, pendingBills, profitData, returnList,
-                reconList, reconFilter, reconSearch, filteredReconList,
+                reconList, reconFilter, reconSearch, reconSummary, filteredGroupedReconList, reconExpandedKeys, reconTableRef,
                 showVerifyDialog, verifyTarget, verifySerial,
                 currentRepayments, currentFactoryRepayments, repaymentTab,
                 repaymentLoading, showAddVehicle, showAddContract, showReturnDialog,
-                showInitialPaymentDialog, initialPaymentTarget,
-                newVehicle, newContract, initialPaymentForm, returnForm, submitting,
+                showInitialPaymentDialog, showInitialPaymentPicker, showDeliveryDialog, initialPaymentTarget, deliveryTarget,
+                newVehicle, newContract, initialPaymentForm, deliveryForm, returnForm, submitting,
                 // 审批中心
-                approvalList, approvalFilter, lockRequests,
-                fetchApprovals, fetchLockRequests,
+                approvalList, approvalReminders, approvalFilter, lockRequests,
+                fetchApprovals, fetchApprovalReminders, fetchLockRequests,
                 doApprove, doReject, doResubmit, doDeliver,
                 // UI
-                statCards, statusDistribution, filteredVehicles, filteredContracts,
+                statCards, statusDistribution, filteredAssetRows, filteredContracts, eligibleInitialPaymentContracts, canLaunchApprovalActions, pendingApprovalItems, pendingApprovalCount,
                 numberFormat, statusClass, repayClass, calcOverdueDays, riskLevel,
-                approvalTypeLabel, approvalTypeClass, deliveryStatusClass, returnStatusClass,
-                initialPaymentAmount, initialPaymentType, canInitiateInitialPayment, canSubmitReturnApproval, canExecuteReturnStock,
+                approvalTypeLabel, approvalTypeClass, approvalVehicleLabel, deliveryStatusClass, assetStatusClass, returnStatusClass,
+                initialPaymentAmount, initialPaymentType, canInitiateInitialPayment, canSubmitReturnApproval, canExecuteReturnStock, currentApprovalStepLabel, isPendingApproval, approvalCardId,
                 handleMenuSelect, handlePageAction, handleContractExpand, editPrice, deleteVehicle,
-                submitVehicle, submitContract, confirmRepayment, confirmFactoryRepayment, requestLock,
+                submitVehicle, submitContract, confirmRepayment, confirmFactoryRepayment, requestLock, openApprovalReminderCenter, focusApprovalItem,
                 deliverVehicle, returnStockVehicle, matchContractVehicle,
-                openInitialPayment, onInitialScreenshotUpload, submitInitialPayment, onInitialReceiptUpload,
+                openInitialPayment, openInitialPaymentPicker, selectInitialPaymentContract, onInitialScreenshotUpload, submitInitialPayment, onInitialReceiptUpload, openDeliveryDialog, onDeliveryFileUpload, saveDeliveryFiles, submitDelivery,
                 openReturnForm, onReturnVehicleSelect, submitReturnInspection, submitReturnApproval, executeReturnStock, viewReturnDetail,
                 onInvoiceUploadSuccess, beforeInvoiceUpload, onContractFileSuccess, beforeContractFileUpload,
-                onReconUpload, openVerifyDialog, submitVerify,
+                onReconUpload, toggleReconGroup, onReconExpandChange, reconGroupStatusClass, reconGroupStatusText, openVerifyDialog, submitVerify,
             };
         }
     });
