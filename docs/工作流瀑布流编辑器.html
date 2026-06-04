@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>金聚源工作流瀑布流编辑器</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #64748b;
+      --line: #d8e0eb;
+      --paper: #f6f8fb;
+      --card: #ffffff;
+      --sales: #2563eb;
+      --finance: #059669;
+      --ops: #d97706;
+      --fleet: #dc2626;
+      --boss: #7c3aed;
+      --system: #475569;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #f8fafc 0%, #eef4ff 100%);
+      color: var(--ink);
+      font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      padding: 20px 28px;
+      background: rgba(255,255,255,.9);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+    }
+    h1 { margin: 0; font-size: 24px; }
+    .sub { margin-top: 6px; color: var(--muted); font-size: 13px; }
+    .toolbar { display: flex; gap: 10px; flex-wrap: wrap; }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 16px;
+      background: #1f2937;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    button.secondary { background: #e2e8f0; color: #1f2937; }
+    main { padding: 22px; }
+    .tabs {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+    }
+    .tab {
+      background: #fff;
+      color: #334155;
+      border: 1px solid var(--line);
+    }
+    .tab.active {
+      background: #1d4ed8;
+      color: #fff;
+      border-color: #1d4ed8;
+    }
+    .board {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(220px, 1fr));
+      gap: 14px;
+      align-items: start;
+      min-width: 1320px;
+    }
+    .column {
+      background: rgba(255,255,255,.74);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 14px;
+      min-height: 620px;
+      box-shadow: 0 18px 50px rgba(15,23,42,.06);
+    }
+    .col-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 900;
+      margin: 4px 4px 14px;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--system);
+    }
+    .column[data-role="销售端"] .dot { background: var(--sales); }
+    .column[data-role="财务端"] .dot { background: var(--finance); }
+    .column[data-role="运营端"] .dot { background: var(--ops); }
+    .column[data-role="车管端"] .dot { background: var(--fleet); }
+    .column[data-role="老板端"] .dot { background: var(--boss); }
+    .node {
+      position: relative;
+      background: var(--card);
+      border: 1px solid #e5edf8;
+      border-left: 5px solid var(--system);
+      border-radius: 16px;
+      padding: 12px 12px 10px;
+      margin-bottom: 12px;
+      box-shadow: 0 10px 24px rgba(15,23,42,.06);
+    }
+    .node[data-role="销售端"] { border-left-color: var(--sales); }
+    .node[data-role="财务端"] { border-left-color: var(--finance); }
+    .node[data-role="运营端"] { border-left-color: var(--ops); }
+    .node[data-role="车管端"] { border-left-color: var(--fleet); }
+    .node[data-role="老板端"] { border-left-color: var(--boss); }
+    .node-title {
+      font-size: 14px;
+      font-weight: 800;
+      line-height: 1.45;
+      outline: none;
+      min-height: 22px;
+    }
+    .node-meta {
+      margin-top: 8px;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .tag {
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #f1f5f9;
+      color: #475569;
+      white-space: nowrap;
+    }
+    .branch {
+      background: #fff7ed;
+      border-left-color: #f97316;
+    }
+    .end {
+      background: #f0fdf4;
+      border-left-color: #22c55e;
+    }
+    .hint {
+      margin: 14px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .drop-zone {
+      border: 1px dashed #cbd5e1;
+      border-radius: 14px;
+      padding: 10px;
+      color: #94a3b8;
+      text-align: center;
+      font-size: 12px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 220px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    dialog {
+      border: 0;
+      border-radius: 20px;
+      padding: 20px;
+      width: min(860px, calc(100vw - 40px));
+      box-shadow: 0 30px 80px rgba(15,23,42,.25);
+    }
+    dialog::backdrop { background: rgba(15,23,42,.45); }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+    @media print {
+      header, .tabs, .hint { display: none; }
+      body { background: #fff; }
+      main { padding: 0; }
+      .board { min-width: auto; grid-template-columns: repeat(3, 1fr); }
+      .column { box-shadow: none; min-height: 0; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>金聚源工作流瀑布流编辑器</h1>
+      <div class="sub">直接点击节点文字即可修改；拖拽节点可调整顺序；导出 JSON/Markdown 后可继续保存版本。</div>
+    </div>
+    <div class="toolbar">
+      <button class="secondary" onclick="addNode()">新增节点</button>
+      <button class="secondary" onclick="exportMarkdown()">导出 Markdown</button>
+      <button class="secondary" onclick="exportJson()">导出 JSON</button>
+      <button onclick="saveLocal()">保存到浏览器</button>
+    </div>
+  </header>
+  <main>
+    <div class="tabs" id="tabs"></div>
+    <div class="board" id="board"></div>
+    <p class="hint">提示：这个 HTML 是本地可编辑版本，不依赖 draw.io。修改后点“导出 Markdown”或“导出 JSON”，即可得到可复制、可归档的版本。</p>
+  </main>
+
+  <dialog id="exportDialog">
+    <h3 id="exportTitle">导出</h3>
+    <textarea id="exportText"></textarea>
+    <div class="dialog-actions">
+      <button class="secondary" onclick="copyExport()">复制</button>
+      <button onclick="document.getElementById('exportDialog').close()">关闭</button>
+    </div>
+  </dialog>
+
+  <script>
+    const roles = ["销售端", "系统", "老板端", "财务端", "运营端", "车管端"];
+    const workflows = {
+      "全局规则": [
+        ["销售端", "销售端：新建报单", "开始"],
+        ["系统", "系统读取当前指导价", "自动"],
+        ["系统", "判断：成交价是否低于指导价？", "判断", "branch"],
+        ["财务端", "财务端：确认报单", "确认"],
+        ["老板端", "老板端：价格特批审批", "低价"],
+        ["老板端", "判断：老板是否通过？", "判断", "branch"],
+        ["系统", "报单终止 / 状态：价格特批驳回", "结束", "end"],
+        ["系统", "报单状态：已激活", "状态"],
+        ["运营端", "运营端：发起合同审批", "下一步"],
+        ["老板端", "老板端：维护指导价", "设置"],
+        ["系统", "系统记录：旧价 / 新价 / 修改人 / 生效时间", "留痕"],
+        ["系统", "生效时间之后的新报单按新价判断", "规则"],
+        ["系统", "生效时间之前的报单和合同价格快照不变", "规则"],
+        ["老板端", "老板端：全过程查看报单、合同、付款、出库、对账、退车、利润", "查看"]
+      ],
+      "卖车流程": [
+        ["销售端", "销售端：销售报单 / 新建报单", "开始"],
+        ["销售端", "选择车辆：在库车辆", "录入"],
+        ["销售端", "销售方式：整车销售", "录入"],
+        ["销售端", "填写客户、成交价、定金/首付款、收款信息", "录入"],
+        ["系统", "系统生成报单并锁定车辆", "自动"],
+        ["系统", "判断：成交价低于指导价？", "判断", "branch"],
+        ["老板端", "老板端：审批中心 / 价格特批", "低价"],
+        ["老板端", "老板审批：通过或驳回", "确认"],
+        ["财务端", "财务端：审批中心 / 报单确认", "查看"],
+        ["财务端", "财务点击：确认报单", "确认"],
+        ["系统", "报单状态：已激活", "状态"],
+        ["运营端", "运营端：销售报单 / 转合同", "点击"],
+        ["运营端", "运营生成卖车合同", "发起"],
+        ["财务端", "财务端：审批中心 / 合同审批", "确认"],
+        ["运营端", "运营端：发起首付款及押金支付流程", "发起"],
+        ["运营端", "运营上传客户付款截图", "上传"],
+        ["财务端", "财务端：审批中心 / 首次付款", "查看"],
+        ["财务端", "财务上传银行到账回单并点击通过", "确认"],
+        ["系统", "合同状态：待出库", "状态"],
+        ["运营端", "运营端：发起车辆出库", "发起"],
+        ["财务端", "财务端：确认合同和款项无误", "确认"],
+        ["车管端", "车管端：审批中心 / 车辆出库", "查看"],
+        ["车管端", "车管上传出库照片、出库单照片", "上传"],
+        ["车管端", "车管点击：确认出库", "确认"],
+        ["系统", "车辆状态：已售，卖车流程结束", "结束", "end"],
+        ["老板端", "老板端：查看全过程记录", "查看"]
+      ],
+      "租车流程": [
+        ["销售端", "销售端：销售报单 / 新建报单", "开始"],
+        ["销售端", "选择车辆：在库车辆", "录入"],
+        ["销售端", "销售方式：经营租赁", "录入"],
+        ["销售端", "填写客户、租期、租金、押金、成交价/租赁总价", "录入"],
+        ["系统", "系统生成报单并锁定车辆", "自动"],
+        ["系统", "判断：成交价低于指导价？", "判断", "branch"],
+        ["老板端", "老板端：审批中心 / 价格特批", "低价"],
+        ["财务端", "财务端：审批中心 / 报单确认", "查看"],
+        ["财务端", "财务点击：确认报单", "确认"],
+        ["系统", "报单状态：已激活", "状态"],
+        ["运营端", "运营端：销售报单 / 转合同", "点击"],
+        ["运营端", "运营生成租赁合同", "发起"],
+        ["财务端", "财务端：审批中心 / 合同审批", "确认"],
+        ["运营端", "运营端：发起押金支付流程", "发起"],
+        ["运营端", "运营上传客户付款截图", "上传"],
+        ["财务端", "财务上传银行到账回单并点击通过", "确认"],
+        ["系统", "合同状态：待出库", "状态"],
+        ["运营端", "运营端：发起车辆出库", "发起"],
+        ["财务端", "财务端：确认合同和押金到账", "确认"],
+        ["车管端", "车管上传出库照片、出库单照片并确认出库", "确认"],
+        ["系统", "车辆状态：租赁中", "状态"],
+        ["运营端", "运营端：每期发起还款对账", "发起"],
+        ["财务端", "财务端：核对银行回单、流水号", "核对"],
+        ["系统", "该期账单状态：已还款；有未还期数则继续对账", "循环"],
+        ["销售端", "租期结束：销售端车辆管理 / 发起退车", "发起"],
+        ["车管端", "车管端：退车验工，填写验车、工具、损伤、照片", "填写"],
+        ["运营端", "运营端：填写租金、违章、ETC、保养、事故等数据", "填写"],
+        ["财务端", "财务端：复核扣款、押金、退款金额、退款账户", "复核"],
+        ["老板端", "老板端：领导审批，如需退款确认", "确认"],
+        ["财务端", "财务端：执行出款", "出款"],
+        ["系统", "车辆状态：在库 / 二手车，租车流程结束", "结束", "end"]
+      ],
+      "以租代售流程": [
+        ["销售端", "销售端：销售报单 / 新建报单", "开始"],
+        ["销售端", "选择车辆：在库车辆", "录入"],
+        ["销售端", "销售方式：以租代售 / 以租代购", "录入"],
+        ["销售端", "填写客户、成交价、首付、押金、月供、期数", "录入"],
+        ["系统", "系统生成报单并锁定车辆", "自动"],
+        ["系统", "判断：成交价低于指导价？", "判断", "branch"],
+        ["老板端", "老板端：审批中心 / 价格特批", "低价"],
+        ["财务端", "财务端：审批中心 / 报单确认", "查看"],
+        ["财务端", "财务点击：确认报单", "确认"],
+        ["系统", "报单状态：已激活", "状态"],
+        ["运营端", "运营端：销售报单 / 转合同", "点击"],
+        ["运营端", "运营生成以租代售合同", "发起"],
+        ["财务端", "财务端：审批中心 / 合同审批", "确认"],
+        ["运营端", "运营端：发起首付款及押金支付流程", "发起"],
+        ["运营端", "运营上传客户付款截图", "上传"],
+        ["财务端", "财务上传银行到账回单并点击通过", "确认"],
+        ["系统", "合同状态：待出库", "状态"],
+        ["运营端", "运营端：发起车辆出库", "发起"],
+        ["财务端", "财务端：确认合同、首付款、押金到账", "确认"],
+        ["车管端", "车管上传出库照片、出库单照片并确认出库", "确认"],
+        ["系统", "车辆状态：以租代售", "状态"],
+        ["运营端", "运营端：每期发起还款对账", "发起"],
+        ["财务端", "财务端：核对银行回单、流水号", "核对"],
+        ["系统", "全部期数还清后标记合同结清/待过户", "判断"],
+        ["运营端", "运营端：确认尾款和费用全部结清", "确认"],
+        ["财务端", "财务端：复核全部回款", "复核"],
+        ["系统", "合同状态：已结清；车辆状态：已售", "结束", "end"],
+        ["老板端", "老板端：查看全过程记录", "查看"]
+      ]
+    };
+
+    let current = Object.keys(workflows)[0];
+
+    function init() {
+      const saved = localStorage.getItem("jgy_workflow_waterfall");
+      if (saved) {
+        try {
+          Object.assign(workflows, JSON.parse(saved));
+        } catch (e) {}
+      }
+      renderTabs();
+      renderBoard();
+    }
+
+    function renderTabs() {
+      const tabs = document.getElementById("tabs");
+      tabs.innerHTML = "";
+      Object.keys(workflows).forEach(name => {
+        const btn = document.createElement("button");
+        btn.className = "tab" + (name === current ? " active" : "");
+        btn.textContent = name;
+        btn.onclick = () => { current = name; renderTabs(); renderBoard(); };
+        tabs.appendChild(btn);
+      });
+    }
+
+    function renderBoard() {
+      const board = document.getElementById("board");
+      board.innerHTML = "";
+      roles.forEach(role => {
+        const col = document.createElement("section");
+        col.className = "column";
+        col.dataset.role = role;
+        col.ondragover = e => e.preventDefault();
+        col.ondrop = e => moveNode(e, role);
+        col.innerHTML = `<div class="col-title"><span class="dot"></span>${role}</div>`;
+        workflows[current].forEach((node, index) => {
+          if (node[0] !== role) return;
+          col.appendChild(renderNode(node, index));
+        });
+        const zone = document.createElement("div");
+        zone.className = "drop-zone";
+        zone.textContent = "拖到这里移动到本端";
+        col.appendChild(zone);
+        board.appendChild(col);
+      });
+    }
+
+    function renderNode(node, index) {
+      const div = document.createElement("article");
+      div.className = "node " + (node[3] || "");
+      div.dataset.role = node[0];
+      div.draggable = true;
+      div.ondragstart = e => e.dataTransfer.setData("text/plain", String(index));
+      div.innerHTML = `
+        <div class="node-title" contenteditable="true" oninput="editNode(${index}, this.textContent)">${escapeHtml(node[1])}</div>
+        <div class="node-meta">
+          <span class="tag">${escapeHtml(node[2] || "节点")}</span>
+          <span>#${index + 1}</span>
+        </div>
+      `;
+      return div;
+    }
+
+    function editNode(index, value) {
+      workflows[current][index][1] = value.trim();
+    }
+
+    function moveNode(event, role) {
+      const index = Number(event.dataTransfer.getData("text/plain"));
+      if (Number.isNaN(index)) return;
+      workflows[current][index][0] = role;
+      renderBoard();
+    }
+
+    function addNode() {
+      workflows[current].push(["系统", "新节点：点击这里修改内容", "新增"]);
+      renderBoard();
+    }
+
+    function exportMarkdown() {
+      const lines = [`# ${current}`, ""];
+      roles.forEach(role => {
+        const list = workflows[current].filter(node => node[0] === role);
+        if (!list.length) return;
+        lines.push(`## ${role}`, "");
+        list.forEach((node, i) => lines.push(`${i + 1}. ${node[1]}（${node[2] || "节点"}）`));
+        lines.push("");
+      });
+      showExport("导出 Markdown", lines.join("\\n"));
+    }
+
+    function exportJson() {
+      showExport("导出 JSON", JSON.stringify(workflows, null, 2));
+    }
+
+    function saveLocal() {
+      localStorage.setItem("jgy_workflow_waterfall", JSON.stringify(workflows));
+      alert("已保存到当前浏览器。");
+    }
+
+    function showExport(title, text) {
+      document.getElementById("exportTitle").textContent = title;
+      document.getElementById("exportText").value = text;
+      document.getElementById("exportDialog").showModal();
+    }
+
+    async function copyExport() {
+      await navigator.clipboard.writeText(document.getElementById("exportText").value);
+      alert("已复制。");
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, s => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[s]));
+    }
+
+    init();
+  </script>
+</body>
+</html>
