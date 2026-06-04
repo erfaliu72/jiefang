@@ -73,6 +73,7 @@
                         <span class="nav-label">{{ item.label }}</span>
                         <span v-if="item.key === 'approvals' && pendingApprovalCount" style="width:8px;height:8px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,0.14)"></span>
                         <span v-else-if="item.key === 'settings' && currentUser.role === '老板' && missingGuidanceAlerts.length" style="width:8px;height:8px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,0.14)"></span>
+                        <span v-else-if="item.key === 'assets' && pendingDeliveryCount" style="width:8px;height:8px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,0.14);animation:pulse 2s infinite"></span>
                     </a>
                 </nav>
 
@@ -429,7 +430,10 @@
                 <el-table-column label="操作" width="330" fixed="right">
                     <template #default="s">
                         <el-button v-if="canInitiateVehicleOrder(s.row)" type="warning" size="small" plain round @click="openSalesOrderFromVehicle(s.row)">发起报单</el-button>
-                        <el-button v-if="currentUser.role==='车管' && s.row.delivery_status==='待出库'" type="warning" size="small" round @click="doDeliver(s.row)">出库</el-button>
+                        <div v-if="currentUser.role==='车管' && s.row.delivery_status==='待出库'" style="display:inline-flex;align-items:center;gap:4px">
+                            <span style="width:8px;height:8px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,0.14);animation:pulse 2s infinite"></span>
+                            <el-button type="warning" size="small" round @click="doDeliver(s.row)">出库</el-button>
+                        </div>
                         <el-button v-if="currentUser.role==='运营' && s.row.contract_type==='以租代售'" type="success" size="small" plain round @click="openTransferDialog(s.row)">过户</el-button>
                         <el-button v-if="canInitiateVehicleReturn(s.row)" type="success" size="small" round @click="openReturnForm(s.row)">发起退车</el-button>
                                         <el-popconfirm v-if="currentUser.role==='老板'" title="确认删除？" @confirm="deleteVehicle(s.row.id)">
@@ -3312,6 +3316,10 @@
                 return merged;
             });
             const pendingApprovalCount = computed(() => pendingApprovalItems.value.length);
+            const pendingDeliveryCount = computed(() => {
+                if (!currentUser.value || currentUser.value.role !== '车管') return 0;
+                return contracts.value.filter(c => c.delivery_status === '待出库').length;
+            });
             const totalReminderCount = computed(() => pendingApprovalCount.value + missingGuidanceAlerts.value.length);
             const approvalFilterOptions = [
                 { value: '', label: '全部', roles: ['销售', '运营', '财务', '车管', '老板'] },
@@ -4755,7 +4763,7 @@
                 fetchApprovals, fetchApprovalReminders, fetchLockRequests, fetchFeeItems,
                 doApprove, doReject, doResubmit, doDeliver,
                 // UI
-                statCards, statusDistribution, filteredAssetRows, filteredContracts, eligibleInitialPaymentContracts, canLaunchApprovalActions, pendingApprovalItems, pendingApprovalCount, totalReminderCount,
+                statCards, statusDistribution, filteredAssetRows, filteredContracts, eligibleInitialPaymentContracts, canLaunchApprovalActions, pendingApprovalItems, pendingApprovalCount, pendingDeliveryCount, totalReminderCount,
                 numberFormat, statusClass, repayClass, calcOverdueDays, riskLevel,
                 approvalTypeLabel, approvalTypeClass, approvalVehicleLabel, deliveryStatusClass, assetStatusClass, returnStatusClass,
                 initialPaymentAmount, initialPaymentType, canInitiateInitialPayment, canInitiateVehicleOrder, canInitiateVehicleReturn, returnNextStep, currentApprovalStepLabel, isPendingApproval, approvalCardId,
