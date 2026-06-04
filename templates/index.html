@@ -428,7 +428,6 @@
                                 </el-table-column>
                 <el-table-column label="操作" width="330" fixed="right">
                     <template #default="s">
-                        <el-button v-if="s.row.contract_id && ['运营','老板'].includes(currentUser.role)" type="primary" size="small" plain round @click="exportContract(s.row)">导出合同</el-button>
                         <el-button v-if="canInitiateVehicleOrder(s.row)" type="warning" size="small" plain round @click="openSalesOrderFromVehicle(s.row)">发起报单</el-button>
                         <el-button v-if="currentUser.role==='车管' && s.row.delivery_status==='待出库'" type="warning" size="small" round @click="doDeliver(s.row)">出库</el-button>
                         <el-button v-if="currentUser.role==='运营' && s.row.contract_type==='以租代售'" type="success" size="small" plain round @click="openTransferDialog(s.row)">过户</el-button>
@@ -826,9 +825,6 @@
                                 <span class="card-count">{{ currentUser.role === '财务' ? '确认报单到账，完成后运营上传线下合同' : '运营上传线下合同、发起首次支付及查看低价报单后续确认' }}</span>
                             </div>
                             <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
-                                <el-button v-if="currentUser.role==='运营'" type="primary" @click="showAddContract = true">
-                                    <el-icon><Plus/></el-icon> 上传线下合同
-                                </el-button>
                                 <el-button v-if="currentUser.role==='财务' && salesOrders.some(o => o.order_status==='待财务确认')" type="success" plain @click="currentPage='orders'">
                                     <el-icon><Finished/></el-icon> 确认报单
                                 </el-button>
@@ -4039,20 +4035,6 @@
                 ElementPlus.ElMessage.success(data.message || '报单已激活');
                 fetchSalesOrders();
             }
-            async function exportContract(row) {
-                const contractId = row.contract_id || row.id;
-                const res = await fetch(`/api/contracts/${contractId}/export`, { method: 'POST' });
-                const data = await res.json();
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '导出合同失败');
-                ElementPlus.ElMessageBox.alert(
-                    `<div style="display:flex;flex-direction:column;gap:12px">
-                        <a href="${data.docx_url}" target="_blank">下载 Word 合同</a>
-                        <a href="${data.pdf_url}" target="_blank">下载 PDF 合同</a>
-                    </div>`,
-                    '合同导出成功',
-                    { dangerouslyUseHTMLString: true }
-                );
-            }
             function createContractFromOrder(row) {
                 Object.assign(newContract, {
                     vehicle_id: row.vehicle_id || '',
@@ -4607,16 +4589,6 @@
                 openDeliveryDialog(item);
             }
 
-            // ===== 租期结束入库 =====
-            async function returnStockVehicle(row) {
-                await ElementPlus.ElMessageBox.confirm(`确认 ${row.plate_number} 租期结束入库？`, '车辆入库', { type: 'warning' });
-                const res = await fetch(`/api/vehicles/${row.id}/return-stock`, { method: 'POST' });
-                const data = await res.json();
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '车辆入库失败');
-                ElementPlus.ElMessage.success(data.message || '车辆已入库');
-                fetchAll();
-            }
-
             // ===== 退还车辆验收单 =====
             function openReturnForm(row = null) {
                 if (row && !canInitiateVehicleReturn(row)) return ElementPlus.ElMessage.warning('仅已经出库（租赁）车辆可以发起退车');
@@ -4789,8 +4761,8 @@
                 initialPaymentAmount, initialPaymentType, canInitiateInitialPayment, canInitiateVehicleOrder, canInitiateVehicleReturn, returnNextStep, currentApprovalStepLabel, isPendingApproval, approvalCardId,
                 handleMenuSelect, handlePageAction, handleContractExpand, editPrice, deleteVehicle,
                 fetchModelGuidancePrices, fetchMissingGuidanceAlerts, onModelGuidanceCarTypeChange, editModelGuidancePrice, focusGuidanceAlert, submitModelGuidancePrice,
-                submitVehicle, submitContract, submitSalesOrder, editSalesOrderDraft, deleteSalesOrderDraft, copySalesOrderDraft, activateOrder, exportContract, createContractFromOrder, confirmRepayment, confirmFactoryRepayment, requestLock, openApprovalReminderCenter, focusApprovalItem,
-                deliverVehicle, returnStockVehicle, matchContractVehicle, openSalesOrderFromVehicle,
+                submitVehicle, submitContract, submitSalesOrder, editSalesOrderDraft, deleteSalesOrderDraft, copySalesOrderDraft, activateOrder, createContractFromOrder, confirmRepayment, confirmFactoryRepayment, requestLock, openApprovalReminderCenter, focusApprovalItem,
+                deliverVehicle, matchContractVehicle, openSalesOrderFromVehicle,
                 openPlanningDialog, onPlanningFactoryUpload, savePlanningContract, importPlanningFactory, confirmPlanningDifference,
                 onFactoryPlanUpload, submitFactoryImport, submitFeeItem,
                 openInitialPayment, openInitialPaymentPicker, selectInitialPaymentContract, onInitialScreenshotUpload, submitInitialPayment, onInitialReceiptUpload, openDeliveryDialog, onDeliveryFileUpload, saveDeliveryFiles, submitDelivery,

@@ -885,7 +885,7 @@ def seed_data():
         '老板': ['*'],
         '运营': ['view_contracts', 'view_overdue', 'lock_vehicle', 'execute_lock', 'confirm_repayment', 'initiate_return', 'view_orders'],
         '财务': ['view_contracts', 'confirm_repayment', 'confirm_factory', 'view_bills', 'view_profit', 'upload_receipt', 'collect_payment', 'verify_return', 'upload_initial_receipt', 'activate_order'],
-        '车管': ['add_vehicle', 'update_vehicle', 'activate_vehicle', 'return_inspect', 'deliver_vehicle', 'return_stock'],
+        '车管': ['add_vehicle', 'update_vehicle', 'return_inspect', 'deliver_vehicle'],
         '销售': ['create_contract', 'view_contracts', 'upload_screenshot', 'view_overdue', 'initiate_return', 'request_lock', 'initiate_initial_payment', 'create_order'],
     }
     hidden_fields = {

@@ -10,8 +10,6 @@ import os, uuid
 import json
 import re
 import threading, time as _time
-import zipfile
-from xml.sax.saxutils import escape as xml_escape
 
 app = Flask(__name__)
 app.secret_key = 'jinjuyuan-secret-2024'
@@ -20,18 +18,7 @@ CORS(app, supports_credentials=True)
 # 上传文件目录
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-CONTRACT_TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'contract_templates', 'raw')
-CONTRACT_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'contract_templates', 'generated')
-os.makedirs(CONTRACT_OUTPUT_DIR, exist_ok=True)
 
-CONTRACT_TEMPLATE_FILES = {
-    '销售': '【金聚源】车辆买卖合同（新车）-陈律师-20250905.docx',
-    '租赁': '2026年  金聚源 车辆租赁合同.docx',
-    '以租代售': '金聚源 （以租代购）-陈律师-20250905.docx',
-}
-
-_DOCX_READY = None
-_PDF_READY = None
 _SCHEDULER_STARTED = False
 
 # ======================== PRD 角色权限矩阵 ========================
@@ -49,7 +36,7 @@ ROLE_ACTIONS = {
     '老板': ['*'],
     '运营': ['view_contracts', 'view_overdue', 'lock_vehicle', 'execute_lock', 'confirm_repayment', 'initiate_return', 'view_orders'],
     '财务': ['view_contracts', 'confirm_repayment', 'confirm_factory', 'view_bills', 'view_profit', 'upload_receipt', 'collect_payment', 'verify_return', 'upload_initial_receipt', 'activate_order'],
-    '车管': ['add_vehicle', 'update_vehicle', 'activate_vehicle', 'return_inspect', 'deliver_vehicle', 'return_stock'],
+    '车管': ['add_vehicle', 'update_vehicle', 'return_inspect', 'deliver_vehicle'],
     '销售': ['create_contract', 'view_contracts', 'upload_screenshot', 'view_overdue', 'initiate_return', 'request_lock', 'initiate_initial_payment', 'create_order'],
 }
 
@@ -813,79 +800,11 @@ def parse_factory_plan_sheet(local_path):
     return rows
 
 
-def parse_factory_plan_pdf(local_path):
-    try:
-        from pypdf import PdfReader
-    except Exception as e:
-        raise ValueError(f'缺少 PDF 解析依赖 pypdf: {e}')
-
-    reader = PdfReader(local_path)
-    text = '\n'.join((page.extract_text() or '') for page in reader.pages)
-    if not text.strip():
-        raise ValueError('PDF 未提取到文本，请确认不是扫描件')
-
-    metadata = {}
-    patterns = {
-        'lease_contract_no': r'租赁合同号\s+([A-Za-z0-9_-]+)',
-        'lessee_name': r'承租人姓名\s+([^\s]+)',
-        'principal_amount': r'计息本金\(元\)\s+([\d,]+(?:\.\d+)?)',
-        'lease_months': r'租赁期限\(月\)\s+(\d+)',
-        'plate_number': r'主车车牌号\s+([^\s]+)',
-        'expected_repayment_day': r'预计每期还租日\s+(\d+)',
-    }
-    for key, pattern in patterns.items():
-        match = re.search(pattern, text)
-        if match:
-            metadata[key] = match.group(1)
-
-    rows = []
-    row_pattern = re.compile(
-        r'^\s*(\d+)\s+'
-        r'(\d{4}-\d{1,2}-\d{1,2})\s+'
-        r'([\d.]+)\s+'
-        r'([\d,]+(?:\.\d+)?)\s+'
-        r'([\d,]+(?:\.\d+)?)\s+'
-        r'([\d,]+(?:\.\d+)?)\s+'
-        r'([\d,]+(?:\.\d+)?)\s+'
-        r'([\d,]+(?:\.\d+)?)\s+'
-        r'(已归还|未归还)\s*$'
-    )
-    for line in text.splitlines():
-        compact = ' '.join(str(line).strip().split())
-        match = row_pattern.match(compact)
-        if not match:
-            continue
-        period, due_date, rate, principal, interest, subsidy, penalty, amount, status = match.groups()
-        rows.append({
-            'period': int(period),
-            'due_date': normalize_date(due_date),
-            'amount': parse_money(amount, 0),
-            'principal': parse_money(principal, 0),
-            'interest': parse_money(interest, 0),
-            'subsidy': parse_money(subsidy, 0),
-            'penalty': parse_money(penalty, 0),
-            'rate': parse_money(rate, 0),
-            'source_status': status,
-        })
-
-    if not rows:
-        raise ValueError('PDF 中未解析到还租计划明细')
-
-    metadata['source_format'] = 'factory_plan_pdf'
-    metadata['row_count'] = len(rows)
-    metadata['total_amount'] = round(sum(parse_money(row['amount']) for row in rows), 2)
-    metadata['paid_amount'] = round(sum(parse_money(row['amount']) for row in rows if row.get('source_status') == '已归还'), 2)
-    metadata['unpaid_amount'] = round(metadata['total_amount'] - metadata['paid_amount'], 2)
-    return rows, metadata
-
-
 def parse_factory_plan_file(local_path):
     lower_path = local_path.lower()
     if lower_path.endswith('.xlsx'):
         return parse_factory_plan_sheet(local_path), {'source_format': 'xlsx'}
-    if lower_path.endswith('.pdf'):
-        return parse_factory_plan_pdf(local_path)
-    raise ValueError('当前导入器仅支持 xlsx 或 PDF 格式')
+    raise ValueError('当前导入器仅支持 xlsx 格式')
 
 
 def compare_contract_repayment_plans(conn, contract_id):
@@ -974,6 +893,11 @@ def compare_contract_repayment_plans(conn, contract_id):
 def sales_order_plan_activation_blocker(conn, order_id):
     """If a sales order already has a linked installment contract, E2 must respect F2/F3."""
     c = conn.cursor()
+    c.execute("SELECT sales_mode FROM sales_orders WHERE id=?", (order_id,))
+    order = c.fetchone()
+    if not order:
+        return '报单不存在'
+    order_contract_type = contract_type_from_sales_mode(order['sales_mode'])
     c.execute("""
         SELECT id, contract_type, customer_plan_match_status
         FROM contracts
@@ -982,7 +906,11 @@ def sales_order_plan_activation_blocker(conn, order_id):
         LIMIT 1
     """, (order_id,))
     contract = c.fetchone()
-    if not contract or contract['contract_type'] == '销售':
+    if not contract:
+        if order_contract_type == '销售':
+            return None
+        return '客户还款计划未生成，不能财务确认报单'
+    if contract['contract_type'] == '销售':
         return None
 
     c.execute("SELECT COUNT(*) AS cnt FROM repayments WHERE contract_id=? AND period>=1", (contract['id'],))
@@ -1178,430 +1106,6 @@ def ensure_sales_order_planning_contract(conn, order_id, overrides=None, reset_f
         WHERE id=?
     """, (1 if reset_factory else 0, contract_id, order_id))
     return contract_id
-
-
-def safe_filename(text):
-    cleaned = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in str(text))
-    while '__' in cleaned:
-        cleaned = cleaned.replace('__', '_')
-    return cleaned.strip('_') or 'contract'
-
-
-def ensure_docx_support():
-    global _DOCX_READY
-    if _DOCX_READY is not None:
-        return _DOCX_READY
-    try:
-        from docx import Document as _Document
-        globals()['Document'] = _Document
-        _DOCX_READY = True
-    except Exception:
-        _DOCX_READY = False
-    return _DOCX_READY
-
-
-def ensure_pdf_support():
-    global _PDF_READY
-    if _PDF_READY is not None:
-        return _PDF_READY
-    try:
-        from reportlab.lib.pagesizes import A4 as _A4
-        from reportlab.lib.utils import simpleSplit as _simpleSplit
-        from reportlab.pdfbase import pdfmetrics as _pdfmetrics
-        from reportlab.pdfbase.cidfonts import UnicodeCIDFont as _UnicodeCIDFont
-        from reportlab.pdfgen import canvas as _canvas
-        _pdfmetrics.registerFont(_UnicodeCIDFont('STSong-Light'))
-        globals()['A4'] = _A4
-        globals()['simpleSplit'] = _simpleSplit
-        globals()['pdfmetrics'] = _pdfmetrics
-        globals()['canvas'] = _canvas
-        _PDF_READY = True
-    except Exception:
-        _PDF_READY = False
-    return _PDF_READY
-
-
-def format_currency(value):
-    return f"{parse_money(value):,.2f}"
-
-
-def format_date_parts(date_str):
-    if not date_str:
-        return ('', '', '')
-    dt = datetime.strptime(date_str, '%Y-%m-%d')
-    return (str(dt.year), str(dt.month), str(dt.day))
-
-
-def contract_template_path(contract_type):
-    filename = CONTRACT_TEMPLATE_FILES.get(contract_type)
-    if not filename:
-        raise ValueError(f'暂不支持合同类型: {contract_type}')
-    path = os.path.join(CONTRACT_TEMPLATE_DIR, filename)
-    if not os.path.exists(path):
-        raise FileNotFoundError(f'合同模板不存在: {path}')
-    return path
-
-
-def fetch_contract_detail(contract_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""
-        SELECT c.*, v.vin, v.plate_number, v.car_type, v.company as vehicle_company, v.engine_number,
-               v.insurance_expiry_date, v.annual_review_date,
-               cu.name as customer_name, cu.phone as customer_phone, cu.id_card, cu.address
-        FROM contracts c
-        JOIN vehicles v ON v.id = c.vehicle_id
-        LEFT JOIN customers cu ON cu.id = c.customer_id
-        WHERE c.id=?
-    """, (contract_id,))
-    row = c.fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-
-def fetch_contract_with_bank_info(contract_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""
-        SELECT c.*, v.vin, v.plate_number, v.car_type, v.company as vehicle_company,
-               cu.name as customer_name, cu.phone as customer_phone, cu.id_card, cu.address
-        FROM contracts c
-        JOIN vehicles v ON v.id = c.vehicle_id
-        LEFT JOIN customers cu ON cu.id = c.customer_id
-        WHERE c.id=?
-    """, (contract_id,))
-    row = c.fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-
-def build_contract_context(contract):
-    contract_type = contract['contract_type']
-    contract_no = f"JGY-{contract_type}-{contract['id']:06d}"
-    start_date = contract.get('start_date') or datetime.now().strftime('%Y-%m-%d')
-    end_date = contract.get('end_date') or start_date
-    start_y, start_m, start_d = format_date_parts(start_date)
-    end_y, end_m, end_d = format_date_parts(end_date)
-    total_days = ''
-    if start_date and end_date:
-        total_days = str((datetime.strptime(end_date, '%Y-%m-%d') - datetime.strptime(start_date, '%Y-%m-%d')).days or 0)
-
-    return {
-        'contract_no': contract_no,
-        'customer_name': contract.get('customer_name') or '',
-        'customer_phone': contract.get('customer_phone') or '',
-        'customer_id_card': contract.get('id_card') or '',
-        'customer_address': contract.get('address') or '',
-        'guarantor_name': ' / ',
-        'guarantor_id_card': ' / ',
-        'brand_name': '解放',
-        'car_type': contract.get('car_type') or '',
-        'plate_number': contract.get('plate_number') or '',
-        'vin': contract.get('vin') or '',
-        'company': contract.get('company') or contract.get('vehicle_company') or '陕西金聚源汽车服务有限公司',
-        'yard': contract.get('yard') or '陕西金聚源',
-        'lease_bank_name': contract.get('lease_bank_name') or '',
-        'lease_bank_card_no': contract.get('lease_bank_card_no') or '',
-        'start_date': start_date,
-        'end_date': end_date,
-        'start_year': start_y,
-        'start_month': start_m,
-        'start_day': start_d,
-        'end_year': end_y,
-        'end_month': end_m,
-        'end_day': end_d,
-        'loan_periods': str(contract.get('loan_periods') or ''),
-        'loan_period_years': f"{round((contract.get('loan_periods') or 0) / 12, 2):g}" if contract.get('loan_periods') else '',
-        'total_days': total_days,
-        'total_price': format_currency(contract.get('total_price')),
-        'rent': format_currency(contract.get('rent')),
-        'deposit': format_currency(contract.get('deposit')),
-        'down_payment': format_currency(contract.get('down_payment')),
-        'loan_amount': format_currency(contract.get('loan_amount')),
-        'repayment_day': str(contract.get('repayment_day') or ''),
-        'monthly_payment': format_currency(contract.get('monthly_payment')),
-        'factory_guarantee_deposit': format_currency(contract.get('factory_guarantee_deposit')),
-        'contract_type': contract_type,
-        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    }
-
-
-def replace_paragraph_text(paragraph, replacements):
-    text = paragraph.text
-    if not text:
-        return
-    new_text = text
-    for old, new in replacements:
-        if old in new_text:
-            new_text = new_text.replace(old, new)
-    if new_text != text:
-        if paragraph.runs:
-            paragraph.runs[0].text = new_text
-            for run in paragraph.runs[1:]:
-                run.text = ''
-        else:
-            paragraph.add_run(new_text)
-
-
-def replace_in_table(table, replacements):
-    for row in table.rows:
-        for cell in row.cells:
-            for paragraph in cell.paragraphs:
-                replace_paragraph_text(paragraph, replacements)
-
-
-def build_replacements(contract):
-    ctx = build_contract_context(contract)
-    if contract['contract_type'] == '销售':
-        return [
-            ('合同编号：【  】', f"合同编号：【{ctx['contract_no']}】"),
-            ('乙方（买受人）：                  身份证号：', f"乙方（买受人）：{ctx['customer_name']}    身份证号：{ctx['customer_id_card']}"),
-            ('电话                  ', f"电话 {ctx['customer_phone']}"),
-            ('车辆品牌：  ，车型： ，车架号：', f"车辆品牌：{ctx['brand_name']}，车型：{ctx['car_type']}，车架号：{ctx['vin']}"),
-            ('2.1车辆含税金额为          元，税率为13%。', f"2.1车辆含税金额为 {ctx['total_price']} 元，税率为13%。"),
-            ('按揭贷款方式付款：乙方应当于签订之日起     日内向甲方支付车辆首付款     元，余款     元乙方向相关贷款机构申请贷款支付。',
-             f"按揭贷款方式付款：乙方应当于签订之日起 7 日内向甲方支付车辆首付款 {ctx['down_payment']} 元，余款 {ctx['loan_amount']} 元乙方向相关贷款机构申请贷款支付。"),
-            ('分期付款：乙方应当于     年     月     日前分     期支付该车辆的全部价款，其中乙方应当于签订之日起     日内向甲方支付车辆首付款     元，剩余款项于每月     日前向甲方支付。',
-             f"分期付款：乙方应当于 {ctx['end_year']} 年 {ctx['end_month']} 月 {ctx['end_day']} 日前分 {ctx['loan_periods']} 期支付该车辆的全部价款，其中乙方应当于签订之日起 7 日内向甲方支付车辆首付款 {ctx['down_payment']} 元，剩余款项于每月 {ctx['repayment_day']} 日前向甲方支付。"),
-            ('4.1甲方应当于乙方支付全部车款后     日内向乙方交付车辆。', '4.1甲方应当于乙方支付全部车款后 15 日内向乙方交付车辆。'),
-            ('（本页为合同编号为【         】车辆买卖合同的签章页）', f'（本页为合同编号为【{ctx["contract_no"]}】车辆买卖合同的签章页）'),
-        ]
-    if contract['contract_type'] == '租赁':
-        return [
-            ('合同编号：【2026032902】', f"合同编号：【{ctx['contract_no']}】"),
-            ('乙方（承租人）：            身份证号：               电话', f"乙方（承租人）：{ctx['customer_name']}    身份证号：{ctx['customer_id_card']}    电话 {ctx['customer_phone']}"),
-            ('丙方（保证人）：     /       身份证号：     /          电话    /', '丙方（保证人）： /       身份证号： /          电话 /'),
-            ('车型：       ， 车牌号       ，车架号：                          。', f"车型：{ctx['car_type']}， 车牌号 {ctx['plate_number']}，车架号：{ctx['vin']}。"),
-            ('2.1起算日：     年    月    日至   年   月   日（实际以租赁车辆实际交付乙方之日起算），共    年（    天）',
-             f"2.1起算日：{ctx['start_year']} 年 {ctx['start_month']} 月 {ctx['start_day']} 日至 {ctx['end_year']} 年 {ctx['end_month']} 月 {ctx['end_day']} 日（实际以租赁车辆实际交付乙方之日起算），共 {ctx['loan_period_years']} 年（{ctx['total_days']} 天）"),
-            ('3.1.1本合同租赁车辆的租金标准为      元/月。', f"3.1.1本合同租赁车辆的租金标准为 {ctx['rent']} 元/月。"),
-            ('3.1.2乙方应当于甲方交付车辆前7日内向甲方交纳首期租金，剩余期限的租金乙方应当于每月【 】日前向甲方支付下一个支付周期的租金。',
-             f"3.1.2乙方应当于甲方交付车辆前7日内向甲方交纳首期租金，剩余期限的租金乙方应当于每月【{ctx['repayment_day']}】日前向甲方支付下一个支付周期的租金。"),
-            ('3.2.1乙方应当于甲方交付车辆前7日内向甲方交纳合同保证金【    】元，作为乙方履行本合同的保证。',
-             f"3.2.1乙方应当于甲方交付车辆前7日内向甲方交纳合同保证金【{ctx['deposit']}】元，作为乙方履行本合同的保证。"),
-        ]
-    return [
-        ('合同编号：【       】', f"合同编号：【{ctx['contract_no']}】"),
-        ('乙方（承租人）：            ，身份证号：', f"乙方（承租人）：{ctx['customer_name']}，身份证号：{ctx['customer_id_card']}"),
-        ('丙方（保证人）：            ，身份证号：', '丙方（保证人）： / ，身份证号： / '),
-        ('车型：          ， 车牌号         ，车架号：               。', f"车型：{ctx['car_type']}， 车牌号 {ctx['plate_number']}，车架号：{ctx['vin']}。"),
-        ('起算日：      年     月     日至      年    月    日（实际以租赁车辆实际交付乙方之日起算），共/年（    个月）',
-         f"起算日：{ctx['start_year']} 年 {ctx['start_month']} 月 {ctx['start_day']} 日至 {ctx['end_year']} 年 {ctx['end_month']} 月 {ctx['end_day']} 日（实际以租赁车辆实际交付乙方之日起算），共 {ctx['loan_period_years']} 年（{ctx['loan_periods']} 个月）"),
-        ('3.1.1本合同租赁车辆的租金标准为租金标准为每月     元/月，租期       个月，合计       元。',
-         f"3.1.1本合同租赁车辆的租金标准为每月 {ctx['rent']} 元/月，租期 {ctx['loan_periods']} 个月，合计 {ctx['total_price']} 元。"),
-        ('3.2.1乙方应当于甲方交付车辆前7日内向甲方交纳合同保证金【 】元，作为乙方履行本合同的保证。',
-         f"3.2.1乙方应当于甲方交付车辆前7日内向甲方交纳合同保证金【{ctx['deposit']}】元，作为乙方履行本合同的保证。"),
-        ('4.1甲方应当在签订本合同且收到乙方交付的首期租金及全额合同保证金后15日内在                         （车辆交付地点）将车辆交付给乙方，届时应当检测确认租赁车辆设备及租赁车辆状况，双方无异议后应签署《车辆交接单》（详见附件1）；乙方应签署《车辆交接单》，该清单签署后代表乙方已对车辆质量以及性能',
-         f"4.1甲方应当在签订本合同且收到乙方交付的首期租金及全额合同保证金后15日内在 {ctx['yard']}（车辆交付地点）将车辆交付给乙方，届时应当检测确认租赁车辆设备及租赁车辆状况，双方无异议后应签署《车辆交接单》（详见附件1）；乙方应签署《车辆交接单》，该清单签署后代表乙方已对车辆质量以及性能"),
-    ]
-
-
-def fill_contract_docx(contract):
-    if not ensure_docx_support():
-        raise RuntimeError('当前 Python 环境缺少 python-docx，无法生成 Word 合同')
-    template_path = contract_template_path(contract['contract_type'])
-    doc = Document(template_path)
-    replacements = build_replacements(contract)
-    ctx = build_contract_context(contract)
-
-    for paragraph in doc.paragraphs:
-        replace_paragraph_text(paragraph, replacements)
-
-    for table in doc.tables:
-        replace_in_table(table, replacements)
-
-    # 补充交接单表格常见字段
-    for table in doc.tables:
-        for row in table.rows:
-            cell_text = [cell.text.strip() for cell in row.cells]
-            joined = ' | '.join(cell_text)
-            if '车型：' in joined and 'VIN：' in joined:
-                if len(row.cells) >= 5:
-                    row.cells[0].text = f"车型：{ctx['car_type']}"
-                    row.cells[1].text = f"车牌：{ctx['plate_number']}"
-                    row.cells[2].text = f"VIN：{ctx['vin']}"
-                    row.cells[3].text = '颜色：'
-                    row.cells[4].text = ''
-            if '合同号：' in joined:
-                row.cells[-1].text = f"合同号：{ctx['contract_no']}"
-
-    base_name = safe_filename(f"{ctx['contract_no']}_{ctx['customer_name']}_{ctx['contract_type']}")
-    docx_path = os.path.join(CONTRACT_OUTPUT_DIR, f"{base_name}.docx")
-    doc.save(docx_path)
-    return docx_path, ctx
-
-
-def write_minimal_docx(path, ctx):
-    """无 python-docx 时的兜底 Word 导出，保证现场仍能生成可打开的合同文件。"""
-    lines = [
-        f"{ctx['contract_type']}合同",
-        f"合同编号：{ctx['contract_no']}",
-        "甲方：陕西金聚源汽车服务有限公司",
-        f"乙方：{ctx['customer_name']}",
-        f"电话：{ctx['customer_phone']}",
-        f"身份证号：{ctx['customer_id_card']}",
-        f"车型：{ctx['car_type']}",
-        f"车牌号：{ctx['plate_number']}",
-        f"车架号/VIN：{ctx['vin']}",
-        f"起租/开始日期：{ctx['start_date']}",
-        f"结束日期：{ctx['end_date']}",
-        f"总价：{ctx['total_price']} 元",
-        f"月租：{ctx['rent']} 元",
-        f"押金：{ctx['deposit']} 元",
-        f"首付：{ctx['down_payment']} 元",
-        f"贷款金额：{ctx['loan_amount']} 元",
-        f"还款日：每月 {ctx['repayment_day']} 日",
-        f"生成时间：{ctx['generated_at']}",
-        "说明：当前运行环境缺少 python-docx，本文件为系统兜底生成版本；安装 requirements.txt 后可按原始合同模板填充导出。",
-    ]
-    paragraphs = ''.join(
-        f"<w:p><w:r><w:t>{xml_escape(line)}</w:t></w:r></w:p>"
-        for line in lines
-    )
-    document_xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>
-    {paragraphs}
-    <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
-  </w:body>
-</w:document>'''
-    content_types = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
-  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
-</Types>'''
-    rels = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>'''
-    core = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/">
-  <dc:title>{xml_escape(ctx['contract_no'])}</dc:title>
-  <dc:creator>金聚源车辆管理系统</dc:creator>
-</cp:coreProperties>'''
-    app_props = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">
-  <Application>金聚源车辆管理系统</Application>
-</Properties>'''
-    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as package:
-        package.writestr('[Content_Types].xml', content_types)
-        package.writestr('_rels/.rels', rels)
-        package.writestr('word/document.xml', document_xml)
-        package.writestr('docProps/core.xml', core)
-        package.writestr('docProps/app.xml', app_props)
-
-
-def render_contract_pdf(contract, output_path, ctx):
-    if not ensure_pdf_support():
-        raise RuntimeError('当前 Python 环境缺少 reportlab，无法生成 PDF 合同')
-    c = canvas.Canvas(output_path, pagesize=A4)
-    width, height = A4
-    left = 50
-    top = height - 50
-    line_height = 18
-    y = top
-    title = f"{ctx['contract_type']}合同"
-    c.setFont('STSong-Light', 16)
-    c.drawString(left, y, title)
-    y -= 30
-    c.setFont('STSong-Light', 11)
-
-    lines = [
-        f"合同编号：{ctx['contract_no']}",
-        f"甲方：陕西金聚源汽车服务有限公司",
-        f"乙方：{ctx['customer_name']}    电话：{ctx['customer_phone']}    身份证号：{ctx['customer_id_card']}",
-        f"车型：{ctx['car_type']}    车牌号：{ctx['plate_number']}    VIN：{ctx['vin']}",
-        f"合同起止：{ctx['start_date']} 至 {ctx['end_date']}",
-        f"总价：¥{ctx['total_price']}    月租：¥{ctx['rent']}    押金：¥{ctx['deposit']}",
-        f"首付：¥{ctx['down_payment']}    贷款金额：¥{ctx['loan_amount']}    期数：{ctx['loan_periods']}",
-        f"还款日：每月 {ctx['repayment_day']} 日    生成时间：{ctx['generated_at']}",
-        '',
-        '说明：本 PDF 为系统根据原始合同模板自动填充生成的便捷版本，正式签署请同时核对导出的 Word 原件。',
-    ]
-
-    for raw_line in lines:
-        wrapped = simpleSplit(raw_line, 'STSong-Light', 11, width - 100) or ['']
-        for line in wrapped:
-            if y < 60:
-                c.showPage()
-                c.setFont('STSong-Light', 11)
-                y = top
-            c.drawString(left, y, line)
-            y -= line_height
-
-    c.save()
-
-
-def pdf_text(value):
-    raw = str(value).encode('utf-16-be')
-    return '<FEFF' + raw.hex().upper() + '>'
-
-
-def write_minimal_pdf(path, ctx):
-    """无 reportlab 时的兜底 PDF 导出，使用内置 CJK 字体描述写入关键合同字段。"""
-    lines = [
-        f"{ctx['contract_type']}合同",
-        f"合同编号：{ctx['contract_no']}",
-        "甲方：陕西金聚源汽车服务有限公司",
-        f"乙方：{ctx['customer_name']}    电话：{ctx['customer_phone']}",
-        f"车型：{ctx['car_type']}    车牌号：{ctx['plate_number']}    VIN：{ctx['vin']}",
-        f"合同起止：{ctx['start_date']} 至 {ctx['end_date']}",
-        f"总价：{ctx['total_price']} 元    月租：{ctx['rent']} 元    押金：{ctx['deposit']} 元",
-        f"首付：{ctx['down_payment']} 元    贷款金额：{ctx['loan_amount']} 元    期数：{ctx['loan_periods']}",
-        f"还款日：每月 {ctx['repayment_day']} 日    生成时间：{ctx['generated_at']}",
-        "说明：当前运行环境缺少 reportlab，本 PDF 为系统兜底生成版本。",
-    ]
-    text_ops = ["BT", "/F1 12 Tf", "50 790 Td", "18 TL"]
-    for idx, line in enumerate(lines):
-        if idx == 0:
-            text_ops.extend(["/F1 16 Tf", f"{pdf_text(line)} Tj", "/F1 12 Tf", "T*"])
-        else:
-            text_ops.extend([f"{pdf_text(line)} Tj", "T*"])
-    text_ops.append("ET")
-    stream = '\n'.join(text_ops).encode('ascii')
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-        b"<< /Length " + str(len(stream)).encode('ascii') + b" >>\nstream\n" + stream + b"\nendstream",
-        b"<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light /Encoding /UniGB-UCS2-H /DescendantFonts [6 0 R] >>",
-        b"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> /FontDescriptor 7 0 R >>",
-        b"<< /Type /FontDescriptor /FontName /STSong-Light /Flags 4 /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 880 /StemV 80 >>",
-    ]
-    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    offsets = [0]
-    for idx, obj in enumerate(objects, start=1):
-        offsets.append(len(pdf))
-        pdf.extend(f"{idx} 0 obj\n".encode('ascii'))
-        pdf.extend(obj)
-        pdf.extend(b"\nendobj\n")
-    xref_pos = len(pdf)
-    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode('ascii'))
-    pdf.extend(b"0000000000 65535 f \n")
-    for offset in offsets[1:]:
-        pdf.extend(f"{offset:010d} 00000 n \n".encode('ascii'))
-    pdf.extend(f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode('ascii'))
-    with open(path, 'wb') as pdf_file:
-        pdf_file.write(pdf)
-
-
-def generate_contract_files(contract):
-    ctx = build_contract_context(contract)
-    base_name = safe_filename(f"{ctx['contract_no']}_{ctx['customer_name']}_{ctx['contract_type']}")
-    docx_path = os.path.join(CONTRACT_OUTPUT_DIR, f"{base_name}.docx")
-    try:
-        docx_path, ctx = fill_contract_docx(contract)
-    except RuntimeError:
-        write_minimal_docx(docx_path, ctx)
-    pdf_path = docx_path[:-5] + '.pdf'
-    try:
-        render_contract_pdf(contract, pdf_path, ctx)
-    except RuntimeError:
-        write_minimal_pdf(pdf_path, ctx)
-    return docx_path, pdf_path
 
 
 def login_required(f):
@@ -2419,45 +1923,6 @@ def update_guidance_price(vid):
         'message': '指导价更新成功，后续成交将按新指导价判断',
         'remaining_missing_guidance_count': remaining_missing_count,
     })
-
-@app.route('/api/vehicles/<int:vid>/activate', methods=['POST'])
-@require_role('车管')
-def activate_vehicle(vid):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE vehicles SET status='在库', activated_at=? WHERE id=?",
-              (datetime.now().strftime('%Y-%m-%d'), vid))
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': '车辆已激活'})
-
-
-# ======================== 客户 CRUD ========================
-@app.route('/api/customers', methods=['GET'])
-def get_customers():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM customers ORDER BY id ASC")
-    customers = [dict(row) for row in c.fetchall()]
-    conn.close()
-    return jsonify(customers)
-
-@app.route('/api/customers', methods=['POST'])
-def add_customer():
-    data = request.json
-    conn = get_db()
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO customers (name, phone, id_card, address, remark) VALUES (?, ?, ?, ?, ?)",
-                  (data.get('name'), data.get('phone'), data.get('id_card'), data.get('address'), data.get('remark')))
-        conn.commit()
-        return jsonify({'success': True, 'id': c.lastrowid})
-    except Exception as e:
-        conn.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 400
-    finally:
-        conn.close()
-
 
 @app.route('/api/customer-blacklist', methods=['GET'])
 @require_role('财务', '老板')
@@ -3347,36 +2812,6 @@ def get_contracts():
     return jsonify(contracts)
 
 
-@app.route('/api/contracts/<int:cid>/export', methods=['POST'])
-@require_role('运营')
-def export_contract(cid):
-    contract = fetch_contract_detail(cid)
-    if not contract:
-        return jsonify({'success': False, 'message': '合同不存在'}), 404
-    try:
-        docx_path, pdf_path = generate_contract_files(contract)
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'生成合同失败: {e}'}), 400
-
-    docx_url = f"/api/contracts/exported/{os.path.basename(docx_path)}"
-    pdf_url = f"/api/contracts/exported/{os.path.basename(pdf_path)}"
-    conn = get_db()
-    log_audit(conn, '导出合同', 'contract', cid,
-              f"{request.current_user['display_name']} 导出 Word/PDF 合同", request.current_user['display_name'])
-    conn.commit()
-    conn.close()
-    return jsonify({
-        'success': True,
-        'message': '合同已生成',
-        'docx_url': docx_url,
-        'pdf_url': pdf_url,
-    })
-
-
-@app.route('/api/contracts/exported/<path:filename>')
-def serve_exported_contract(filename):
-    return send_from_directory(CONTRACT_OUTPUT_DIR, filename, as_attachment=True)
-
 @app.route('/api/contracts', methods=['POST'])
 @require_role('运营')
 def add_contract():
@@ -3388,29 +2823,31 @@ def add_contract():
         vehicle_id = data['vehicle_id']
         sales_order_id = data.get('sales_order_id')
         planning_contract_id = None
+        if not sales_order_id:
+            conn.close()
+            return jsonify({'success': False, 'message': '请先从已激活销售报单上传线下合同'}), 400
 
-        if sales_order_id:
-            c.execute("SELECT id, order_status, vehicle_id FROM sales_orders WHERE id=?", (sales_order_id,))
-            order = c.fetchone()
-            if not order:
-                conn.close()
-                return jsonify({'success': False, 'message': '关联报单不存在'}), 404
-            if order['vehicle_id'] != vehicle_id:
-                conn.close()
-                return jsonify({'success': False, 'message': '报单车辆与合同车辆不一致'}), 400
-            if order['order_status'] != '已激活':
-                conn.close()
-                if order['order_status'] == '待价格特批':
-                    return jsonify({'success': False, 'message': '成交价低于指导价，请先由老板完成价格审批'}), 400
-                return jsonify({'success': False, 'message': f'当前报单状态为{order["order_status"]}，请先由财务确认报单后再上传线下合同'}), 400
-            c.execute("""
-                SELECT id
-                FROM contracts
-                WHERE sales_order_id=? AND contract_status='报单计划中'
-                ORDER BY id DESC LIMIT 1
-            """, (sales_order_id,))
-            planning = c.fetchone()
-            planning_contract_id = planning['id'] if planning else None
+        c.execute("SELECT id, order_status, vehicle_id, sales_mode FROM sales_orders WHERE id=?", (sales_order_id,))
+        order = c.fetchone()
+        if not order:
+            conn.close()
+            return jsonify({'success': False, 'message': '关联报单不存在'}), 404
+        if order['vehicle_id'] != vehicle_id:
+            conn.close()
+            return jsonify({'success': False, 'message': '报单车辆与合同车辆不一致'}), 400
+        if order['order_status'] != '已激活':
+            conn.close()
+            if order['order_status'] == '待价格特批':
+                return jsonify({'success': False, 'message': '成交价低于指导价，请先由老板完成价格审批'}), 400
+            return jsonify({'success': False, 'message': f'当前报单状态为{order["order_status"]}，请先由财务确认报单后再上传线下合同'}), 400
+        c.execute("""
+            SELECT id
+            FROM contracts
+            WHERE sales_order_id=? AND contract_status='报单计划中'
+            ORDER BY id DESC LIMIT 1
+        """, (sales_order_id,))
+        planning = c.fetchone()
+        planning_contract_id = planning['id'] if planning else None
 
         # ===== 校验：同一辆车不能重复签约；关联报单的 F1 计划合同可复用 =====
         if planning_contract_id:
@@ -3481,6 +2918,9 @@ def add_contract():
 
         # 6.2 更新：合同线下签署，运营上传文档后不再走财务合同审批。
         contract_status = '执行中'
+        if contract_type != '销售' and not planning_contract_id:
+            conn.close()
+            return jsonify({'success': False, 'message': '请先完成 F1/F2/F3 还款计划，再上传线下合同'}), 400
 
         if planning_contract_id:
             contract_id = planning_contract_id
@@ -3536,46 +2976,6 @@ def add_contract():
                 user['display_name'],
             ))
             contract_id = c.lastrowid
-
-        # F1: 销售合同不生成还款计划；租赁/以租代售先生成未激活客户计划，隔离出库前窗口。
-        if contract_type != '销售' and not planning_contract_id:
-            if contract_type == '租赁' and deposit > 0:
-                c.execute("""
-                    INSERT INTO repayments (contract_id, period, due_date, amount, status, remark)
-                    VALUES (?, 0, NULL, ?, '未激活', '押金')
-                """, (contract_id, deposit))
-            if contract_type == '以租代售' and down_payment > 0:
-                c.execute("""
-                    INSERT INTO repayments (contract_id, period, due_date, amount, status, remark)
-                    VALUES (?, 0, NULL, ?, '未激活', '首付款')
-                """, (contract_id, down_payment))
-
-            for p in range(1, loan_periods + 1):
-                try:
-                    if contract_type == '租赁':
-                        due_dt = start_dt + relativedelta(months=p - 1)
-                    else:
-                        due_dt = start_dt + relativedelta(months=p)
-                        due_dt = due_dt.replace(day=min(repayment_day, 28))
-                except Exception:
-                    due_dt = start_dt + timedelta(days=30 * (p - 1 if contract_type == '租赁' else p))
-                c.execute("""
-                    INSERT INTO repayments (contract_id, period, due_date, amount, status)
-                    VALUES (?, ?, ?, ?, '未激活')
-                """, (contract_id, p, due_dt.strftime('%Y-%m-%d'), rent))
-
-            for p in range(1, factory_periods + 1):
-                try:
-                    due_dt = start_dt + relativedelta(months=p)
-                    due_dt = due_dt.replace(day=min(repayment_day, 28))
-                except Exception:
-                    due_dt = start_dt + timedelta(days=30 * p)
-                due_str = due_dt.strftime('%Y-%m-%d')
-                if monthly_payment > 0 and p <= factory_periods:
-                    c.execute("""
-                        INSERT INTO factory_repayments (contract_id, period, due_date, amount, status)
-                        VALUES (?, ?, ?, ?, '待还款')
-                    """, (contract_id, p, due_str, monthly_payment))
 
         # 车辆状态暂不改变；首次付款审核完成后进入车管出库。
         c.execute("""
@@ -3715,8 +3115,8 @@ def import_factory_repayments(cid):
     local_path = upload_url_to_path(file_url)
     if not os.path.exists(local_path):
         return jsonify({'success': False, 'message': '导入文件不存在，请重新上传'}), 400
-    if not local_path.lower().endswith(('.xlsx', '.pdf')):
-        return jsonify({'success': False, 'message': '当前导入器仅支持 xlsx 或 PDF 格式'}), 400
+    if not local_path.lower().endswith('.xlsx'):
+        return jsonify({'success': False, 'message': '当前导入器仅支持 xlsx 格式'}), 400
 
     conn = get_db()
     c = conn.cursor()
@@ -3738,15 +3138,7 @@ def import_factory_repayments(cid):
         amount = parse_money(row['amount'], fallback_amount)
         if amount <= 0:
             amount = fallback_amount
-        source_status = row.get('source_status')
-        remark_parts = []
-        if import_meta.get('source_format') == 'factory_plan_pdf':
-            remark_parts.append(f"PDF状态:{source_status or '未知'}")
-            if row.get('principal') is not None:
-                remark_parts.append(f"本金:{row.get('principal')}")
-            if row.get('interest') is not None:
-                remark_parts.append(f"利息:{row.get('interest')}")
-        prepared_rows.append((cid, row['period'], row['due_date'], amount, '待还款', None, ';'.join(remark_parts) or None))
+        prepared_rows.append((cid, row['period'], row['due_date'], amount, '待还款', None, None))
 
     c.execute("DELETE FROM factory_repayments WHERE contract_id=?", (cid,))
     c.executemany("""
@@ -4785,20 +4177,6 @@ def complete_vehicle_repair(vid):
     conn.commit()
     conn.close()
     return jsonify({'success': True, 'message': '维修已完成', 'status': next_status})
-
-
-# ======================== 租期结束车辆入库（车管操作）========================
-@app.route('/api/vehicles/<int:vid>/return-stock', methods=['POST'])
-@require_role('车管')
-def return_stock(vid):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE vehicles SET status='在库' WHERE id=?", (vid,))
-    c.execute("UPDATE contracts SET contract_status='已结清' WHERE vehicle_id=? AND contract_status='执行中'", (vid,))
-    log_audit(conn, '租期结束入库', 'vehicle', vid, '车管确认车辆归还入库')
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': '车辆已入库'})
 
 
 # ======================== 退还车辆验收单 ========================
@@ -6588,58 +5966,6 @@ def create_unlock_request():
     conn.commit()
     conn.close()
     return jsonify({'success': True, 'message': '解锁申请已提交，等待运营审核', 'lock_request_id': lr_id})
-
-
-# ======================== 旧车入库审批（退车后：销售发起→车管验车→运营查数据→财务复核→车管入库）========================
-@app.route('/api/return-inspections/<int:rid>/submit-approval', methods=['POST'])
-@require_role('销售', '车管')
-def submit_return_approval(rid):
-    """验收单提交审批"""
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT status FROM return_inspections WHERE id=?", (rid,))
-    ri = c.fetchone()
-    if not ri:
-        conn.close()
-        return jsonify({'success': False, 'message': '验收单不存在'}), 404
-    if ri['status'] == '待车管验车':
-        conn.close()
-        return jsonify({'success': False, 'message': '请先由车管完成验车填单'}), 400
-
-    c.execute("UPDATE return_inspections SET status='待审批' WHERE id=?", (rid,))
-    create_approval_flow(conn, 'return_stock', rid)
-
-    log_audit(conn, '退车审批提交', 'return_inspection', rid, '验收单提交入库审批')
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': '已提交入库审批（运营查车辆数据→财务复核）'})
-
-
-@app.route('/api/return-inspections/<int:rid>/execute-stock', methods=['POST'])
-@require_role('车管')
-def execute_return_stock(rid):
-    """车管执行旧车入库（审批通过后）"""
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT vehicle_id, contract_id, status FROM return_inspections WHERE id=?", (rid,))
-    ri = c.fetchone()
-    if not ri or ri['status'] != '待入库':
-        conn.close()
-        return jsonify({'success': False, 'message': '审批未通过或状态不正确'}), 400
-
-    vehicle_id = ri['vehicle_id']
-    contract_id = ri['contract_id']
-
-    c.execute("UPDATE return_inspections SET status='已入库' WHERE id=?", (rid,))
-    if vehicle_id:
-        c.execute("UPDATE vehicles SET status='在库', is_new='二手车' WHERE id=?", (vehicle_id,))
-    if contract_id:
-        c.execute("UPDATE contracts SET contract_status='已结清' WHERE id=?", (contract_id,))
-
-    log_audit(conn, '旧车入库', 'vehicle', vehicle_id, '车管执行旧车入库')
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': '旧车已入库'})
 
 
 # ======================== H1 逐日催收统一入口 ========================
