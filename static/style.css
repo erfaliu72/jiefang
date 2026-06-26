@@ -221,6 +221,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); -web
 }
 .stat-trend.up { background: var(--green-bg); color: var(--green); }
 .stat-trend.down { background: var(--red-bg); color: var(--red); }
+.stat-trend.neutral { background: #f1f5f9; color: var(--text-muted); }
 
 /* ===== CHARTS ===== */
 .charts-row { display: grid; grid-template-columns: 1fr 320px; gap: 16px; }

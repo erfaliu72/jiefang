@@ -1,21 +1,183 @@
 import sqlite3
 import os
+import re
 from datetime import datetime, timedelta
 
 DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'jinjuyuan.db')
 
-def get_db():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+# ================================================================
+#  数据库后端选择：设置环境变量 JJY_DB_HOST 则用 MySQL(RDS)，否则用本地 SQLite
+# ================================================================
+USE_MYSQL = bool(os.environ.get('JJY_DB_HOST'))
+
+if USE_MYSQL:
+    import pymysql
+    from pymysql.cursors import DictCursor
+
+    _MYSQL_CONF = {
+        'host': os.environ.get('JJY_DB_HOST'),
+        'port': int(os.environ.get('JJY_DB_PORT', '3306')),
+        'user': os.environ.get('JJY_DB_USER', 'root'),
+        'password': os.environ.get('JJY_DB_PASSWORD', ''),
+        'database': os.environ.get('JJY_DB_NAME', 'jinjuyuan'),
+        'charset': 'utf8mb4',
+    }
+
+    # --- SQL 方言翻译：把业务代码里的 SQLite 写法转成 MySQL ---
+    _RE_DATETIME_NOW = re.compile(r"datetime\(\s*'now'\s*,\s*'localtime'\s*\)", re.IGNORECASE)
+    _RE_DATETIME_NOW2 = re.compile(r"datetime\(\s*'now'\s*\)", re.IGNORECASE)
+
+    def _translate_sql(sql, has_params):
+        # datetime('now','localtime') -> NOW()
+        sql = _RE_DATETIME_NOW.sub('NOW()', sql)
+        sql = _RE_DATETIME_NOW2.sub('NOW()', sql)
+        # INSERT OR IGNORE / OR REPLACE
+        sql = re.sub(r'INSERT\s+OR\s+IGNORE', 'INSERT IGNORE', sql, flags=re.IGNORECASE)
+        sql = re.sub(r'INSERT\s+OR\s+REPLACE', 'REPLACE', sql, flags=re.IGNORECASE)
+        # ON CONFLICT(x) DO UPDATE SET a=excluded.a,... -> ON DUPLICATE KEY UPDATE a=VALUES(a),...
+        m = re.search(r'ON\s+CONFLICT\s*\([^)]*\)\s+DO\s+UPDATE\s+SET\s+(.*)$', sql, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            set_clause = m.group(1)
+            set_clause = re.sub(r'excluded\.(\w+)', r'VALUES(\1)', set_clause, flags=re.IGNORECASE)
+            sql = sql[:m.start()] + 'ON DUPLICATE KEY UPDATE ' + set_clause
+        # 占位符 ? -> %s（pymysql 用 %s）。先把已有的 % 转义成 %%，避免与 paramstyle 冲突
+        if has_params:
+            sql = sql.replace('%', '%%')
+            sql = sql.replace('?', '%s')
+        else:
+            # 无参数时 pymysql 不做格式化，% 原样保留
+            sql = sql.replace('?', '%s')
+        return sql
+
+    class _Cursor:
+        """包装 pymysql DictCursor，提供与 sqlite3 一致的接口。"""
+        def __init__(self, raw):
+            self._raw = raw
+
+        def execute(self, sql, params=None):
+            sql2 = _translate_sql(sql, params is not None and len(params) > 0 if hasattr(params, '__len__') else params is not None)
+            if params is None:
+                return self._raw.execute(sql2)
+            return self._raw.execute(sql2, params)
+
+        def fetchone(self):
+            return self._raw.fetchone()
+
+        def fetchall(self):
+            return self._raw.fetchall()
+
+        @property
+        def lastrowid(self):
+            return self._raw.lastrowid
+
+        @property
+        def rowcount(self):
+            return self._raw.rowcount
+
+        def close(self):
+            self._raw.close()
+
+    class _Conn:
+        """包装 pymysql 连接，提供与 sqlite3.Connection 一致的接口。"""
+        def __init__(self, raw):
+            self._raw = raw
+
+        def cursor(self):
+            return _Cursor(self._raw.cursor())
+
+        def execute(self, sql, params=None):
+            cur = self.cursor()
+            cur.execute(sql, params)
+            return cur
+
+        def commit(self):
+            self._raw.commit()
+
+        def rollback(self):
+            self._raw.rollback()
+
+        def close(self):
+            self._raw.close()
+
+    def get_db():
+        raw = pymysql.connect(cursorclass=DictCursor, autocommit=False, **_MYSQL_CONF)
+        # 关闭 only_full_group_by / strict 模式，兼容 SQLite 宽松行为
+        with raw.cursor() as c:
+            c.execute("SET SESSION sql_mode=''")
+        return _Conn(raw)
+
+else:
+    def get_db():
+        conn = sqlite3.connect(DATABASE)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+
+def _ddl(sql):
+    """建表 DDL：SQLite 原样执行；MySQL 时翻译方言。"""
+    if not USE_MYSQL:
+        return sql
+    s = sql
+    # 主键自增
+    s = re.sub(r'INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT', 'BIGINT AUTO_INCREMENT PRIMARY KEY', s, flags=re.IGNORECASE)
+    # 唯一文本列需指定长度（TEXT 不能做唯一键）
+    s = re.sub(r'\bTEXT\s+UNIQUE\b', 'VARCHAR(191) UNIQUE', s, flags=re.IGNORECASE)
+    # created_at 这类：TEXT DEFAULT (datetime('now','localtime')) -> DATETIME DEFAULT CURRENT_TIMESTAMP
+    s = re.sub(r"\bTEXT\s+DEFAULT\s*\(\s*datetime\(\s*'now'\s*,\s*'localtime'\s*\)\s*\)",
+               'DATETIME DEFAULT CURRENT_TIMESTAMP', s, flags=re.IGNORECASE)
+    # 其余裸的 DEFAULT (datetime(...)) -> DEFAULT CURRENT_TIMESTAMP
+    s = re.sub(r"DEFAULT\s*\(\s*datetime\(\s*'now'\s*,\s*'localtime'\s*\)\s*\)", 'DEFAULT CURRENT_TIMESTAMP', s, flags=re.IGNORECASE)
+    # MySQL 的 TEXT 列不能有默认值：TEXT DEFAULT 'x' -> VARCHAR(255) DEFAULT 'x'
+    s = re.sub(r"\bTEXT\s+DEFAULT\b", 'VARCHAR(255) DEFAULT', s, flags=re.IGNORECASE)
+    # 进入索引/唯一约束的 TEXT 列必须有长度 -> VARCHAR(191)
+    _indexed_cols = ['role', 'page_key', 'action_key', 'resource_key', 'field_key',
+                     'job', 'run_date', 'status', 'customer_phone', 'customer_name',
+                     'waiver_kind', 'accrued_date']
+    for col in _indexed_cols:
+        s = re.sub(r'\b(' + col + r')\s+TEXT\b', r'\1 VARCHAR(191)', s, flags=re.IGNORECASE)
+    # 类型映射：REAL -> DOUBLE；剩余 INTEGER -> BIGINT；TEXT 保留
+    s = re.sub(r'\bREAL\b', 'DOUBLE', s, flags=re.IGNORECASE)
+    s = re.sub(r'\bINTEGER\b', 'BIGINT', s, flags=re.IGNORECASE)
+    return s
 
 # ================================================================
 #  安全建表 — 仅在表不存在时创建，不会删除已有数据
 # ================================================================
 def init_db():
     conn = get_db()
-    c = conn.cursor()
+    _raw_c = conn.cursor()
+    if USE_MYSQL:
+        # MySQL 外键严格要求被引用表先建；建表期间关闭外键检查，避免表顺序问题
+        _raw_c.execute("SET FOREIGN_KEY_CHECKS=0")
+
+    class _DDLCursor:
+        """init_db 专用：自动把建表 DDL 翻译成目标方言；
+        MySQL 不支持 CREATE INDEX IF NOT EXISTS，吞掉重复建索引/列的报错。"""
+        def __init__(self, cur):
+            self._c = cur
+        def execute(self, sql, params=None):
+            s = sql
+            if 'CREATE TABLE' in s.upper() or 'ALTER TABLE' in s.upper():
+                s = _ddl(s)
+            if USE_MYSQL and re.search(r'CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS', s, re.IGNORECASE):
+                s = re.sub(r'CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS', 'CREATE INDEX', s, flags=re.IGNORECASE)
+            try:
+                if params is None:
+                    return self._c.execute(s)
+                return self._c.execute(s, params)
+            except Exception as e:
+                # MySQL 重复建索引/加列会报错，建表用 IF NOT EXISTS 不会
+                if USE_MYSQL and ('CREATE INDEX' in s.upper() or 'ALTER TABLE' in s.upper()):
+                    return None
+                raise
+        def fetchone(self): return self._c.fetchone()
+        def fetchall(self): return self._c.fetchall()
+        @property
+        def lastrowid(self): return self._c.lastrowid
+        @property
+        def rowcount(self): return self._c.rowcount
+    c = _DDLCursor(_raw_c)
 
     # ====== 车辆资产表 ======
     c.execute('''
@@ -141,6 +303,10 @@ def init_db():
         guidance_price REAL DEFAULT 0,
         lease_installment_price REAL DEFAULT 0,
         sale_total_price REAL DEFAULT 0,
+        lease_deposit_ratio REAL DEFAULT 0,
+        lease_repayment_ratio REAL DEFAULT 0,
+        sale_down_payment_ratio REAL DEFAULT 0,
+        sale_repayment_ratio REAL DEFAULT 0,
         remark TEXT,
         updated_by TEXT,
         updated_at TEXT,
@@ -208,7 +374,7 @@ def init_db():
         customer_plan_match_status TEXT DEFAULT '未比对',
         plan_compare_summary TEXT,
         expected_profit_floor REAL DEFAULT 0,
-        expected_profit_ceiling REAL DEFAULT 999999999,
+        expected_profit_ceiling REAL,
         contract_file TEXT,
         remark TEXT,
         loan_remark TEXT,
@@ -230,6 +396,7 @@ def init_db():
         amount REAL DEFAULT 0,
         paid_amount REAL DEFAULT 0,
         verified_amount REAL DEFAULT 0,
+        reported_amount REAL DEFAULT 0,
         status TEXT DEFAULT '待还款',
         paid_at TEXT,
         screenshot_path TEXT,
@@ -346,6 +513,10 @@ def init_db():
         payment_type TEXT DEFAULT '首付款',
         amount REAL DEFAULT 0,
         received_amount REAL DEFAULT 0,
+        shortage_amount REAL DEFAULT 0,
+        shortage_reason TEXT,
+        promised_repay_date TEXT,
+        shortage_status TEXT DEFAULT '无欠款',
         bank_serial TEXT,
         customer_screenshot_path TEXT,
         bank_receipt_path TEXT,
@@ -437,6 +608,11 @@ def init_db():
         tool_extinguisher INTEGER DEFAULT 0,
         tool_wedge INTEGER DEFAULT 0,
         tool_jack INTEGER DEFAULT 0,
+        tool_kit INTEGER DEFAULT 0,
+        tent_pole INTEGER DEFAULT 0,
+        car_wash_fee INTEGER DEFAULT 0,
+        body_ad_clean INTEGER DEFAULT 0,
+        other_info TEXT,
         -- 证件资料
         doc_license INTEGER DEFAULT 0,
         doc_keys INTEGER DEFAULT 0,
@@ -701,6 +877,34 @@ def init_db():
     )
     ''')
 
+    # ====== 挂账应收：首次付款不足、每期少还均进入此表 ======
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS receivables (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id INTEGER NOT NULL,
+        repayment_id INTEGER,
+        initial_payment_id INTEGER,
+        receivable_type TEXT NOT NULL,
+        source_period INTEGER,
+        amount REAL DEFAULT 0,
+        paid_amount REAL DEFAULT 0,
+        due_date TEXT,
+        promised_repay_date TEXT,
+        reason TEXT,
+        status TEXT DEFAULT '待归还',
+        late_fee_accrued REAL DEFAULT 0,
+        created_by TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        settled_at TEXT,
+        FOREIGN KEY (contract_id) REFERENCES contracts (id),
+        FOREIGN KEY (repayment_id) REFERENCES repayments (id),
+        FOREIGN KEY (initial_payment_id) REFERENCES contract_initial_payments (id)
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_receivables_contract ON receivables(contract_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_receivables_status ON receivables(status)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_receivables_repayment ON receivables(repayment_id)')
+
     # === 安全添加新列（如果表已存在但缺少新字段）===
     safe_alter_columns = [
         ("contracts", "snapshot_guidance_price", "REAL DEFAULT 0"),
@@ -708,7 +912,7 @@ def init_db():
         ("contracts", "customer_plan_match_status", "TEXT DEFAULT '未比对'"),
         ("contracts", "plan_compare_summary", "TEXT"),
         ("contracts", "expected_profit_floor", "REAL DEFAULT 0"),
-        ("contracts", "expected_profit_ceiling", "REAL DEFAULT 999999999"),
+        ("contracts", "expected_profit_ceiling", "REAL"),
         ("contracts", "contract_type", "TEXT DEFAULT '租赁'"),
         ("contracts", "customer_loan_amount", "REAL DEFAULT 0"),
         ("contracts", "down_payment", "REAL DEFAULT 0"),
@@ -766,12 +970,23 @@ def init_db():
         ("return_inspections", "paid_out", "INTEGER DEFAULT 0"),
         ("return_inspections", "paid_out_by", "TEXT"),
         ("return_inspections", "paid_out_at", "TEXT"),
+        ("return_inspections", "refund_serial", "TEXT"),
+        ("return_inspections", "refund_paid_amount", "REAL"),
         ("return_inspections", "refund_company_name", "TEXT"),
         ("return_inspections", "refund_bank_name", "TEXT"),
         ("return_inspections", "refund_bank_card_no", "TEXT"),
         ("return_inspections", "lease_bank_name", "TEXT"),
         ("return_inspections", "lease_bank_card_no", "TEXT"),
         ("return_inspections", "leader_remark", "TEXT"),
+        ("sales_orders", "is_new", "TEXT DEFAULT '新车'"),
+        ("sales_orders", "vehicle_brand", "TEXT"),
+        ("sales_orders", "lease_start_date", "TEXT"),
+        ("sales_orders", "vehicle_category", "TEXT"),
+        ("sales_orders", "vehicle_cab", "TEXT"),
+        ("sales_orders", "vehicle_engine_battery", "TEXT"),
+        ("sales_orders", "vehicle_power_battery", "TEXT"),
+        ("sales_orders", "vehicle_gearbox", "TEXT"),
+        ("sales_orders", "vehicle_box_type", "TEXT"),
         ("sales_orders", "car_type", "TEXT"),
         ("sales_orders", "vehicle_color", "TEXT"),
         ("sales_orders", "plate_number", "TEXT"),
@@ -805,8 +1020,16 @@ def init_db():
         ("sales_orders", "voided_by", "TEXT"),
         ("model_guidance_prices", "lease_installment_price", "REAL DEFAULT 0"),
         ("model_guidance_prices", "sale_total_price", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "lease_deposit_ratio", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "lease_repayment_ratio", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "sale_down_payment_ratio", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "sale_repayment_ratio", "REAL DEFAULT 0"),
         ("model_guidance_price_history", "price_kind", "TEXT DEFAULT 'legacy'"),
         ("contract_initial_payments", "received_amount", "REAL DEFAULT 0"),
+        ("contract_initial_payments", "shortage_amount", "REAL DEFAULT 0"),
+        ("contract_initial_payments", "shortage_reason", "TEXT"),
+        ("contract_initial_payments", "promised_repay_date", "TEXT"),
+        ("contract_initial_payments", "shortage_status", "TEXT DEFAULT '无欠款'"),
         ("contract_initial_payments", "bank_serial", "TEXT"),
         ("repayments", "paid_amount", "REAL DEFAULT 0"),
         ("repayments", "verified_amount", "REAL DEFAULT 0"),
@@ -816,6 +1039,7 @@ def init_db():
         ("repayments", "verified_by", "TEXT"),
         ("repayments", "verified_at", "TEXT"),
         ("repayments", "waterfall_summary", "TEXT"),
+        ("repayments", "reported_amount", "REAL DEFAULT 0"),
         # === W2: repayments 追加列 (v3 附录 W) ===
         ("repayments", "extra_alloc_confirmed_by", "TEXT"),
         ("repayments", "extra_alloc_confirmed_at", "TEXT"),
@@ -837,6 +1061,34 @@ def init_db():
         ("lock_requests", "unlocked_at", "TEXT"),
         ("return_inspections", "needs_repair", "INTEGER DEFAULT 0"),
         ("return_inspections", "repair_reason", "TEXT"),
+        # === 新车 Excel 批量上传入库：经销商买断库存表的扩展维度列 ===
+        ("vehicles", "settlement_price", "REAL DEFAULT 0"),      # 结算价格
+        ("vehicles", "stock_in_date", "TEXT"),                   # 入库日期
+        ("vehicles", "certificate_no", "TEXT"),                  # 合格证号
+        ("vehicles", "product_code", "TEXT"),                    # 产品代码
+        ("vehicles", "product_name", "TEXT"),                    # 产品名称
+        ("vehicles", "announce_model", "TEXT"),                  # 公告车型
+        ("vehicles", "tech_route", "TEXT"),                      # 技术路线
+        ("vehicles", "energy_type", "TEXT"),                     # 能源类型
+        ("vehicles", "product_category", "TEXT"),                # 产品大类
+        ("vehicles", "drive_form", "TEXT"),                      # 驱动形式
+        ("vehicles", "engine_factory", "TEXT"),                  # 发动机厂家
+        ("vehicles", "engine_power", "TEXT"),                    # 发动机功率
+        ("vehicles", "rear_axle", "TEXT"),                       # 后桥
+        ("vehicles", "wheelbase", "TEXT"),                       # 轴距
+        ("vehicles", "tire", "TEXT"),                            # 轮胎
+        ("vehicles", "axle_ratio", "TEXT"),                      # 后桥速比
+        ("vehicles", "dealer_code", "TEXT"),                     # 经销商代码
+        ("vehicles", "dealer_name", "TEXT"),                     # 经销商名称
+        ("vehicles", "pickup_warehouse", "TEXT"),                # 提车仓库
+        ("vehicles", "fund_source", "TEXT"),                     # 资金来源
+        ("vehicles", "import_raw", "TEXT"),                      # 原始Excel全部52列(JSON)
+        # === 退车验车：新增随车工具/棚杆/洗车费/车体广告清洗/其他 ===
+        ("return_inspections", "tool_kit", "INTEGER DEFAULT 0"),       # 随车工具
+        ("return_inspections", "tent_pole", "INTEGER DEFAULT 0"),       # 棚杆
+        ("return_inspections", "car_wash_fee", "INTEGER DEFAULT 0"),    # 洗车费
+        ("return_inspections", "body_ad_clean", "INTEGER DEFAULT 0"),   # 车体广告清洗
+        ("return_inspections", "other_info", "TEXT"),                  # 其他
     ]
     for table, col, col_type in safe_alter_columns:
         try:
@@ -844,6 +1096,17 @@ def init_db():
         except Exception:
             pass
 
+    c.execute("""
+        UPDATE model_guidance_prices
+        SET lease_deposit_ratio=CASE WHEN COALESCE(lease_deposit_ratio,0)<=0 THEN 0.10 ELSE lease_deposit_ratio END,
+            lease_repayment_ratio=CASE WHEN COALESCE(lease_repayment_ratio,0)<=0 THEN 0.025 ELSE lease_repayment_ratio END,
+            sale_down_payment_ratio=CASE WHEN COALESCE(sale_down_payment_ratio,0)<=0 THEN 0.15 ELSE sale_down_payment_ratio END,
+            sale_repayment_ratio=CASE WHEN COALESCE(sale_repayment_ratio,0)<=0 THEN 0.025 ELSE sale_repayment_ratio END
+        WHERE COALESCE(lease_installment_price,0)>0 OR COALESCE(sale_total_price,0)>0 OR COALESCE(guidance_price,0)>0
+    """)
+
+    if USE_MYSQL:
+        _raw_c.execute("SET FOREIGN_KEY_CHECKS=1")
     conn.commit()
     conn.close()
     print(f"Database initialized: {DATABASE}")
@@ -875,11 +1138,11 @@ def seed_data():
     conn.commit()
 
     role_pages = {
-        '老板': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'risk', 'return', 'profit', 'settings'],
-        '运营': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'risk', 'return'],
-        '财务': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'profit', 'return'],
-        '车管': ['dashboard', 'assets', 'approvals', 'return'],
-        '销售': ['dashboard', 'orders', 'assets', 'approvals', 'risk', 'return'],
+        '老板': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'risk', 'profit', 'settings'],
+        '运营': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'risk'],
+        '财务': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'profit'],
+        '车管': ['dashboard', 'assets', 'approvals'],
+        '销售': ['dashboard', 'orders', 'assets', 'approvals', 'risk'],
     }
     role_actions = {
         '老板': ['*'],
@@ -945,20 +1208,25 @@ def seed_data():
     conn.commit()
 
     default_model_guidance = [
-        ('解放轻卡4米2-虎6G140度纯电-宁德电池', 98000, 3500, 128000),
-        ('解放轻卡4米2-虎6G120度纯电-宁德电池', 98000, 3200, 120000),
-        ('解放轻卡-虎VR纯电-轻盈版', 90000, 3000, 115000),
-        ('解放轻卡4米2-虎6G 180混动-盟固利电池', 98000, 3300, 125000),
-        ('解放轻卡4米2-领途190马力', 98000, 3200, 125000),
-        ('解放轻卡4米2-领途150马力', 98000, 3000, 98000),
-        ('解放轻卡3米8-云内150排半', 90000, 2800, 90000),
+        ('解放轻卡4米2-虎6G140度纯电-宁德电池', 98000, 3500, 128000, 0.10, 0.025, 0.15, 0.025),
+        ('解放轻卡4米2-虎6G120度纯电-宁德电池', 98000, 3200, 120000, 0.10, 0.025, 0.15, 0.025),
+        ('解放轻卡-虎VR纯电-轻盈版', 90000, 3000, 115000, 0.10, 0.025, 0.15, 0.025),
+        ('解放轻卡4米2-虎6G 180混动-盟固利电池', 98000, 3300, 125000, 0.10, 0.025, 0.15, 0.025),
+        ('解放轻卡4米2-领途190马力', 98000, 3200, 125000, 0.10, 0.025, 0.15, 0.025),
+        ('解放轻卡4米2-领途150马力', 98000, 3000, 98000, 0.10, 0.025, 0.15, 0.025),
+        ('解放轻卡3米8-云内150排半', 90000, 2800, 90000, 0.10, 0.025, 0.15, 0.025),
     ]
-    for car_type, legacy_price, lease_price, sale_price in default_model_guidance:
+    for car_type, legacy_price, lease_price, sale_price, lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio in default_model_guidance:
         c.execute("""
             INSERT OR IGNORE INTO model_guidance_prices
-                (car_type, guidance_price, lease_installment_price, sale_total_price, remark, updated_by, updated_at)
-            VALUES (?, ?, ?, ?, '系统默认车型指导价', '系统', datetime('now','localtime'))
-        """, (car_type, legacy_price, lease_price, sale_price))
+                (car_type, guidance_price, lease_installment_price, sale_total_price,
+                 lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
+                 remark, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, '系统默认车型指导口径', '系统', datetime('now','localtime'))
+        """, (
+            car_type, legacy_price, lease_price, sale_price,
+            lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
+        ))
     conn.commit()
 
     c.execute("""

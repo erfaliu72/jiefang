@@ -161,8 +161,10 @@ cython_debug/
 
 # Custom for Jiefang Project
 *.db
+*.db.bak.*
 *.sqlite3
 uploads/
 output.log
 cookies.txt
 .DS_Store
+.claude/

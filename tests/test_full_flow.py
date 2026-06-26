@@ -453,6 +453,83 @@ class FullFlowTestCase(unittest.TestCase):
         self.assertIn(boss_export_response.status_code, (200, 400), boss_export_response.get_json())
         self.logout()
 
+    def test_sales_order_list_carries_existing_contract_customer_installments(self):
+        vehicle_id = self.create_vehicle()
+        vehicle = self.get_vehicle(vehicle_id)
+
+        self.login("sales")
+        order_response = self.client.post(
+            "/api/sales-orders",
+            json={
+                "payment_date": "2026-06-05",
+                "customer_name": "补合同客户",
+                "customer_phone": "13955556666",
+                "sales_mode": "经营租赁",
+                "vin": vehicle["vin"],
+                "lease_term": "36期",
+                "sale_total_price": 180000,
+                "vehicle_rent_amount": 0,
+                "payment_category": "押金",
+                "deposit_amount": 20000,
+                "receiving_company": "陕西金聚源汽车服务有限公司",
+            },
+        )
+        self.assertEqual(order_response.status_code, 200, order_response.get_json())
+        order_id = order_response.get_json()["id"]
+        self.logout()
+
+        self.prepare_sales_order_plan_for_activation(
+            order_id,
+            plan_overrides={
+                "contract_type": "租赁",
+                "business_mode": "经营租赁",
+                "start_date": "2026-06-05",
+                "loan_periods": 36,
+                "rent": 5000,
+                "deposit": 20000,
+                "down_payment": 0,
+            },
+            factory_rows=[
+                [idx, f"2026-{month:02d}-05", 4000]
+                for idx, month in enumerate(list(range(7, 13)) + list(range(1, 13)) * 3, start=1)
+            ][:36],
+        )
+
+        self.login("fin")
+        activate_response = self.client.post(f"/api/sales-orders/{order_id}/activate", json={})
+        self.assertEqual(activate_response.status_code, 200, activate_response.get_json())
+        self.logout()
+
+        contract_id = self.create_contract(
+            vehicle_id,
+            overrides={
+                "sales_order_id": order_id,
+                "start_date": "2026-06-05",
+                "loan_periods": 36,
+                "rent": 5000,
+                "deposit": 20000,
+                "down_payment": 0,
+            },
+        )
+
+        self.login("ops")
+        list_response = self.client.get("/api/sales-orders")
+        self.assertEqual(list_response.status_code, 200, list_response.get_json())
+        rows = list_response.get_json()
+        row = next(item for item in rows if item["id"] == order_id)
+        self.assertEqual(row["contract_id"], contract_id)
+        self.assertEqual(row["vehicle_rent_amount"], 0)
+        self.assertEqual(row["contract_rent"], 5000)
+        self.assertEqual(row["contract_loan_periods"], 36)
+        self.assertEqual(row["contract_deposit"], 20000)
+        self.assertEqual(row["contract_start_date"], "2026-06-05")
+        self.assertEqual(row["customer_plan_periods"], 36)
+        self.assertEqual(row["customer_plan_total"], 180000)
+        self.assertEqual(row["customer_plan_avg"], 5000)
+        self.assertEqual(row["customer_plan_first_due_date"], "2026-06-05")
+        self.assertEqual(row["customer_plan_last_due_date"], "2029-05-05")
+        self.logout()
+
     def test_below_guidance_sales_order_requires_boss_price_approval_and_snapshots_price_history(self):
         vehicle_id = self.create_vehicle({"guidance_price": 100000})
         vehicle = self.get_vehicle(vehicle_id)
@@ -551,6 +628,67 @@ class FullFlowTestCase(unittest.TestCase):
         )
         self.assertEqual(self.get_approval_steps("price_exception", normal_order_id), [])
 
+    def test_missing_guidance_sales_order_requires_boss_price_approval_and_vehicle_lock(self):
+        vehicle_id = self.create_vehicle({"guidance_price": 0, "car_type": "未知车型-缺少指导价"})
+        vehicle = self.get_vehicle(vehicle_id)
+
+        self.login("sales")
+        order_response = self.client.post(
+            "/api/sales-orders",
+            json={
+                "payment_date": "2026-05-13",
+                "customer_name": "缺指导客户",
+                "customer_phone": "13900000003",
+                "sales_mode": "卖车",
+                "vin": vehicle["vin"],
+                "sale_total_price": 120000,
+                "payment_category": "定金",
+                "deposit_amount": 3000,
+            },
+        )
+        self.assertEqual(order_response.status_code, 200, order_response.get_json())
+        order_id = order_response.get_json()["id"]
+        self.logout()
+
+        order = self.db_value(
+            "SELECT order_status, price_check_status, snapshot_guidance_price FROM sales_orders WHERE id=?",
+            (order_id,),
+        )
+        self.assertEqual(order["order_status"], "待价格特批")
+        self.assertEqual(order["price_check_status"], "待老板审批")
+        self.assertEqual(order["snapshot_guidance_price"], 0)
+        self.assertEqual(
+            [step["required_role"] for step in self.get_approval_steps("price_exception", order_id)],
+            ["老板"],
+        )
+        self.assertEqual(
+            self.db_value("SELECT status FROM vehicles WHERE id=?", (vehicle_id,)),
+            "报单锁定中",
+        )
+
+        # Add a second sales user for duplicate lock prevention.
+        self.db_execute(
+            "INSERT OR IGNORE INTO users (username, password, display_name, role) VALUES (?, ?, ?, ?)",
+            ("sales2", "123456", "李销售", "销售"),
+        )
+        self.login("sales2")
+        duplicate_response = self.client.post(
+            "/api/sales-orders",
+            json={
+                "payment_date": "2026-05-13",
+                "customer_name": "重复客户",
+                "customer_phone": "13900000004",
+                "sales_mode": "卖车",
+                "vin": vehicle["vin"],
+                "sale_total_price": 125000,
+                "payment_category": "定金",
+                "deposit_amount": 3000,
+            },
+        )
+        self.assertEqual(duplicate_response.status_code, 400)
+        self.assertIn("报单锁定", duplicate_response.get_json().get("message", ""))
+        self.logout()
+
     def test_boss_can_manage_model_guidance_price_for_car_type(self):
         car_type = "测试车型-统一指导价"
         vehicle_id = self.create_vehicle({"car_type": car_type, "guidance_price": 90000})
@@ -561,7 +699,16 @@ class FullFlowTestCase(unittest.TestCase):
         self.assertEqual(list_as_sales.status_code, 200, list_as_sales.get_json())
         forbidden_response = self.client.post(
             "/api/model-guidance-prices",
-            json={"car_type": car_type, "guidance_price": 130000, "lease_installment_price": 3500, "sale_total_price": 130000},
+            json={
+                "car_type": car_type,
+                "guidance_price": 130000,
+                "lease_installment_price": 3500,
+                "sale_total_price": 130000,
+                "lease_deposit_ratio": 0.10,
+                "lease_repayment_ratio": 0.025,
+                "sale_down_payment_ratio": 0.15,
+                "sale_repayment_ratio": 0.025,
+            },
         )
         self.assertEqual(forbidden_response.status_code, 403, forbidden_response.get_json())
         self.logout()
@@ -574,6 +721,10 @@ class FullFlowTestCase(unittest.TestCase):
                 "guidance_price": 130000,
                 "lease_installment_price": 3500,
                 "sale_total_price": 130000,
+                "lease_deposit_ratio": 0.10,
+                "lease_repayment_ratio": 0.025,
+                "sale_down_payment_ratio": 0.15,
+                "sale_repayment_ratio": 0.025,
                 "remark": "测试车型统一调价",
             },
         )
@@ -632,6 +783,53 @@ class FullFlowTestCase(unittest.TestCase):
         self.logout()
 
         self.assertEqual(self.db_value("SELECT order_status FROM sales_orders WHERE id=?", (order_id,)), "已激活")
+
+    def test_finance_approval_center_allows_installment_order_without_factory_plan(self):
+        vehicle_id = self.create_vehicle({"guidance_price": 100000})
+        vehicle = self.get_vehicle(vehicle_id)
+
+        self.login("sales")
+        order_response = self.client.post(
+            "/api/sales-orders",
+            json={
+                "payment_date": "2026-05-14",
+                "customer_name": "审批中心分期客户",
+                "customer_phone": "13922224444",
+                "sales_mode": "经营租赁",
+                "vin": vehicle["vin"],
+                "lease_term": "2期",
+                "sale_total_price": 128000,
+                "vehicle_rent_amount": 3500,
+                "payment_category": "定金",
+                "deposit_amount": 3000,
+            },
+        )
+        self.assertEqual(order_response.status_code, 200, order_response.get_json())
+        order_id = order_response.get_json()["id"]
+        self.logout()
+
+        flow_id = self.get_approval_steps("sale_payment", order_id)[0]["id"]
+        self.login("fin")
+        approve_response = self.client.post(
+            f"/api/approvals/{flow_id}/approve",
+            json={"comment": "客户计划已生成，厂家计划无需上传"},
+        )
+        self.assertEqual(approve_response.status_code, 200, approve_response.get_json())
+        self.logout()
+        self.assertEqual(
+            self.db_value("SELECT status FROM approval_flows WHERE id=?", (flow_id,)),
+            "已通过",
+        )
+        self.assertEqual(
+            self.db_value("SELECT order_status FROM sales_orders WHERE id=?", (order_id,)),
+            "已激活",
+        )
+        order_plan = self.db_value(
+            "SELECT customer_plan_match_status, factory_plan_match_status FROM sales_orders WHERE id=?",
+            (order_id,),
+        )
+        self.assertEqual(order_plan["customer_plan_match_status"], "已生成")
+        self.assertEqual(order_plan["factory_plan_match_status"], "无需上传")
 
     def test_low_guidance_order_visible_to_sales_boss_and_ops_after_approval(self):
         vehicle_id = self.create_vehicle({"guidance_price": 100000})
@@ -707,6 +905,10 @@ class FullFlowTestCase(unittest.TestCase):
                 "guidance_price": 99000,
                 "lease_installment_price": 3200,
                 "sale_total_price": 99000,
+                "lease_deposit_ratio": 0.10,
+                "lease_repayment_ratio": 0.025,
+                "sale_down_payment_ratio": 0.15,
+                "sale_repayment_ratio": 0.025,
                 "remark": "补充缺失指导价",
             },
         )
@@ -790,9 +992,10 @@ class FullFlowTestCase(unittest.TestCase):
         self.assertEqual(receipt_response.status_code, 200, receipt_response.get_json())
         self.assertEqual(verify_response.status_code, 200, verify_response.get_json())
         allocation = verify_response.get_json()["allocation"]
-        self.assertEqual(allocation["status"], "已还款")
+        self.assertEqual(allocation["status"], "部分核销")
         self.assertEqual(allocation["rent_allocated"], 400)
-        self.assertEqual(allocation["next_period_adjusted"]["added_amount"], 2600)
+        self.assertEqual(allocation["shortfall_amount"], 2600)
+        self.assertTrue(allocation["shortfall_receivable_id"])
         self.assertIn("insurance_fee", allocation["summary"])
         self.assertIn("penalty_fee", allocation["summary"])
         self.assertIn("late_fee", allocation["summary"])
@@ -808,12 +1011,19 @@ class FullFlowTestCase(unittest.TestCase):
         )
         self.assertEqual(repayment_state["paid_amount"], 400)
         self.assertEqual(repayment_state["verified_amount"], 2000)
-        self.assertEqual(repayment_state["status"], "已还款")
+        self.assertEqual(repayment_state["status"], "部分核销")
         self.assertIn("rent", repayment_state["waterfall_summary"])
         self.assertEqual(
             self.db_value("SELECT amount FROM repayments WHERE contract_id=? AND period=3", (contract_id,)),
-            5600.0,
+            3000.0,
         )
+        receivable = self.db_value(
+            "SELECT receivable_type, amount, status FROM receivables WHERE repayment_id=?",
+            (repayment_id,),
+        )
+        self.assertEqual(receivable["receivable_type"], "period_shortfall")
+        self.assertEqual(receivable["amount"], 2600)
+        self.assertEqual(receivable["status"], "待归还")
 
         self.login("fin")
         allocations = self.client.get(f"/api/reconciliation/{repayment_id}/allocations").get_json()
@@ -821,6 +1031,63 @@ class FullFlowTestCase(unittest.TestCase):
         self.assertEqual(
             [row["allocation_type"] for row in allocations],
             ["insurance_fee", "penalty_fee", "late_fee", "rent"],
+        )
+
+    def test_initial_payment_shortage_requires_boss_approval_and_creates_receivable(self):
+        vehicle_id = self.create_vehicle()
+        contract_id = self.create_contract(vehicle_id)
+        payment_id = self.initiate_initial_payment(contract_id)
+
+        self.login("fin")
+        receipt_response = self.client.post(
+            f"/api/initial-payments/{payment_id}/receipt",
+            json={
+                "bank_receipt_path": "/uploads/initial-bank-short.png",
+                "bank_serial": "INITSHORT001",
+                "received_amount": 4000,
+                "shortage_reason": "客户临时资金不足",
+                "promised_repay_date": "2026-02-01",
+            },
+        )
+        self.assertEqual(receipt_response.status_code, 200, receipt_response.get_json())
+        finance_flow_id = self.get_approval_steps("initial_payment", payment_id)[0]["id"]
+        approve_response = self.client.post(
+            f"/api/approvals/{finance_flow_id}/approve",
+            json={"comment": "实收不足，转老板审批"},
+        )
+        self.assertEqual(approve_response.status_code, 200, approve_response.get_json())
+        self.logout()
+
+        payment_state = self.db_value(
+            "SELECT status, shortage_amount, shortage_status FROM contract_initial_payments WHERE id=?",
+            (payment_id,),
+        )
+        self.assertEqual(payment_state["status"], "待老板审批")
+        self.assertEqual(payment_state["shortage_amount"], 1000)
+        self.assertEqual(payment_state["shortage_status"], "待老板审批")
+        self.assertEqual(
+            self.db_value("SELECT delivery_status FROM contracts WHERE id=?", (contract_id,)),
+            "首付不足待审批",
+        )
+
+        self.approve_latest_flow("initial_payment_shortage", payment_id)
+        self.assertEqual(
+            self.db_value("SELECT delivery_status FROM contracts WHERE id=?", (contract_id,)),
+            "待出库",
+        )
+        receivable = self.db_value(
+            "SELECT receivable_type, amount, promised_repay_date, status FROM receivables WHERE initial_payment_id=?",
+            (payment_id,),
+        )
+        self.assertEqual(receivable["receivable_type"], "initial_payment_shortfall")
+        self.assertEqual(receivable["amount"], 1000)
+        self.assertEqual(receivable["promised_repay_date"], "2026-02-01")
+        self.assertEqual(receivable["status"], "待归还")
+
+        self.deliver_vehicle(vehicle_id)
+        self.assertEqual(
+            self.db_value("SELECT status FROM vehicles WHERE id=?", (vehicle_id,)),
+            "租赁中",
         )
 
     def test_overpayment_requires_confirmed_periods_and_prepays_selected_months(self):
@@ -866,16 +1133,18 @@ class FullFlowTestCase(unittest.TestCase):
         self.assertEqual(verify_response.status_code, 200, verify_response.get_json())
         allocation = verify_response.get_json()["allocation"]
         self.assertEqual(allocation["status"], "已还款")
-        self.assertEqual(allocation["extra_allocated_rows"], [{"period": 3, "amount": 3000.0, "status": "预抵"}])
+        # 第3期被一整期完全覆盖 -> 直接“已还款”（不再是“预抵”），与来源第2期共用流水号/截图
+        self.assertEqual(allocation["extra_allocated_rows"], [{"period": 3, "amount": 3000.0, "status": "已还款"}])
         self.logout()
 
         period3 = self.db_value(
-            "SELECT paid_amount, verified_amount, status, waterfall_summary FROM repayments WHERE contract_id=? AND period=3",
+            "SELECT paid_amount, verified_amount, status, waterfall_summary, bank_serial FROM repayments WHERE contract_id=? AND period=3",
             (contract_id,),
         )
         self.assertEqual(period3["paid_amount"], 3000.0)
         self.assertEqual(period3["verified_amount"], 3000.0)
-        self.assertEqual(period3["status"], "预抵")
+        self.assertEqual(period3["status"], "已还款")
+        self.assertEqual(period3["bank_serial"], "OP123456")
         self.assertIn("多还抵扣来源第2期", period3["waterfall_summary"])
 
     def get_approval_steps(self, ref_type, ref_id):
@@ -1676,7 +1945,7 @@ class FullFlowTestCase(unittest.TestCase):
             "已结清",
         )
 
-    def test_plan_difference_confirmation_allows_linked_order_activation(self):
+    def test_plan_difference_confirmation_is_optional_for_linked_order_activation(self):
         vehicle_id = self.create_vehicle()
         vehicle = self.get_vehicle(vehicle_id)
 
@@ -1717,9 +1986,8 @@ class FullFlowTestCase(unittest.TestCase):
         self.logout()
 
         self.login("fin")
-        blocked_activate = self.client.post(f"/api/sales-orders/{order_id}/activate", json={})
-        self.assertEqual(blocked_activate.status_code, 400, blocked_activate.get_json())
-        self.assertIn("厂家还款计划未上传", blocked_activate.get_json()["message"])
+        activate_response = self.client.post(f"/api/sales-orders/{order_id}/activate", json={})
+        self.assertEqual(activate_response.status_code, 200, activate_response.get_json())
         self.logout()
 
         xlsx_url = self.create_factory_plan_xlsx([
@@ -1738,13 +2006,43 @@ class FullFlowTestCase(unittest.TestCase):
             json={"comment": "财务确认该利差符合线下审批"},
         )
         self.assertEqual(confirm_response.status_code, 200, confirm_response.get_json())
-        activate_response = self.client.post(f"/api/sales-orders/{order_id}/activate", json={})
-        self.assertEqual(activate_response.status_code, 200, activate_response.get_json())
         self.logout()
         self.assertEqual(
             self.db_value("SELECT customer_plan_match_status FROM contracts WHERE id=?", (contract_id,)),
             "差异已确认",
         )
+
+    def test_finance_cannot_save_customer_installment_plan(self):
+        vehicle_id = self.create_vehicle()
+        vehicle = self.get_vehicle(vehicle_id)
+
+        self.login("sales")
+        order_response = self.client.post(
+            "/api/sales-orders",
+            json={
+                "payment_date": "2026-05-12",
+                "customer_name": "财务不可保存客户分期",
+                "customer_phone": "13922225555",
+                "sales_mode": "经营租赁",
+                "vin": vehicle["vin"],
+                "sale_total_price": 128000,
+                "vehicle_rent_amount": 3500,
+                "payment_category": "定金",
+                "deposit_amount": 3000,
+            },
+        )
+        self.assertEqual(order_response.status_code, 200, order_response.get_json())
+        order_id = order_response.get_json()["id"]
+        self.logout()
+
+        self.login("fin")
+        plan_response = self.client.put(
+            f"/api/sales-orders/{order_id}/planning-contract",
+            json={"loan_periods": 2, "rent": 3500},
+        )
+        self.assertEqual(plan_response.status_code, 403, plan_response.get_json())
+        self.assertIn("客户分期由运营维护", plan_response.get_json()["message"])
+        self.logout()
 
     def test_profit_boss_dashboard_and_sla_visibility(self):
         vehicle_id = self.create_vehicle()
@@ -1793,6 +2091,110 @@ class FullFlowTestCase(unittest.TestCase):
         sla_response = self.client.get("/api/sla/reminders")
         self.assertEqual(sla_response.status_code, 200, sla_response.get_json())
         self.assertIn("items", sla_response.get_json())
+        self.logout()
+
+    def test_dashboard_stats_are_realtime_and_consistent_across_dashboards(self):
+        today = datetime.now().date()
+        month_start = today.replace(day=1)
+        next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        month_due = today + timedelta(days=1)
+        if month_due >= next_month:
+            month_due = today
+        overdue_due = today - timedelta(days=1)
+
+        conn = database.get_db()
+        try:
+            for table in [
+                "reconciliation_allocations", "contract_initial_payments", "factory_repayments",
+                "repayments", "contracts", "sales_orders", "vehicles", "customers",
+            ]:
+                conn.execute(f"DELETE FROM {table}")
+            conn.execute("""
+                INSERT INTO vehicles
+                    (id, vin, plate_number, company, car_type, invoice_date, invoice_price,
+                     estimated_residual_value, insurance_expiry_date, status)
+                VALUES
+                    (101, 'DASHBOARDVIN00001', '陕仪0001', '陕西金聚源汽车服务有限公司', '解放轻卡',
+                     ?, 120000, 80000, ?, '租赁中'),
+                    (102, 'DASHBOARDVIN00002', '陕仪0002', '陕西金聚源汽车服务有限公司', '解放轻卡',
+                     ?, 100000, 70000, NULL, '在库')
+            """, (
+                today.strftime("%Y-%m-%d"),
+                (today + timedelta(days=10)).strftime("%Y-%m-%d"),
+                today.strftime("%Y-%m-%d"),
+            ))
+            conn.execute("INSERT INTO customers (id, name, phone) VALUES (201, '仪表盘客户', '13800000000')")
+            conn.execute("""
+                INSERT INTO contracts
+                    (id, vehicle_id, customer_id, contract_type, contract_status, delivery_status,
+                     contract_file, rent, loan_periods)
+                VALUES
+                    (301, 101, 201, '租赁', '执行中', '已出库', '/uploads/signed.pdf', 3000, 12),
+                    (302, 102, 201, '租赁', '已结清', '待首付款', '/uploads/signed.pdf', 3000, 12)
+            """)
+            conn.execute("""
+                INSERT INTO repayments
+                    (contract_id, period, due_date, amount, paid_amount, status)
+                VALUES
+                    (301, 1, ?, 3000, 500, '待还款'),
+                    (301, 2, ?, 1000, 0, '待还款'),
+                    (301, 0, ?, 999, 0, '未激活'),
+                    (302, 1, ?, 888, 0, '待还款')
+            """, (
+                month_due.strftime("%Y-%m-%d"),
+                overdue_due.strftime("%Y-%m-%d"),
+                month_due.strftime("%Y-%m-%d"),
+                month_due.strftime("%Y-%m-%d"),
+            ))
+            conn.execute("""
+                INSERT INTO factory_repayments (contract_id, period, due_date, amount, status)
+                VALUES
+                    (301, 1, ?, 700, '待还款'),
+                    (301, 2, ?, 300, '已还款')
+            """, (month_due.strftime("%Y-%m-%d"), month_due.strftime("%Y-%m-%d")))
+            conn.execute("""
+                INSERT INTO sales_orders
+                    (id, vehicle_id, vin, customer_name, customer_phone, sales_mode, order_status, contract_id)
+                VALUES
+                    (401, 101, 'DASHBOARDVIN00001', '仪表盘客户', '13800000000', '经营租赁', '待财务确认', NULL),
+                    (402, 101, 'DASHBOARDVIN00001', '仪表盘客户', '13800000000', '经营租赁', '已激活', NULL),
+                    (403, 101, 'DASHBOARDVIN00001', '仪表盘客户', '13800000000', '经营租赁', '已激活', 301)
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login("sales")
+        stats_response = self.client.get("/api/dashboard/stats")
+        self.assertEqual(stats_response.status_code, 200, stats_response.get_json())
+        stats = stats_response.get_json()
+        self.logout()
+
+        expected_monthly_due = 2500
+        if overdue_due >= month_start:
+            expected_monthly_due += 1000
+        self.assertEqual(stats["total_vehicles"], 2)
+        self.assertEqual(stats["active_contract_count"], 1)
+        self.assertEqual(stats["open_order_count"], 2)
+        self.assertEqual(stats["active_order_contract_count"], 3)
+        self.assertEqual(stats["monthly_due"], expected_monthly_due)
+        self.assertEqual(stats["monthly_factory_due"], 700)
+        self.assertEqual(stats["overdue_count"], 1)
+        self.assertEqual(stats["expiring_insurance_count"], 1)
+        self.assertEqual(stats["total_customer_received"], 500)
+        self.assertEqual(stats["gross_profit"], 200)
+        self.assertEqual(len(stats["asset_chart"]["months"]), 12)
+
+        self.login("boss")
+        boss_response = self.client.get("/api/boss-dashboard/overview")
+        self.assertEqual(boss_response.status_code, 200, boss_response.get_json())
+        overview = boss_response.get_json()["overview"]
+        self.assertEqual(overview["active_contract_count"], stats["active_contract_count"])
+        self.assertEqual(overview["open_order_count"], stats["open_order_count"])
+        self.assertEqual(overview["overdue_repayment_count"], stats["overdue_count"])
+        self.assertEqual(overview["customer_received"], stats["total_customer_received"])
+        self.assertEqual(overview["factory_paid"], stats["total_factory_paid"])
+        self.assertEqual(overview["realized_cash_profit"], stats["realized_cash_profit"])
         self.logout()
 
     def test_sensitive_endpoints_require_roles(self):
