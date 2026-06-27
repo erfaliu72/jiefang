@@ -27,7 +27,7 @@ _SCHEDULER_STARTED = False
 # 每个角色可访问的页面 — 车辆列表全员可见
 ROLE_PAGES = {
     '老板': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'risk', 'profit', 'settings'],
-    '运营': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'risk'],
+    '运营': ['dashboard', 'orders', 'assets', 'approvals', 'reconciliation', 'risk', 'invoice'],
     '财务': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'profit'],
     '车管': ['dashboard', 'assets', 'approvals'],
     '销售': ['dashboard', 'orders', 'assets', 'approvals', 'risk'],
@@ -2509,6 +2509,25 @@ def get_guidance_price_alerts():
     })
 
 
+
+@app.route('/api/model-guidance-prices/history', methods=['GET'])
+@require_role('老板')
+def get_guidance_price_history():
+    car_type = request.args.get('car_type', '').strip()
+    if not car_type:
+        return jsonify([])
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT price_kind, old_price, new_price, changed_by, effective_at, remark
+        FROM model_guidance_price_history
+        WHERE car_type=?
+        ORDER BY effective_at DESC
+        LIMIT 30
+    """, (car_type,)).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
 @app.route('/api/model-guidance-prices', methods=['POST'])
 @require_role('老板')
 def upsert_model_guidance_price():
@@ -2523,6 +2542,16 @@ def upsert_model_guidance_price():
     sale_repayment_ratio = normalize_ratio(data.get('sale_repayment_ratio'))
     new_price = sale_price or lease_price
     remark = (data.get('remark') or '').strip()
+    # 新增Excel字段
+    chassis_base_price = parse_money(data.get('chassis_base_price')) or 0
+    landing_price = parse_money(data.get('landing_price')) or 0
+    interest_free_plan = (data.get('interest_free_plan') or '').strip() or None
+    rent_to_buy_plan = (data.get('rent_to_buy_plan') or '').strip() or None
+    min_loan_plan = (data.get('min_loan_plan') or '').strip() or None
+    lease_plan = (data.get('lease_plan') or '').strip() or None
+    product_code = (data.get('product_code') or '').strip() or None
+    fuel_type = (data.get('fuel_type') or '').strip() or None
+    if landing_price: new_price = new_price or landing_price
     if not car_type:
         return jsonify({'success': False, 'message': '请选择或填写车型'}), 400
     if lease_deposit_ratio <= 0 or lease_repayment_ratio <= 0 or sale_down_payment_ratio <= 0 or sale_repayment_ratio <= 0:
@@ -2552,8 +2581,10 @@ def upsert_model_guidance_price():
             INSERT INTO model_guidance_prices
                 (car_type, guidance_price, lease_installment_price, sale_total_price,
                  lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
+                 chassis_base_price, landing_price, interest_free_plan, rent_to_buy_plan,
+                 min_loan_plan, lease_plan, product_code, fuel_type,
                  remark, updated_by, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(car_type) DO UPDATE SET
                 guidance_price=excluded.guidance_price,
                 lease_installment_price=excluded.lease_installment_price,
@@ -2562,12 +2593,22 @@ def upsert_model_guidance_price():
                 lease_repayment_ratio=excluded.lease_repayment_ratio,
                 sale_down_payment_ratio=excluded.sale_down_payment_ratio,
                 sale_repayment_ratio=excluded.sale_repayment_ratio,
+                chassis_base_price=excluded.chassis_base_price,
+                landing_price=excluded.landing_price,
+                interest_free_plan=excluded.interest_free_plan,
+                rent_to_buy_plan=excluded.rent_to_buy_plan,
+                min_loan_plan=excluded.min_loan_plan,
+                lease_plan=excluded.lease_plan,
+                product_code=COALESCE(excluded.product_code, product_code),
+                fuel_type=COALESCE(excluded.fuel_type, fuel_type),
                 remark=excluded.remark,
                 updated_by=excluded.updated_by,
                 updated_at=excluded.updated_at
         """, (
             car_type, new_price, lease_price, sale_price,
             lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
+            chassis_base_price, landing_price, interest_free_plan, rent_to_buy_plan,
+            min_loan_plan, lease_plan, product_code, fuel_type,
             remark, user['display_name'], now,
         ))
         history_rows = [
@@ -2615,6 +2656,120 @@ def upsert_model_guidance_price():
         return jsonify({'success': False, 'message': str(e)}), 400
     finally:
         conn.close()
+
+
+
+# 指导价 Excel 导入
+@app.route('/api/model-guidance-prices/import', methods=['POST'])
+@require_role('老板')
+def import_guidance_prices():
+    import re
+    from openpyxl import load_workbook
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'message': '请上传文件'}), 400
+    f = request.files['file']
+    if not f.filename.endswith(('.xlsx', '.xls')):
+        return jsonify({'success': False, 'message': '请上传 .xlsx/.xls 文件'}), 400
+
+    def parse_monthly(text):
+        """从 '首付3万，3600三年' / '首付3万含1年保险，月还4500，3年' 提取月供金额"""
+        if not text or str(text).strip() in ('-', '无', ''):
+            return None
+        s = str(text)
+        m = re.search(r'月还(\d+)', s)
+        if m:
+            return float(m.group(1))
+        nums = re.findall(r'\d+', s)
+        return float(nums[1]) if len(nums) >= 2 else None
+
+    def to_yuan(v):
+        try:
+            return float(v) * 10000 if v else 0
+        except:
+            return 0
+
+    wb = load_workbook(f, data_only=True)
+    conn = get_db()
+    c = conn.cursor()
+    user = request.current_user
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    created, updated, skipped = 0, 0, 0
+
+    # sheet名→fuel_type映射；优先匹配含"油"或"新能"的sheet
+    sheet_map = {}
+    for name in wb.sheetnames:
+        if '新能' in name or '电' in name:
+            sheet_map[name] = '新能源'
+        elif '油' in name or '燃' in name:
+            sheet_map[name] = '油车'
+    if not sheet_map:  # 兜底：取前两个sheet
+        for i, name in enumerate(wb.sheetnames[:2]):
+            sheet_map[name] = ['油车', '新能源'][i]
+
+    for sheet_name, fuel_type in sheet_map.items():
+        ws = wb[sheet_name]
+        headers = [str(c.value).strip() if c.value else '' for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        col = {h: i for i, h in enumerate(headers)}
+
+        def get(row, key, default=None):
+            idx = col.get(key)
+            return row[idx] if idx is not None and idx < len(row) else default
+
+        for row_vals in ws.iter_rows(min_row=2, values_only=True):
+            car_type = get(row_vals, '车型')
+            if not car_type or not isinstance(car_type, str) or car_type.startswith('1、'):
+                continue
+            car_type = car_type.strip()
+
+            sale_total = to_yuan(get(row_vals, '整车'))
+            landing = to_yuan(get(row_vals, '落地不含商业险'))
+            chassis = to_yuan(get(row_vals, '底盘底价'))
+            interest_free = str(get(row_vals, '免息金额') or get(row_vals, '0息方案') or '').strip() or None
+            rent_buy = str(get(row_vals, '以租代购方案') or '').strip() or None
+            min_loan = str(get(row_vals, '最低贷款方案优惠') or '').strip() or None
+            lease_plan = str(get(row_vals, '租赁方案') or '').strip() or None
+            product_code = str(get(row_vals, '产品码') or '').strip() or None
+            monthly = parse_monthly(rent_buy)
+            guidance = landing or sale_total
+
+            c.execute("SELECT id FROM model_guidance_prices WHERE car_type=?", (car_type,))
+            exists = c.fetchone()
+            if exists:
+                c.execute("""
+                    UPDATE model_guidance_prices SET
+                        product_code=COALESCE(?, product_code),
+                        fuel_type=?, chassis_base_price=?, sale_total_price=?,
+                        landing_price=?, guidance_price=?,
+                        interest_free_plan=?, rent_to_buy_plan=?, min_loan_plan=?,
+                        lease_plan=?,
+                        lease_installment_price=CASE WHEN ? IS NOT NULL THEN ? ELSE lease_installment_price END,
+                        updated_by=?, updated_at=?
+                    WHERE car_type=?
+                """, (product_code, fuel_type, chassis, sale_total, landing, guidance,
+                      interest_free, rent_buy, min_loan, lease_plan,
+                      monthly, monthly, user['display_name'], now, car_type))
+                updated += 1
+            else:
+                c.execute("""
+                    INSERT INTO model_guidance_prices
+                        (car_type, product_code, fuel_type, chassis_base_price, sale_total_price,
+                         landing_price, guidance_price, interest_free_plan, rent_to_buy_plan,
+                         min_loan_plan, lease_plan, lease_installment_price,
+                         lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
+                         updated_by, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0.1,0.025,0.15,0.025,?,?)
+                """, (car_type, product_code, fuel_type, chassis, sale_total,
+                      landing, guidance, interest_free, rent_buy, min_loan,
+                      lease_plan, monthly or 0, user['display_name'], now))
+                created += 1
+            # 同步 guidance_price 到 vehicles 表（精确匹配 car_type 的车辆）
+            if guidance:
+                c.execute("UPDATE vehicles SET guidance_price=? WHERE car_type=?", (guidance, car_type))
+
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'created': created, 'updated': updated,
+                    'message': f'导入完成：新建 {created} 条，更新 {updated} 条'})
 
 
 # 文件上传
@@ -5319,6 +5474,67 @@ def verify_reconciliation(rid):
     })
 
 
+# ======================== 应收挂账归还（首付不足等差额） ========================
+@app.route('/api/receivables', methods=['GET'])
+@login_required
+def get_receivables_list():
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT rv.*, v.vin, v.plate_number, v.car_type,
+               cu.name as customer_name, cu.phone as customer_phone
+        FROM receivables rv
+        JOIN contracts c ON c.id = rv.contract_id
+        JOIN vehicles v ON v.id = c.vehicle_id
+        LEFT JOIN customers cu ON cu.id = c.customer_id
+        WHERE rv.status != '已结清' AND rv.receivable_type = 'initial_payment_shortfall'
+        ORDER BY rv.promised_repay_date ASC
+    """).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/receivables/<int:rid>/screenshot', methods=['POST'])
+@require_role('运营')
+def receivable_upload_screenshot(rid):
+    data = request.json or {}
+    path = (data.get('screenshot_path') or '').strip()
+    if not path:
+        return jsonify({'success': False, 'message': '请上传还款截图'}), 400
+    conn = get_db()
+    conn.execute("UPDATE receivables SET screenshot_path=? WHERE id=?", (path, rid))
+    log_audit(conn, '应收欠款上传截图', 'receivable', rid, f'运营上传还款凭证', request.current_user['display_name'])
+    conn.commit(); conn.close()
+    return jsonify({'success': True, 'message': '还款截图已上传'})
+
+
+@app.route('/api/receivables/<int:rid>/settle', methods=['POST'])
+@require_role('财务')
+def settle_receivable_api(rid):
+    data = request.json or {}
+    bank_serial = (data.get('bank_serial') or '').strip()
+    if not bank_serial:
+        return jsonify({'success': False, 'message': '请填写银行流水号'}), 400
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM receivables WHERE id=?", (rid,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '记录不存在'}), 404
+    if not row['screenshot_path']:
+        conn.close()
+        return jsonify({'success': False, 'message': '运营还未上传还款截图'}), 400
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    settle_receivable_payment(conn, rid, row['amount'])
+    c.execute("UPDATE receivables SET bank_serial=?, verified_by=?, verified_at=?, status='已结清', settled_at=? WHERE id=?",
+              (bank_serial, request.current_user['display_name'], now, now, rid))
+    log_audit(conn, '应收欠款核销', 'receivable', rid,
+              f"金额¥{row['amount']} 流水号{bank_serial} 核销人{request.current_user['display_name']}",
+              request.current_user['display_name'])
+    conn.commit(); conn.close()
+    return jsonify({'success': True, 'message': '欠款已核销'})
+
+
 # ======================== 审计日志查询 ========================
 @app.route('/api/audit-logs', methods=['GET'])
 def get_audit_logs():
@@ -6199,6 +6415,14 @@ def get_approvals():
                 'business_mode': row.get('sales_mode', ''),
                 'created_at': row.get('created_at', ''),
                 'requested_by': row.get('created_by', ''),
+                # 关键财务字段：从销售报单字段映射到合同展示字段
+                'rent': row.get('vehicle_rent_amount', 0),
+                'monthly_payment': row.get('vehicle_rent_amount', 0),
+                'loan_periods': int(''.join(filter(str.isdigit, str(row.get('lease_term') or '0'))) or 0),
+                'deposit': row.get('deposit_amount', 0),
+                'down_payment': row.get('deposit_amount', 0),
+                'start_date': row.get('lease_start_date', ''),
+                'end_date': '',
                 'follow_up_role': '财务' if row.get('order_status') == '待财务确认' else '',
             })
             return item

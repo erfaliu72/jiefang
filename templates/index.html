@@ -260,7 +260,7 @@
                                 </el-table-column>
                                 <el-table-column prop="plate_number" label="车牌号" width="100"></el-table-column>
                                 <el-table-column label="款项类别" width="110">
-                                    <template #default="s"><span class="status-badge" :class="paymentCategoryClass(s.row.payment_category)">{{ s.row.payment_category || '定金' }}</span></template>
+                                    <template #default="s"><span class="status-badge" :class="paymentCategoryClass(s.row.payment_category || defaultPaymentCategory(s.row.sales_mode))">{{ s.row.payment_category || defaultPaymentCategory(s.row.sales_mode) }}</span></template>
                                 </el-table-column>
                                 <el-table-column label="全包" width="80">
                                     <template #default="s"><el-tag size="small" :type="s.row.full_package ? 'success' : 'info'">{{ s.row.full_package ? '是' : '否' }}</el-tag></template>
@@ -271,7 +271,7 @@
                                 <el-table-column label="收款金额" width="150">
                                     <template #default="s">
                                         <div style="display:flex;align-items:center;gap:6px">
-                                            <span class="status-badge" :class="paymentCategoryClass(s.row.payment_category)">{{ s.row.payment_category || '定金' }}</span>
+                                            <span class="status-badge" :class="paymentCategoryClass(s.row.payment_category || defaultPaymentCategory(s.row.sales_mode))">{{ s.row.payment_category || defaultPaymentCategory(s.row.sales_mode) }}</span>
                                             <span class="num text-blue">¥{{ numberFormat(s.row.deposit_amount || 0) }}</span>
                                         </div>
                                     </template>
@@ -513,10 +513,6 @@
                     <template #default="s">
                         <el-button type="info" size="small" plain round @click="openVehicleDetail(s.row)">详情</el-button>
                         <el-button v-if="canInitiateVehicleOrder(s.row)" type="warning" size="small" plain round @click="openSalesOrderFromVehicle(s.row)">发起报单</el-button>
-                        <div v-if="currentUser.role==='车管' && s.row.delivery_status==='待出库'" style="display:inline-flex;align-items:center;gap:4px">
-                            <span style="width:8px;height:8px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,0.14);animation:pulse 2s infinite"></span>
-                            <el-button type="warning" size="small" round @click="doDeliver(s.row)">出库</el-button>
-                        </div>
                         <el-button v-if="currentUser.role==='运营' && s.row.contract_type==='以租代售'" type="success" size="small" plain round @click="openTransferDialog(s.row)">过户</el-button>
                         <el-button v-if="canInitiateVehicleReturn(s.row)" type="success" size="small" round @click="openReturnForm(s.row)">发起退车</el-button>
                                         <el-popconfirm v-if="currentUser.role==='老板'" title="确认删除？" @confirm="deleteVehicle(s.row.id)">
@@ -526,6 +522,23 @@
                                         </el-popconfirm>
                                     </template>
                                 </el-table-column>
+                            </el-table>
+                        </div>
+                    </div>
+                    <!-- ================== INVOICE ================== -->
+                    <div v-if="currentPage === 'invoice'" class="page fade-in">
+                        <div class="card">
+                            <div class="card-title-row">
+                                <div class="card-title">发票申请</div>
+                                <el-button v-if="currentUser.role==='运营'" type="primary" plain @click="openInvoiceDialog()">新建发票申请</el-button>
+                            </div>
+                            <el-table :data="invoiceRequests" style="width:100%;margin-top:12px" stripe>
+                                <el-table-column prop="contract_id" label="合同" width="90"></el-table-column>
+                                <el-table-column prop="customer_name" label="客户" width="120"></el-table-column>
+                                <el-table-column label="金额" width="120"><template #default="s">¥{{ numberFormat(s.row.amount) }}</template></el-table-column>
+                                <el-table-column prop="invoice_entity_name" label="开票抬头" min-width="180"></el-table-column>
+                                <el-table-column prop="invoice_no" label="发票号" width="140"></el-table-column>
+                                <el-table-column prop="status" label="状态" width="100"><template #default="s"><span class="status-badge" :class="deliveryStatusClass(s.row.status)">{{ s.row.status }}</span></template></el-table-column>
                             </el-table>
                         </div>
                     </div>
@@ -852,6 +865,35 @@
                         </template>
                     </el-dialog>
 
+                    <!-- 运营上传还款凭证弹窗 -->
+                    <el-dialog v-model="showReceivableScreenshotDialog" title="上传还款凭证" width="400" :close-on-click-modal="false">
+                        <div v-if="receivableTarget" style="margin-bottom:16px;color:#374151">
+                            客户：<b>{{ receivableTarget.customer_name }}</b>　欠款：<b class="text-red">¥{{ numberFormat(receivableTarget.amount) }}</b>
+                        </div>
+                        <el-upload action="/api/upload" :show-file-list="false" :on-success="onReceivableScreenshotUpload" accept=".jpg,.jpeg,.png,.pdf">
+                            <el-button type="primary" plain>上传还款截图</el-button>
+                        </el-upload>
+                        <a v-if="receivableScreenshotPath" :href="receivableScreenshotPath" target="_blank" class="badge badge-green" style="margin-top:8px;display:inline-block">已上传，点击查看</a>
+                        <template #footer>
+                            <el-button @click="showReceivableScreenshotDialog = false">取消</el-button>
+                            <el-button type="primary" :disabled="!receivableScreenshotPath" @click="submitReceivableScreenshot" :loading="submitting">确认上传</el-button>
+                        </template>
+                    </el-dialog>
+
+                    <!-- 财务核销欠款弹窗 -->
+                    <el-dialog v-model="showReceivableSettleDialog" title="核销欠款" width="400" :close-on-click-modal="false">
+                        <div v-if="receivableTarget" style="margin-bottom:16px;color:#374151">
+                            客户：<b>{{ receivableTarget.customer_name }}</b>　欠款：<b class="text-red">¥{{ numberFormat(receivableTarget.amount) }}</b>
+                        </div>
+                        <el-form label-position="top" size="default">
+                            <el-form-item label="银行流水号"><el-input v-model="receivableSettleForm.bank_serial" placeholder="银行转账流水号"></el-input></el-form-item>
+                        </el-form>
+                        <template #footer>
+                            <el-button @click="showReceivableSettleDialog = false">取消</el-button>
+                            <el-button type="success" @click="submitReceivableSettle" :loading="submitting">确认核销</el-button>
+                        </template>
+                    </el-dialog>
+
                     <!-- 财务对账弹窗 -->
                     <el-dialog v-model="showVerifyDialog" title="对账核销" width="420" :close-on-click-modal="false">
                         <div v-if="verifyTarget" style="margin-bottom:16px">
@@ -985,6 +1027,26 @@
                             </div>
                         </div>
 
+                        <!-- 车管待出库 -->
+                        <div v-if="currentUser.role==='车管' && pendingDeliveryContracts.length" class="card" style="margin-bottom:20px;padding:18px 20px;border:1px solid #fde68a;background:linear-gradient(135deg,#fffbeb 0%,#ffffff 100%)">
+                            <div class="card-title-row" style="margin-bottom:12px">
+                                <div style="display:flex;align-items:center;gap:10px">
+                                    <div class="card-title">待出库车辆</div>
+                                    <span class="badge badge-orange">{{ pendingDeliveryContracts.length }} 台</span>
+                                </div>
+                            </div>
+                            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">
+                                <div v-for="c in pendingDeliveryContracts" :key="c.id"
+                                    style="border:1px solid #fde68a;border-radius:10px;padding:14px 16px;background:#ffffff">
+                                    <div style="font-weight:600;margin-bottom:6px">{{ c.plate_number || c.vin }} <span style="font-size:12px;color:#9ca3af">{{ c.car_type }}</span></div>
+                                    <div style="font-size:13px;color:#6b7280;margin-bottom:10px">客户：{{ c.customer_name || '-' }}　模式：{{ c.business_mode || '-' }}</div>
+                                    <el-button type="warning" size="small" @click="doDeliver(c)">
+                                        <el-icon><Van/></el-icon> 确认出库
+                                    </el-button>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- 筛选 -->
                         <div class="card" style="margin-bottom:20px;padding:16px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
 	                            <el-radio-group v-model="approvalFilter" @change="fetchApprovals">
@@ -1050,6 +1112,18 @@
                                         <div><span style="color:#9ca3af">指导价：</span><b>¥{{ numberFormat(item.snapshot_guidance_price || 0) }}</b></div>
                                         <div><span style="color:#9ca3af">发起人：</span>{{ item.requested_by || '-' }}</div>
                                         <div><span style="color:#9ca3af">后续处理：</span>{{ item.overall_status === '已完成' ? '待财务确认' : '等待老板审批' }}</div>
+                                        <!-- 以租代售：首付 + 每期 + 期数 -->
+                                        <template v-if="['以租代售','以租代购'].includes(item.business_mode)">
+                                            <div><span style="color:#9ca3af">首付：</span>¥{{ numberFormat(item.down_payment) }}</div>
+                                            <div><span style="color:#9ca3af">每期还款：</span>¥{{ numberFormat(item.rent) }}</div>
+                                            <div><span style="color:#9ca3af">期数：</span>{{ item.loan_periods }}期</div>
+                                        </template>
+                                        <!-- 租赁：押金 + 每期 + 租期 -->
+                                        <template v-else-if="item.business_mode==='租赁' || item.business_mode==='经营租赁'">
+                                            <div><span style="color:#9ca3af">押金：</span>¥{{ numberFormat(item.deposit) }}</div>
+                                            <div><span style="color:#9ca3af">每期租金：</span>¥{{ numberFormat(item.rent) }}</div>
+                                            <div><span style="color:#9ca3af">租期：</span>{{ item.loan_periods }}期</div>
+                                        </template>
                                         <div style="grid-column:1/-1"><span style="color:#9ca3af">原因：</span>{{ item.price_exception_reason || '成交价低于指导价' }}</div>
                                     </template>
                                     <template v-else-if="item.ref_type==='return_stock'">
@@ -1075,9 +1149,9 @@
                                         <div><span style="color:#9ca3af">期数：</span>{{ item.loan_periods }}期</div>
                                         <div><span style="color:#9ca3af">合同期：</span>{{ item.start_date }} ~ {{ item.end_date }}</div>
                                     </template>
-                                    <div v-if="item.down_payment"><span style="color:#9ca3af">首付：</span>¥{{ numberFormat(item.down_payment) }}</div>
-                                    <div v-if="item.deposit"><span style="color:#9ca3af">押金：</span>¥{{ numberFormat(item.deposit) }}</div>
-                                    <div><span style="color:#9ca3af">业务模式：</span>{{ item.business_mode || '-' }}</div>
+                                    <div v-if="item.down_payment && item.ref_type!=='price_exception'"><span style="color:#9ca3af">首付：</span>¥{{ numberFormat(item.down_payment) }}</div>
+                                    <div v-if="item.deposit && item.ref_type!=='price_exception'"><span style="color:#9ca3af">押金：</span>¥{{ numberFormat(item.deposit) }}</div>
+                                    <div v-if="item.ref_type!=='price_exception'"><span style="color:#9ca3af">业务模式：</span>{{ item.business_mode || '-' }}</div>
                                     <div v-if="item.created_at"><span style="color:#9ca3af">提交时间：</span>{{ item.created_at }}</div>
                                 </div>
                                 <!-- 首次付款附件 -->
@@ -1191,6 +1265,38 @@
                                 </el-button>
                             </div>
                         </div>
+                    </div>
+
+                    <!-- ================== 应收挂账归还 ================== -->
+                    <div v-if="currentPage === 'reconciliation' && receivablesList.length" class="card fade-in" style="margin-top:16px">
+                        <div class="card-title-row">
+                            <div class="card-title">首付欠款归还</div>
+                            <span class="card-count">{{ receivablesList.length }} 笔待归还</span>
+                        </div>
+                        <el-table :data="receivablesList" stripe style="width:100%;margin-top:8px">
+                            <el-table-column prop="customer_name" label="客户" width="90"></el-table-column>
+                            <el-table-column prop="plate_number" label="车牌" width="110"></el-table-column>
+                            <el-table-column label="欠款金额" width="110">
+                                <template #default="s"><span class="num text-red">¥{{ numberFormat(s.row.amount - (s.row.paid_amount||0)) }}</span></template>
+                            </el-table-column>
+                            <el-table-column prop="promised_repay_date" label="承诺归还日" width="120"></el-table-column>
+                            <el-table-column prop="reason" label="原因" min-width="120"></el-table-column>
+                            <el-table-column prop="status" label="状态" width="90">
+                                <template #default="s"><span class="badge" :class="s.row.status==='待归还'?'badge-orange':'badge-red'">{{ s.row.status }}</span></template>
+                            </el-table-column>
+                            <el-table-column label="还款凭证" width="90">
+                                <template #default="s">
+                                    <a v-if="s.row.screenshot_path" :href="s.row.screenshot_path" target="_blank" class="badge badge-green" style="font-size:11px">已上传</a>
+                                    <span v-else style="color:#9ca3af;font-size:12px">待上传</span>
+                                </template>
+                            </el-table-column>
+                            <el-table-column label="操作" width="200">
+                                <template #default="s">
+                                    <el-button v-if="currentUser.role==='运营'" type="warning" link size="small" @click="openReceivableScreenshot(s.row)">上传还款凭证</el-button>
+                                    <el-button v-if="currentUser.role==='财务' && s.row.screenshot_path" type="success" link size="small" @click="openReceivableSettle(s.row)">核销</el-button>
+                                </template>
+                            </el-table-column>
+                        </el-table>
                     </div>
 
                     <!-- ================== RISK / LOCK ================== -->
@@ -1393,81 +1499,70 @@
                                     <div class="card-title">车型指导价维护</div>
                                     <div style="font-size:12px;color:#6b7280;margin-top:4px">老板按车型统一维护指导价；保存后同步当前同车型车辆，后续报单按新价判断，历史合同/报单快照不变。</div>
                                 </div>
-                                <el-button type="primary" @click="submitModelGuidancePrice">保存车型指导价</el-button>
+                                <div style="display:flex;gap:8px">
+                                    <el-upload action="/api/model-guidance-prices/import" :show-file-list="false" :on-success="onGuidanceImportSuccess" :on-error="onGuidanceImportError" accept=".xlsx,.xls">
+                                        <el-button type="success"><el-icon><Upload/></el-icon> 批量导入 Excel</el-button>
+                                    </el-upload>
+                                </div>
                             </div>
-                            <el-form :model="modelGuidanceForm" label-position="top" style="margin-top:14px">
-                                <el-row :gutter="16">
-                                    <el-col :span="10">
-                                        <el-form-item label="车型">
-                                            <el-select v-model="modelGuidanceForm.car_type" placeholder="选择或输入车型" filterable allow-create default-first-option style="width:100%" @change="onModelGuidanceCarTypeChange">
-                                                <el-option v-for="item in modelGuidanceCarTypeOptions" :key="item" :label="item" :value="item"></el-option>
-                                            </el-select>
-                                        </el-form-item>
-                                    </el-col>
-                                    <el-col :span="3">
-                                        <el-form-item label="租赁押金比例">
-                                            <el-input-number v-model="modelGuidanceForm.lease_deposit_ratio" :min="0" :max="100" :step="1" style="width:100%"></el-input-number>
-                                        </el-form-item>
-                                    </el-col>
-                                    <el-col :span="3">
-                                        <el-form-item label="租赁每期比例">
-                                            <el-input-number v-model="modelGuidanceForm.lease_repayment_ratio" :min="0" :max="100" :step="0.5" style="width:100%"></el-input-number>
-                                        </el-form-item>
-                                    </el-col>
-                                    <el-col :span="3">
-                                        <el-form-item label="代售首付比例">
-                                            <el-input-number v-model="modelGuidanceForm.sale_down_payment_ratio" :min="0" :max="100" :step="1" style="width:100%"></el-input-number>
-                                        </el-form-item>
-                                    </el-col>
-                                    <el-col :span="3">
-                                        <el-form-item label="代售每期比例">
-                                            <el-input-number v-model="modelGuidanceForm.sale_repayment_ratio" :min="0" :max="100" :step="0.5" style="width:100%"></el-input-number>
-                                        </el-form-item>
-                                    </el-col>
-                                    <el-col :span="3">
-                                        <el-form-item label="租赁每期价">
-                                            <el-input-number v-model="modelGuidanceForm.lease_installment_price" :min="0" :step="100" style="width:100%"></el-input-number>
-                                        </el-form-item>
-                                    </el-col>
-                                    <el-col :span="3">
-                                        <el-form-item label="参考整车价">
-                                            <el-input-number v-model="modelGuidanceForm.sale_total_price" :min="0" :step="1000" style="width:100%"></el-input-number>
-                                        </el-form-item>
-                                    </el-col>
-                                    <el-col :span="2">
-                                        <el-form-item label="备注">
-                                            <el-input v-model="modelGuidanceForm.remark" placeholder="如：2026年5月调价"></el-input>
-                                        </el-form-item>
-                                    </el-col>
-                                </el-row>
-                            </el-form>
-                            <el-table :data="modelGuidancePrices" stripe style="width:100%;margin-top:8px" max-height="360">
-                                <el-table-column prop="car_type" label="车型" min-width="260"></el-table-column>
-                                <el-table-column label="租赁押金" width="100">
-                                    <template #default="s"><span class="num text-blue">{{ ratioPercent(s.row.lease_deposit_ratio) }}</span></template>
+                            <el-input v-model="modelGuidanceSearch" placeholder="搜索车型..." clearable style="width:320px;margin:12px 0 8px" :prefix-icon="Search"></el-input>
+                            <el-table :data="filteredModelGuidancePrices" stripe style="width:100%;margin-top:0" max-height="400">
+                                <el-table-column prop="fuel_type" label="类型" width="70"></el-table-column>
+                                <el-table-column prop="car_type" label="车型" min-width="200"></el-table-column>
+                                <el-table-column label="底盘底价" width="110">
+                                    <template #default="s">
+                                        <el-popover trigger="hover" placement="right" width="340" @show="loadGuidanceHistory(s.row.car_type)">
+                                            <template #reference><span class="num" style="cursor:pointer;text-decoration:underline dotted">{{ s.row.chassis_base_price ? (s.row.chassis_base_price/10000).toFixed(1)+'万' : '-' }}</span></template>
+                                            <div style="font-size:12px"><b>{{ s.row.car_type }} 改价历史</b>
+                                                <div v-if="!(guidanceHistoryCache[s.row.car_type]||[]).length" style="color:#9ca3af;margin-top:6px">暂无记录</div>
+                                                <div v-for="h in (guidanceHistoryCache[s.row.car_type]||[])" :key="h.effective_at+h.price_kind" style="display:flex;justify-content:space-between;margin-top:4px;gap:8px">
+                                                    <span style="color:#6b7280">{{ h.effective_at.substring(0,16) }}</span>
+                                                    <span>{{ PRICE_KIND_LABELS[h.price_kind]||h.price_kind }}</span>
+                                                    <span style="color:#ef4444">{{ h.old_price }}</span><span>→</span><span style="color:#059669">{{ h.new_price }}</span>
+                                                    <span style="color:#9ca3af">{{ h.changed_by }}</span>
+                                                </div>
+                                            </div>
+                                        </el-popover>
+                                    </template>
                                 </el-table-column>
-                                <el-table-column label="租赁每期" width="100">
-                                    <template #default="s"><span class="num text-blue">{{ ratioPercent(s.row.lease_repayment_ratio) }}</span></template>
+                                <el-table-column label="整车" width="110">
+                                    <template #default="s">
+                                        <el-popover trigger="hover" placement="right" width="340" @show="loadGuidanceHistory(s.row.car_type)">
+                                            <template #reference><span class="num text-blue" style="cursor:pointer;text-decoration:underline dotted">{{ s.row.sale_total_price ? (s.row.sale_total_price/10000).toFixed(1)+'万' : '-' }}</span></template>
+                                            <div style="font-size:12px"><b>{{ s.row.car_type }} 改价历史</b>
+                                                <div v-if="!(guidanceHistoryCache[s.row.car_type]||[]).length" style="color:#9ca3af;margin-top:6px">暂无记录</div>
+                                                <div v-for="h in (guidanceHistoryCache[s.row.car_type]||[])" :key="h.effective_at+h.price_kind" style="display:flex;justify-content:space-between;margin-top:4px;gap:8px">
+                                                    <span style="color:#6b7280">{{ h.effective_at.substring(0,16) }}</span>
+                                                    <span>{{ PRICE_KIND_LABELS[h.price_kind]||h.price_kind }}</span>
+                                                    <span style="color:#ef4444">{{ h.old_price }}</span><span>→</span><span style="color:#059669">{{ h.new_price }}</span>
+                                                    <span style="color:#9ca3af">{{ h.changed_by }}</span>
+                                                </div>
+                                            </div>
+                                        </el-popover>
+                                    </template>
                                 </el-table-column>
-                                <el-table-column label="代售首付" width="100">
-                                    <template #default="s"><span class="num text-red">{{ ratioPercent(s.row.sale_down_payment_ratio) }}</span></template>
+                                <el-table-column label="落地(不含商险)" width="130">
+                                    <template #default="s">
+                                        <el-popover trigger="hover" placement="right" width="340" @show="loadGuidanceHistory(s.row.car_type)">
+                                            <template #reference><span class="num text-red" style="cursor:pointer;text-decoration:underline dotted">{{ s.row.landing_price ? (s.row.landing_price/10000).toFixed(1)+'万' : '-' }}</span></template>
+                                            <div style="font-size:12px"><b>{{ s.row.car_type }} 改价历史</b>
+                                                <div v-if="!(guidanceHistoryCache[s.row.car_type]||[]).length" style="color:#9ca3af;margin-top:6px">暂无记录</div>
+                                                <div v-for="h in (guidanceHistoryCache[s.row.car_type]||[])" :key="h.effective_at+h.price_kind" style="display:flex;justify-content:space-between;margin-top:4px;gap:8px">
+                                                    <span style="color:#6b7280">{{ h.effective_at.substring(0,16) }}</span>
+                                                    <span>{{ PRICE_KIND_LABELS[h.price_kind]||h.price_kind }}</span>
+                                                    <span style="color:#ef4444">{{ h.old_price }}</span><span>→</span><span style="color:#059669">{{ h.new_price }}</span>
+                                                    <span style="color:#9ca3af">{{ h.changed_by }}</span>
+                                                </div>
+                                            </div>
+                                        </el-popover>
+                                    </template>
                                 </el-table-column>
-                                <el-table-column label="代售每期" width="100">
-                                    <template #default="s"><span class="num text-red">{{ ratioPercent(s.row.sale_repayment_ratio) }}</span></template>
-                                </el-table-column>
-                                <el-table-column label="租赁每期价" width="130">
-                                    <template #default="s"><span class="num text-blue">¥{{ numberFormat(s.row.lease_installment_price || 0) }}</span></template>
-                                </el-table-column>
-                                <el-table-column label="以租代售整车价" width="150">
-                                    <template #default="s"><span class="num text-red">¥{{ numberFormat(s.row.sale_total_price || 0) }}</span></template>
-                                </el-table-column>
-                                <el-table-column label="当前车辆数" width="110">
-                                    <template #default="s">{{ s.row.vehicle_count || 0 }} 台</template>
-                                </el-table-column>
-                                <el-table-column prop="updated_by" label="修改人" width="100"></el-table-column>
-                                <el-table-column prop="updated_at" label="生效时间" width="170"></el-table-column>
-                                <el-table-column prop="remark" label="备注" min-width="160"></el-table-column>
-                                <el-table-column label="操作" width="90">
+                                <el-table-column prop="interest_free_plan" label="免息/0息方案" min-width="100"></el-table-column>
+                                <el-table-column prop="rent_to_buy_plan" label="以租代购方案" min-width="160"></el-table-column>
+                                <el-table-column prop="min_loan_plan" label="最低贷款方案" min-width="150"></el-table-column>
+                                <el-table-column prop="lease_plan" label="租赁方案" min-width="160"></el-table-column>
+                                <el-table-column prop="updated_at" label="更新时间" width="150"></el-table-column>
+                                <el-table-column label="操作" width="60">
                                     <template #default="s">
                                         <el-button type="primary" link size="small" @click="editModelGuidancePrice(s.row)">编辑</el-button>
                                     </template>
@@ -2117,10 +2212,6 @@
                     <el-col :span="12">
                         <el-form-item label="车架号">
                             <el-input v-model="newOrder.vin" maxlength="17" show-word-limit style="font-family:monospace"></el-input>
-                            <div v-if="currentOrderGuidanceLabel" style="margin-top:-8px;margin-bottom:12px;font-size:12px;color:#ef4444">
-                                当前{{ currentOrderGuidanceLabel }}
-                                <span v-if="currentOrderNeedsApproval">，低于指导口径，将提交老板价格特批</span>
-                            </div>
                         </el-form-item>
                     </el-col>
                     <el-col :span="6">
@@ -2369,6 +2460,48 @@
                 <el-button @click="showDeliveryDialog = false">取消</el-button>
                 <el-button @click="saveDeliveryFiles" :loading="submitting">先保存资料</el-button>
                 <el-button type="warning" @click="submitDelivery" :loading="submitting">确认出库</el-button>
+            </template>
+        </el-dialog>
+
+        <!-- ========== 指导价编辑 DIALOG ========== -->
+        <el-dialog v-model="showGuidanceEditDialog" title="编辑车型指导价" width="760" :close-on-click-modal="false">
+            <el-form :model="modelGuidanceForm" label-position="top" size="default">
+                <el-divider content-position="left">基本信息</el-divider>
+                <el-row :gutter="16">
+                    <el-col :span="12"><el-form-item label="车型"><el-input v-model="modelGuidanceForm.car_type" disabled></el-input></el-form-item></el-col>
+                    <el-col :span="6"><el-form-item label="产品码"><el-input v-model="modelGuidanceForm.product_code" placeholder="产品码"></el-input></el-form-item></el-col>
+                    <el-col :span="6"><el-form-item label="类型"><el-select v-model="modelGuidanceForm.fuel_type" style="width:100%" clearable><el-option label="油车" value="油车"></el-option><el-option label="新能源" value="新能源"></el-option></el-select></el-form-item></el-col>
+                </el-row>
+                <el-divider content-position="left">价格（单位：万元）</el-divider>
+                <el-row :gutter="16">
+                    <el-col :span="8"><el-form-item label="底盘底价（万）"><el-input-number v-model="modelGuidanceForm.chassis_base_price_wan" :min="0" :step="0.1" :precision="2" style="width:100%"></el-input-number></el-form-item></el-col>
+                    <el-col :span="8"><el-form-item label="整车（万）"><el-input-number v-model="modelGuidanceForm.sale_total_price_wan" :min="0" :step="0.1" :precision="2" style="width:100%"></el-input-number></el-form-item></el-col>
+                    <el-col :span="8"><el-form-item label="落地不含商险（万）"><el-input-number v-model="modelGuidanceForm.landing_price_wan" :min="0" :step="0.1" :precision="2" style="width:100%"></el-input-number></el-form-item></el-col>
+                </el-row>
+                <el-divider content-position="left">方案文案</el-divider>
+                <el-row :gutter="16">
+                    <el-col :span="12"><el-form-item label="免息/0息方案"><el-input v-model="modelGuidanceForm.interest_free_plan" placeholder="如：11万两年"></el-input></el-form-item></el-col>
+                    <el-col :span="12"><el-form-item label="以租代购方案"><el-input v-model="modelGuidanceForm.rent_to_buy_plan" placeholder="如：首付3万，3600三年"></el-input></el-form-item></el-col>
+                </el-row>
+                <el-row :gutter="16">
+                    <el-col :span="12"><el-form-item label="最低贷款方案优惠"><el-input v-model="modelGuidanceForm.min_loan_plan" placeholder="如：5万12期免息，3000"></el-input></el-form-item></el-col>
+                    <el-col :span="12"><el-form-item label="租赁方案"><el-input v-model="modelGuidanceForm.lease_plan" placeholder="如：押金1万，租金4500"></el-input></el-form-item></el-col>
+                </el-row>
+                <el-divider content-position="left">租赁/代售计算参数</el-divider>
+                <el-row :gutter="16">
+                    <el-col :span="6"><el-form-item label="租赁月供（元）"><el-input-number v-model="modelGuidanceForm.lease_installment_price" :min="0" :step="100" style="width:100%"></el-input-number></el-form-item></el-col>
+                    <el-col :span="6"><el-form-item label="租赁押金比例%"><el-input-number v-model="modelGuidanceForm.lease_deposit_ratio" :min="0" :max="100" :step="1" style="width:100%"></el-input-number></el-form-item></el-col>
+                    <el-col :span="6"><el-form-item label="租赁每期比例%"><el-input-number v-model="modelGuidanceForm.lease_repayment_ratio" :min="0" :max="100" :step="0.5" style="width:100%"></el-input-number></el-form-item></el-col>
+                    <el-col :span="6"><el-form-item label="代售首付比例%"><el-input-number v-model="modelGuidanceForm.sale_down_payment_ratio" :min="0" :max="100" :step="1" style="width:100%"></el-input-number></el-form-item></el-col>
+                </el-row>
+                <el-row :gutter="16">
+                    <el-col :span="6"><el-form-item label="代售每期比例%"><el-input-number v-model="modelGuidanceForm.sale_repayment_ratio" :min="0" :max="100" :step="0.5" style="width:100%"></el-input-number></el-form-item></el-col>
+                    <el-col :span="18"><el-form-item label="备注"><el-input v-model="modelGuidanceForm.remark" placeholder="如：2026年5月调价"></el-input></el-form-item></el-col>
+                </el-row>
+            </el-form>
+            <template #footer>
+                <el-button @click="showGuidanceEditDialog = false">取消</el-button>
+                <el-button type="primary" @click="submitModelGuidancePrice" :loading="submitting">保存</el-button>
             </template>
         </el-dialog>
 
@@ -2691,7 +2824,7 @@
                     lease_term: '',
                     cargo_length: '',
                     sale_total_price: guidancePrice,
-                    payment_category: '定金',
+                    payment_category: '',
                     car_purchase_amount: Number(row.invoice_price || 0),
                     vehicle_rent_amount: 0,
                     receiving_company: '陕西金聚源汽车服务有限公司',
@@ -2746,6 +2879,34 @@
             // 对账核销
             const reconList = ref([]);
             const reconFilter = ref('');
+            const receivablesList = ref([]);
+            const showReceivableScreenshotDialog = ref(false);
+            const showReceivableSettleDialog = ref(false);
+            const receivableTarget = ref(null);
+            const receivableScreenshotPath = ref('');
+            const receivableSettleForm = reactive({ bank_serial: '' });
+            const fetchReceivables = async () => { receivablesList.value = await (await fetch('/api/receivables')).json(); };
+            function openReceivableScreenshot(row) { receivableTarget.value = row; receivableScreenshotPath.value = row.screenshot_path || ''; showReceivableScreenshotDialog.value = true; }
+            function onReceivableScreenshotUpload(res) { if (res.url) receivableScreenshotPath.value = res.url; }
+            async function submitReceivableScreenshot() {
+                if (!receivableScreenshotPath.value) return ElementPlus.ElMessage.warning('请上传截图');
+                submitting.value = true;
+                const res = await fetch(`/api/receivables/${receivableTarget.value.id}/screenshot`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ screenshot_path: receivableScreenshotPath.value }) });
+                submitting.value = false;
+                const d = await res.json();
+                if (!d.success) return ElementPlus.ElMessage.error(d.message);
+                ElementPlus.ElMessage.success(d.message); showReceivableScreenshotDialog.value = false; fetchReceivables();
+            }
+            function openReceivableSettle(row) { receivableTarget.value = row; receivableSettleForm.bank_serial = ''; showReceivableSettleDialog.value = true; }
+            async function submitReceivableSettle() {
+                if (!receivableSettleForm.bank_serial) return ElementPlus.ElMessage.warning('请填写银行流水号');
+                submitting.value = true;
+                const res = await fetch(`/api/receivables/${receivableTarget.value.id}/settle`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bank_serial: receivableSettleForm.bank_serial }) });
+                submitting.value = false;
+                const d = await res.json();
+                if (!d.success) return ElementPlus.ElMessage.error(d.message);
+                ElementPlus.ElMessage.success(d.message); showReceivableSettleDialog.value = false; fetchReceivables();
+            }
             const reconSearch = ref('');
             const reconTableRef = ref(null);
             const reconExpandedKeys = ref([]);
@@ -2795,16 +2956,31 @@
             const approvalFilter = ref('');
             const lockRequests = ref([]);
             const modelGuidancePrices = ref([]);
+            const modelGuidanceSearch = ref('');
+            const guidanceHistoryCache = ref({});
+            const PRICE_KIND_LABELS = { sale_total:'整车价', lease_installment:'租赁月供', lease_deposit_ratio:'押金比例', lease_repayment_ratio:'每期比例', sale_down_payment_ratio:'代售首付', sale_repayment_ratio:'代售每期' };
+            async function loadGuidanceHistory(carType) {
+                if (guidanceHistoryCache.value[carType]) return;
+                guidanceHistoryCache.value[carType] = [];
+                const r = await fetch(`/api/model-guidance-prices/history?car_type=${encodeURIComponent(carType)}`);
+                guidanceHistoryCache.value = { ...guidanceHistoryCache.value, [carType]: await r.json() };
+            }
+            const filteredModelGuidancePrices = computed(() =>
+                modelGuidanceSearch.value
+                    ? modelGuidancePrices.value.filter(r => (r.car_type || '').includes(modelGuidanceSearch.value))
+                    : modelGuidancePrices.value
+            );
             const modelGuidanceForm = reactive({
                 car_type: '', guidance_price: 0,
-                lease_deposit_ratio: 10,
-                lease_repayment_ratio: 2.5,
-                sale_down_payment_ratio: 15,
-                sale_repayment_ratio: 2.5,
-                lease_installment_price: 0,
-                sale_total_price: 0,
-                remark: ''
+                lease_deposit_ratio: 10, lease_repayment_ratio: 2.5,
+                sale_down_payment_ratio: 15, sale_repayment_ratio: 2.5,
+                lease_installment_price: 0, sale_total_price: 0, remark: '',
+                // Excel 字段
+                chassis_base_price_wan: 0, sale_total_price_wan: 0, landing_price_wan: 0,
+                interest_free_plan: '', rent_to_buy_plan: '', min_loan_plan: '', lease_plan: '',
+                product_code: '', fuel_type: ''
             });
+            const showGuidanceEditDialog = ref(false);
             const lastModelGuidanceNoticeAt = ref(localStorage.getItem('jgy_last_model_guidance_notice_at') || '');
 
             const receivingCompanyForm = reactive({ company_name: '', bank_name: '', bank_account_no: '', tax_no: '', status: '启用', remark: '' });
@@ -2854,7 +3030,7 @@
                 lease_term: '',
                 cargo_length: '',
                 sale_total_price: 0,
-                payment_category: '定金',
+                payment_category: '',
                 car_purchase_amount: 0,
                 vehicle_rent_amount: 0,
                 receiving_company: '陕西金聚源汽车服务有限公司',
@@ -2968,6 +3144,7 @@
                 { key: 'assets', label: '车辆管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-2-2.1-3.2C13.2 5.9 12.2 5.5 11.1 5.5H5c-1.1 0-2 .9-2 2v7.5c0 .6.4 1 1 1h1"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/></svg>' },
                 { key: 'approvals', label: '审批中心', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
                 { key: 'bills', label: '账单管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>' },
+                { key: 'invoice', label: '发票申请', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>' },
                 { key: 'reconciliation', label: '对账单', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22,4 12,14.01 9,11.01"/></svg>' },
                 { key: 'risk', label: '锁车管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>' },
                 { key: 'profit', label: '利润核算', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>' },
@@ -2986,6 +3163,7 @@
                 assets: { title: '车辆管理', desc: '上传经销商买断库存 Excel 批量入库，按表格维度展示车辆信息', action: '上传入库' },
                 approvals: { title: '审批中心', desc: '合同上传 · 首次付款 · 锁车审批 · 退车入库与退还押金', action: '' },
                 bills: { title: '账单管理', desc: '查看、核销和管理所有财务账单', action: '' },
+                invoice: { title: '发票申请', desc: '运营发起开票申请，财务审核开具', action: '' },
                 reconciliation: { title: '对账单', desc: '运营发起对账（填金额+凭证）→ 财务核销（填流水，回单可选）', action: '' },
                 risk: { title: '锁车管理', desc: '逾期预警与锁车审批管理', action: '' },
                 return: { title: '退车验工', desc: '退还车辆的验收检查与损伤评估（已并入审批中心）', action: '' },
@@ -3235,8 +3413,9 @@
                 if (page === 'approvals') { fetchApprovals(); fetchApprovalReminders(); fetchLockRequests(); fetchContracts(); fetchReturns(); }
                 if (page === 'risk') { fetchOverdue(); fetchInsuranceWarnings(); }
                 if (page === 'bills') { fetchBills(); fetchContracts(); fetchInvoices(); fetchReceivingCompanies(); }
+                if (page === 'invoice') fetchInvoices();
                 if (page === 'profit') { fetchProfit(); fetchVehicleRebates(); }
-                if (page === 'reconciliation') fetchRecon();
+                if (page === 'reconciliation') { fetchRecon(); fetchReceivables(); }
                 if (page === 'settings') { fetchModelGuidancePrices(); fetchMissingGuidanceAlerts(); fetchReceivingCompanies(); fetchCustomerBlacklist(); }
             });
             // 按能源类型分组的车型列表
@@ -3370,11 +3549,8 @@
             );
 
             watch(() => newOrder.vehicle_category, () => {
-                if (orderPrefillLock.value) return;
                 newOrder.vehicle_cab = '';
                 newOrder.vehicle_engine_battery = '';
-                newOrder.vehicle_power_battery = '';
-                newOrder.vehicle_gearbox = '';
                 newOrder.vehicle_color = '';
                 newOrder.vehicle_box_type = '';
                 newOrder.box_type_remark = '';
@@ -3558,6 +3734,11 @@
                 }
                 return list;
             });
+            // 销售模式切换时自动设置款项类别
+            watch(() => newOrder.sales_mode, (mode) => {
+                if (!newOrder.payment_category || ['定金',''].includes(newOrder.payment_category))
+                    newOrder.payment_category = defaultPaymentCategory(mode);
+            });
             watch(() => newOrder.vin, (vin) => {
                 const cleanVin = (vin || '').trim().toUpperCase();
                 if (newOrder.vin !== cleanVin) {
@@ -3632,6 +3813,10 @@
                 if (!currentUser.value || currentUser.value.role !== '车管') return 0;
                 return contracts.value.filter(c => c.delivery_status === '待出库').length;
             });
+            const pendingDeliveryContracts = computed(() => {
+                if (!currentUser.value || currentUser.value.role !== '车管') return [];
+                return contracts.value.filter(c => c.delivery_status === '待出库');
+            });
             const pendingSalesOrderCount = computed(() => {
                 if (!currentUser.value) return 0;
                 // 财务：待财务确认；运营：已激活待上传合同
@@ -3649,7 +3834,7 @@
                 return eligibleInitialPaymentContracts.value.length;
             });
             // 审批中心左栏红点：当前角色待审批项 + 运营待发起首次付款
-            const approvalsMenuCount = computed(() => pendingApprovalCount.value + pendingInitialPaymentCount.value + pendingReturnCount.value);
+            const approvalsMenuCount = computed(() => pendingApprovalCount.value + pendingInitialPaymentCount.value + pendingReturnCount.value + pendingDeliveryCount.value);
             // 对账红点：运营=待发起对账(step 0)；财务=待上传回单/待录流水核销(已发起但未完成)
             const pendingReconCount = computed(() => {
                 if (!currentUser.value) return 0;
@@ -3900,6 +4085,10 @@
                     '首付款': 'badge-blue',
                 }[category] || 'badge-gray';
             }
+            function defaultPaymentCategory(salesMode) {
+                if (['经营租赁','租赁'].includes(salesMode)) return '押金';
+                return '首付款';
+            }
             function assetStatusClass(status) {
                 return {
                     '在库': 'badge-gray',
@@ -4059,9 +4248,18 @@
                     sale_repayment_ratio: Number(row.sale_repayment_ratio || 0) * 100,
                     lease_installment_price: Number(row.lease_installment_price || 0),
                     sale_total_price: Number(row.sale_total_price || 0),
-                    remark: row.remark || ''
+                    remark: row.remark || '',
+                    chassis_base_price_wan: row.chassis_base_price ? +(row.chassis_base_price / 10000).toFixed(2) : 0,
+                    sale_total_price_wan: row.sale_total_price ? +(row.sale_total_price / 10000).toFixed(2) : 0,
+                    landing_price_wan: row.landing_price ? +(row.landing_price / 10000).toFixed(2) : 0,
+                    interest_free_plan: row.interest_free_plan || '',
+                    rent_to_buy_plan: row.rent_to_buy_plan || '',
+                    min_loan_plan: row.min_loan_plan || '',
+                    lease_plan: row.lease_plan || '',
+                    product_code: row.product_code || '',
+                    fuel_type: row.fuel_type || '',
                 });
-                window.scrollTo({ top: 0, behavior: 'smooth' });
+                showGuidanceEditDialog.value = true;
             }
             function focusGuidanceAlert(row) {
                 currentPage.value = 'settings';
@@ -4086,6 +4284,9 @@
                 const payload = {
                     ...modelGuidanceForm,
                     guidance_price: Number(modelGuidanceForm.sale_total_price || modelGuidanceForm.guidance_price || 0),
+                    sale_total_price: modelGuidanceForm.sale_total_price_wan * 10000 || modelGuidanceForm.sale_total_price,
+                    chassis_base_price: (modelGuidanceForm.chassis_base_price_wan || 0) * 10000,
+                    landing_price: (modelGuidanceForm.landing_price_wan || 0) * 10000,
                     lease_deposit_ratio: Number(modelGuidanceForm.lease_deposit_ratio || 0) / 100,
                     lease_repayment_ratio: Number(modelGuidanceForm.lease_repayment_ratio || 0) / 100,
                     sale_down_payment_ratio: Number(modelGuidanceForm.sale_down_payment_ratio || 0) / 100,
@@ -4099,11 +4300,21 @@
                 const data = await res.json();
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '车型指导口径保存失败');
                 ElementPlus.ElMessage.success(data.message || '车型指导口径已保存');
+                showGuidanceEditDialog.value = false;
                 Object.assign(modelGuidanceForm, { car_type: '', guidance_price: 0, lease_deposit_ratio: 10, lease_repayment_ratio: 2.5, sale_down_payment_ratio: 15, sale_repayment_ratio: 2.5, lease_installment_price: 0, sale_total_price: 0, remark: '' });
                 fetchModelGuidancePrices();
                 fetchMissingGuidanceAlerts();
                 fetchAll();
             }
+            function onGuidanceImportSuccess(resp) {
+                if (resp.success) {
+                    ElementPlus.ElMessage.success(resp.message);
+                    fetchModelGuidancePrices();
+                } else {
+                    ElementPlus.ElMessage.error(resp.message || '导入失败');
+                }
+            }
+            function onGuidanceImportError() { ElementPlus.ElMessage.error('上传失败，请检查文件格式'); }
             async function submitReceivingCompany() {
                 if (!receivingCompanyForm.company_name) return ElementPlus.ElMessage.warning('请填写公司名称');
                 const res = await fetch('/api/receiving-companies', {
@@ -4539,7 +4750,7 @@
                     vin: '', car_type: '', vehicle_category: '', vehicle_cab: '', vehicle_engine_battery: '',
                     vehicle_power_battery: '', vehicle_gearbox: '', vehicle_color: '', vehicle_box_type: '',
                     box_type_remark: '', plate_number: '', lease_term: '', cargo_length: '',
-                    sale_total_price: 0, payment_category: '定金', car_purchase_amount: 0, vehicle_rent_amount: 0,
+                    sale_total_price: 0, payment_category: '', car_purchase_amount: 0, vehicle_rent_amount: 0,
                     receiving_company: '陕西金聚源汽车服务有限公司', wechat_interest: 0, wechat_registration_fee: 0,
                     wechat_purchase_tax: 0, sales_advisor: '', full_package: false, wechat_private_fee: 0,
                     gifted_items: '', deposit_amount: 0, remark: ''
@@ -4569,7 +4780,7 @@
                     lease_term: normalizeLeaseTerm(row.lease_term),
                     cargo_length: row.cargo_length || '',
                     sale_total_price: Number(row.sale_total_price || 0),
-                    payment_category: row.payment_category || '定金',
+                    payment_category: row.payment_category || defaultPaymentCategory(row.sales_mode || ''),
                     car_purchase_amount: Number(row.car_purchase_amount || 0),
                     vehicle_rent_amount: Number(row.vehicle_rent_amount || 0),
                     receiving_company: row.receiving_company || '陕西金聚源汽车服务有限公司',
@@ -4586,6 +4797,8 @@
             }
             async function submitSalesOrder(saveDraft = false) {
                 newOrder.vin = (newOrder.vin || '').trim().toUpperCase();
+                // 以租代售/租赁不走草稿流程，直接提交（需要老板价格特批，保存草稿无意义）
+                if (saveDraft && ['以租代售', '经营租赁'].includes(newOrder.sales_mode)) saveDraft = false;
                 if (!saveDraft) {
                     if (!newOrder.sales_mode) return ElementPlus.ElMessage.warning('请选择销售方式');
                     if (!newOrder.customer_name) return ElementPlus.ElMessage.warning('请填写客户姓名');
@@ -4593,7 +4806,7 @@
                     if (newOrder.deposit_amount === null || newOrder.deposit_amount === undefined) return ElementPlus.ElMessage.warning('请填写首付款/押金');
                     if (newOrder.vehicle_rent_amount === null || newOrder.vehicle_rent_amount === undefined) return ElementPlus.ElMessage.warning('请填写每期租金');
                     if (!newOrder.lease_term) return ElementPlus.ElMessage.warning('请填写分期数/租期');
-                    if (!newOrder.payment_category) return ElementPlus.ElMessage.warning('请选择款项类别');
+                    if (!newOrder.payment_category) newOrder.payment_category = defaultPaymentCategory(newOrder.sales_mode);
                 }
                 if (newOrder.vin && newOrder.vin.length !== 17) {
                     return ElementPlus.ElMessage.warning('如填写车架号，请填写17位 VIN');
@@ -4615,6 +4828,7 @@
                 showOrderDialog.value = false;
                 resetOrderForm();
                 fetchSalesOrders();
+                fetchApprovals();
                 fetchAll();
             }
             function editSalesOrderDraft(row) {
@@ -5223,7 +5437,7 @@
 
             // ===== 出库 =====
             function openDeliveryDialog(row) {
-                const contractId = row.contract_id || row.ref_id;
+                const contractId = row.contract_id || row.ref_id || row.id;
                 if (!contractId || !row.vehicle_id) {
                     ElementPlus.ElMessage.error('未找到合同或车辆信息');
                     return;
@@ -5556,6 +5770,7 @@
                 vehicles, contracts, stats, salesOrders, overdueList, insuranceWarnings, pendingBills, feeItems, profitData, profitSummary, returnList, returnableAssetRows,
                 invoiceRequests, receivingCompanies, bossDashboard, slaReminders, customerBlacklist, vehicleRebates,
                 reconList, reconFilter, reconSearch, reconSummary, filteredGroupedReconList, reconExpandedKeys, reconTableRef,
+                receivablesList, showReceivableScreenshotDialog, showReceivableSettleDialog, receivableTarget, receivableScreenshotPath, receivableSettleForm, openReceivableScreenshot, onReceivableScreenshotUpload, submitReceivableScreenshot, openReceivableSettle, submitReceivableSettle,
                 showVerifyDialog, verifyTarget, verifySerial, verifyAmount, verifyExtraPeriods, verifySelectablePeriods, verifyReceipt, onVerifyReceiptUpload,
                 showReconInitiateDialog, reconInitiateTarget, reconInitiateAmount, reconInitiateScreenshot, openReconInitiate, onReconInitiateUpload, submitReconInitiate,
                 showReconDetailDialog, reconDetail, reconDetailAllocations, openReconDetail, isReconCompleted, allocTypeLabel,
@@ -5568,17 +5783,17 @@
                 // 审批中心
                 approvalList, approvalReminders, approvalFilter, visibleApprovalFilters, lockRequests,
                 missingGuidanceAlerts,
-                modelGuidancePrices, modelGuidanceForm, modelGuidanceCarTypeOptions,
+                modelGuidancePrices, modelGuidanceSearch, filteredModelGuidancePrices, modelGuidanceForm, modelGuidanceCarTypeOptions, guidanceHistoryCache, PRICE_KIND_LABELS, loadGuidanceHistory,
                 currentOrderGuidancePrice, currentOrderGuidanceLabel, currentOrderQuotePrice, currentOrderNeedsApproval, guidancePriceForCarType, ratioPercent,
                 fetchApprovals, fetchApprovalReminders, fetchLockRequests, fetchFeeItems,
                 doApprove, doReject, doResubmit, doDeliver,
                 // UI
-                statCards, statusDistribution, filteredAssetRows, filteredContracts, eligibleInitialPaymentContracts, canLaunchApprovalActions, pendingApprovalItems, pendingApprovalCount, pendingDeliveryCount, pendingSalesOrderCount, pendingInitialPaymentCount, approvalsMenuCount, pendingReconCount, pendingReturnCount, totalReminderCount,
+                statCards, statusDistribution, filteredAssetRows, filteredContracts, eligibleInitialPaymentContracts, canLaunchApprovalActions, pendingApprovalItems, pendingApprovalCount, pendingDeliveryCount, pendingDeliveryContracts, pendingSalesOrderCount, pendingInitialPaymentCount, approvalsMenuCount, pendingReconCount, pendingReturnCount, totalReminderCount,
                 numberFormat, statusClass, repayClass, calcOverdueDays, riskLevel,
                 approvalTypeLabel, approvalTypeClass, approvalVehicleLabel, deliveryStatusClass, paymentCategoryClass, assetStatusClass, returnStatusClass,
                 initialPaymentAmount, initialPaymentType, canInitiateInitialPayment, canInitiateVehicleOrder, canInitiateVehicleReturn, canReturnFromOrder, initiateReturnFromOrder, returnNextStep, currentApprovalStepLabel, isPendingApproval, approvalCardId,
                 handleMenuSelect, handlePageAction, handleContractExpand, editPrice, deleteVehicle,
-                fetchModelGuidancePrices, fetchMissingGuidanceAlerts, onModelGuidanceCarTypeChange, editModelGuidancePrice, focusGuidanceAlert, submitModelGuidancePrice,
+                fetchModelGuidancePrices, fetchMissingGuidanceAlerts, onModelGuidanceCarTypeChange, editModelGuidancePrice, focusGuidanceAlert, submitModelGuidancePrice, onGuidanceImportSuccess, onGuidanceImportError, showGuidanceEditDialog,
                 submitVehicle, openVehicleImport, beforeVehicleImport, onVehicleImportSuccess, onVehicleImportError, openVehicleDetail, submitContract, submitSalesOrder, editSalesOrderDraft, deleteSalesOrderDraft, copySalesOrderDraft, activateOrder, createContractFromOrder, confirmRepayment, confirmFactoryRepayment, requestLock, openApprovalReminderCenter, focusApprovalItem,
                 deliverVehicle, matchContractVehicle, openSalesOrderFromVehicle,
                 openPlanningDialog, onPlanningFactoryUpload, savePlanningContract, importPlanningFactory, confirmPlanningDifference,

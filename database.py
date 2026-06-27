@@ -1024,6 +1024,14 @@ def init_db():
         ("model_guidance_prices", "lease_repayment_ratio", "REAL DEFAULT 0"),
         ("model_guidance_prices", "sale_down_payment_ratio", "REAL DEFAULT 0"),
         ("model_guidance_prices", "sale_repayment_ratio", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "product_code", "TEXT"),
+        ("model_guidance_prices", "fuel_type", "TEXT"),
+        ("model_guidance_prices", "chassis_base_price", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "landing_price", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "interest_free_plan", "TEXT"),
+        ("model_guidance_prices", "rent_to_buy_plan", "TEXT"),
+        ("model_guidance_prices", "min_loan_plan", "TEXT"),
+        ("model_guidance_prices", "lease_plan", "TEXT"),
         ("model_guidance_price_history", "price_kind", "TEXT DEFAULT 'legacy'"),
         ("contract_initial_payments", "received_amount", "REAL DEFAULT 0"),
         ("contract_initial_payments", "shortage_amount", "REAL DEFAULT 0"),
@@ -1089,6 +1097,10 @@ def init_db():
         ("return_inspections", "car_wash_fee", "INTEGER DEFAULT 0"),    # 洗车费
         ("return_inspections", "body_ad_clean", "INTEGER DEFAULT 0"),   # 车体广告清洗
         ("return_inspections", "other_info", "TEXT"),                  # 其他
+        ("receivables", "screenshot_path", "TEXT"),
+        ("receivables", "bank_serial", "TEXT"),
+        ("receivables", "verified_by", "TEXT"),
+        ("receivables", "verified_at", "TEXT"),
     ]
     for table, col, col_type in safe_alter_columns:
         try:
@@ -1139,7 +1151,7 @@ def seed_data():
 
     role_pages = {
         '老板': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'risk', 'profit', 'settings'],
-        '运营': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'risk'],
+        '运营': ['dashboard', 'orders', 'assets', 'approvals', 'reconciliation', 'risk', 'invoice'],
         '财务': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'profit'],
         '车管': ['dashboard', 'assets', 'approvals'],
         '销售': ['dashboard', 'orders', 'assets', 'approvals', 'risk'],
