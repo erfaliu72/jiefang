@@ -5392,6 +5392,9 @@ def upload_receipt(rid):
     if gate_message:
         conn.close()
         return jsonify({'success': False, 'message': gate_message}), gate_status
+    if not row['screenshot_path']:
+        conn.close()
+        return jsonify({'success': False, 'message': '请先由运营发起对账'}), 400
     c.execute("UPDATE repayments SET bank_receipt_path=? WHERE id=?", (bank_receipt_path, rid))
     log_audit(conn, '上传银行回单', 'repayment', rid, f'回单: {bank_receipt_path}')
     conn.commit()

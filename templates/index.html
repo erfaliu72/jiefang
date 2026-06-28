@@ -3880,7 +3880,7 @@
                 { value: '', label: '全部', roles: ['销售', '运营', '财务', '车管', '老板'] },
                 { value: 'price_exception', label: '价格特批', roles: ['销售', '财务', '老板'] },
                 { value: 'sale_payment', label: '财务确认报单', roles: ['销售', '财务'] },
-                { value: 'initial_payment', label: '首次付款', roles: ['运营', '财务'] },
+                { value: 'initial_payment', label: '首次付款', roles: ['运营', '财务', '老板'] },
                 { value: 'lock_request', label: '锁车审批', roles: ['财务'] },
                 { value: 'return_stock', label: '退车入库', roles: ['销售', '车管', '运营', '财务', '老板'] },
             ];
@@ -4164,7 +4164,7 @@
                 return `approval-card-${item.ref_type}-${item.ref_id}`;
             }
             async function focusApprovalItem(item) {
-                approvalFilter.value = item.ref_type || (visibleApprovalFilters.value[0] && visibleApprovalFilters.value[0].value) || '';
+                approvalFilter.value = '';  // 切到「全部」，确保首付不足等不在标签里的审批项也展示
                 currentPage.value = 'approvals';
                 await Promise.all([fetchApprovals(), fetchApprovalReminders()]);
                 nextTick(() => {
