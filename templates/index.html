@@ -581,7 +581,7 @@
                                         </el-select>
                                     </div>
                                     <div style="display:flex;gap:10px;align-items:center">
-                                        <el-upload action="/api/upload" :show-file-list="false" accept=".xlsx,.pdf" :on-success="onFactoryPlanUpload">
+                                        <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" accept=".xlsx,.pdf" :on-success="onFactoryPlanUpload">
                                             <el-button plain>上传厂家计划表</el-button>
                                         </el-upload>
                                         <el-button type="primary" @click="submitFactoryImport" :loading="submitting">导入计划</el-button>
@@ -852,7 +852,7 @@
                                     <div style="font-size:12px;color:#9ca3af;margin-top:4px">填写客户本次实际还款金额，低于本期金额时由财务对账后继续核销。</div>
                                 </el-form-item>
                                 <el-form-item label="支付凭证图片" required>
-                                    <el-upload action="/api/upload" :show-file-list="false" :on-success="onReconInitiateUpload" accept=".jpg,.jpeg,.png,.pdf">
+                                    <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onReconInitiateUpload" accept=".jpg,.jpeg,.png,.pdf">
                                         <el-button type="warning" plain>上传支付凭证</el-button>
                                     </el-upload>
                                     <a v-if="reconInitiateScreenshot" :href="reconInitiateScreenshot" target="_blank" style="margin-left:10px;color:#2563eb">已上传，点击查看</a>
@@ -870,7 +870,7 @@
                         <div v-if="receivableTarget" style="margin-bottom:16px;color:#374151">
                             客户：<b>{{ receivableTarget.customer_name }}</b>　欠款：<b class="text-red">¥{{ numberFormat(receivableTarget.amount) }}</b>
                         </div>
-                        <el-upload action="/api/upload" :show-file-list="false" :on-success="onReceivableScreenshotUpload" accept=".jpg,.jpeg,.png,.pdf">
+                        <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onReceivableScreenshotUpload" accept=".jpg,.jpeg,.png,.pdf">
                             <el-button type="primary" plain>上传还款截图</el-button>
                         </el-upload>
                         <a v-if="receivableScreenshotPath" :href="receivableScreenshotPath" target="_blank" class="badge badge-green" style="margin-top:8px;display:inline-block">已上传，点击查看</a>
@@ -921,7 +921,7 @@
                             </el-form-item>
                             <el-form-item label="银行回单（可选）">
                                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-                                    <el-upload action="/api/upload" :show-file-list="false" :on-success="onVerifyReceiptUpload" accept=".jpg,.jpeg,.png,.pdf" style="display:inline-block">
+                                    <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onVerifyReceiptUpload" accept=".jpg,.jpeg,.png,.pdf" style="display:inline-block">
                                         <el-button native-type="button" plain>🏦 上传银行回单</el-button>
                                     </el-upload>
                                     <a v-if="verifyReceipt" :href="verifyReceipt" target="_blank" style="color:#16a34a;font-size:13px">✅ 已上传，点击查看</a>
@@ -1161,7 +1161,7 @@
                                         <a v-if="item.customer_screenshot_path" :href="item.customer_screenshot_path" target="_blank" class="badge badge-blue">客户付款截图</a>
                                         <a v-if="item.bank_receipt_path" :href="item.bank_receipt_path" target="_blank" class="badge badge-green">公司收款回单</a>
                                         <el-upload v-if="currentUser.role==='财务' && item.ref_type==='initial_payment' && !item.bank_receipt_path && item.overall_status==='审批中'"
-                                            action="/api/upload" :show-file-list="false"
+                                            action="/api/upload" :show-file-list="false" :with-credentials="true"
                                             :on-success="(res) => onInitialReceiptUpload(item.initial_payment_id || item.ref_id, res)"
                                             accept=".jpg,.jpeg,.png,.pdf">
                                             <el-button size="small" type="primary" plain>上传公司回单</el-button>
@@ -1500,7 +1500,7 @@
                                     <div style="font-size:12px;color:#6b7280;margin-top:4px">老板按车型统一维护指导价；保存后同步当前同车型车辆，后续报单按新价判断，历史合同/报单快照不变。</div>
                                 </div>
                                 <div style="display:flex;gap:8px">
-                                    <el-upload action="/api/model-guidance-prices/import" :show-file-list="false" :on-success="onGuidanceImportSuccess" :on-error="onGuidanceImportError" accept=".xlsx,.xls">
+                                    <el-upload action="/api/model-guidance-prices/import" :show-file-list="false" :with-credentials="true" :on-success="onGuidanceImportSuccess" :on-error="onGuidanceImportError" accept=".xlsx,.xls">
                                         <el-button type="success"><el-icon><Upload/></el-icon> 批量导入 Excel</el-button>
                                     </el-upload>
                                 </div>
@@ -1747,7 +1747,7 @@
                 <div style="display:flex;gap:10px;align-items:center;margin:4px 0 14px">
                     <el-button v-if="currentUser.role !== '财务'" type="primary" @click="savePlanningContract" :loading="submitting">保存客户分期</el-button>
                     <template v-if="currentUser.role !== '财务'">
-                        <el-upload action="/api/upload" :show-file-list="false" accept=".xlsx,.pdf" :on-success="onPlanningFactoryUpload">
+                        <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" accept=".xlsx,.pdf" :on-success="onPlanningFactoryUpload">
                             <el-button plain>上传厂家分期表（可选）</el-button>
                         </el-upload>
                         <el-button type="success" plain @click="importPlanningFactory" :disabled="!planningForm.contract_id || !planningFactoryFileUrl">导入核算</el-button>
@@ -1814,7 +1814,7 @@
                     <el-input v-model="issueInvoiceForm.invoice_no" placeholder="请输入发票号"></el-input>
                 </el-form-item>
                 <el-form-item label="发票文件(PDF)">
-                    <el-upload action="/api/upload" :show-file-list="false" accept=".pdf" :on-success="onInvoiceFileUpload">
+                    <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" accept=".pdf" :on-success="onInvoiceFileUpload">
                         <el-button plain>上传发票PDF</el-button>
                     </el-upload>
                     <a v-if="issueInvoiceForm.invoice_file_path" :href="issueInvoiceForm.invoice_file_path" target="_blank" style="margin-left:12px;color:#409eff;">查看已上传文件</a>
@@ -1858,6 +1858,7 @@
                 :on-success="onVehicleImportSuccess"
                 :on-error="onVehicleImportError"
                 :before-upload="beforeVehicleImport"
+                :with-credentials="true"
                 accept=".xlsx,.xls">
                 <el-icon class="el-icon--upload"><Upload/></el-icon>
                 <div class="el-upload__text">将车辆信息 Excel 拖到此处，或 <em>点击选择文件</em></div>
@@ -2151,6 +2152,7 @@
                     <el-upload
                         action="/api/upload"
                         :show-file-list="false"
+                        :with-credentials="true"
                         :on-success="onContractFileSuccess"
                         :before-upload="beforeContractFileUpload"
                         :limit="5"
@@ -2379,7 +2381,7 @@
                     <el-input v-model="initialPaymentForm.shortage_reason" placeholder="填写客户少付原因"></el-input>
                 </el-form-item>
                 <el-form-item label="客户付款截图" required>
-                    <el-upload action="/api/upload" :show-file-list="false" :on-success="onInitialScreenshotUpload" accept=".jpg,.jpeg,.png,.pdf">
+                    <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onInitialScreenshotUpload" accept=".jpg,.jpeg,.png,.pdf">
                         <el-button type="warning" plain>上传客户付款截图</el-button>
                     </el-upload>
                     <a v-if="initialPaymentForm.customer_screenshot_path" :href="initialPaymentForm.customer_screenshot_path" target="_blank" style="margin-left:10px;color:#2563eb">已上传，点击查看</a>
@@ -2441,7 +2443,7 @@
             <el-form :model="deliveryForm" label-position="top">
                 <el-form-item label="出库照片">
                     <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-                        <el-upload action="/api/upload" :show-file-list="false" :on-success="onDeliveryFileUpload('delivery_photo_path')" accept=".jpg,.jpeg,.png,.pdf">
+                        <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onDeliveryFileUpload('delivery_photo_path')" accept=".jpg,.jpeg,.png,.pdf">
                             <el-button type="warning" plain>上传出库照片</el-button>
                         </el-upload>
                         <a v-if="deliveryForm.delivery_photo_path" :href="deliveryForm.delivery_photo_path" target="_blank" class="badge badge-orange">已上传，点击查看</a>
@@ -2449,7 +2451,7 @@
                 </el-form-item>
                 <el-form-item label="出库单照片">
                     <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-                        <el-upload action="/api/upload" :show-file-list="false" :on-success="onDeliveryFileUpload('delivery_document_path')" accept=".jpg,.jpeg,.png,.pdf">
+                        <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onDeliveryFileUpload('delivery_document_path')" accept=".jpg,.jpeg,.png,.pdf">
                             <el-button type="primary" plain>上传出库单照片</el-button>
                         </el-upload>
                         <a v-if="deliveryForm.delivery_document_path" :href="deliveryForm.delivery_document_path" target="_blank" class="badge badge-blue">已上传，点击查看</a>
@@ -5149,7 +5151,7 @@
             }
             function onVehicleImportError() {
                 vehicleImportLoading.value = false;
-                ElementPlus.ElMessage.error('上传失败，请检查文件格式或稍后重试');
+                ElementPlus.ElMessage.error('上传失败，可能是登录已过期或无权限，请刷新页面后重试');
             }
             async function submitVehicle() {
                 newVehicle.vin = (newVehicle.vin || '').trim().toUpperCase();

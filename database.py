@@ -26,11 +26,22 @@ if USE_MYSQL:
     # --- SQL 方言翻译：把业务代码里的 SQLite 写法转成 MySQL ---
     _RE_DATETIME_NOW = re.compile(r"datetime\(\s*'now'\s*,\s*'localtime'\s*\)", re.IGNORECASE)
     _RE_DATETIME_NOW2 = re.compile(r"datetime\(\s*'now'\s*\)", re.IGNORECASE)
+    _RE_DATE_MODIFIER = re.compile(
+        r"date\(([^,)]+),\s*'([+-])\s*(\d+)\s*(day|month|year)'\s*\)",
+        re.IGNORECASE
+    )
 
     def _translate_sql(sql, has_params):
         # datetime('now','localtime') -> NOW()
         sql = _RE_DATETIME_NOW.sub('NOW()', sql)
         sql = _RE_DATETIME_NOW2.sub('NOW()', sql)
+        # date(col, '+N day') -> DATE_ADD(col, INTERVAL N DAY) / date(col, '-N day') -> DATE_SUB(col, INTERVAL N DAY)
+        sql = _RE_DATE_MODIFIER.sub(
+            lambda m: f"DATE_ADD({m.group(1)}, INTERVAL {m.group(3)} {m.group(4).upper()})"
+            if m.group(2) == '+' else
+            f"DATE_SUB({m.group(1)}, INTERVAL {m.group(3)} {m.group(4).upper()})",
+            sql
+        )
         # INSERT OR IGNORE / OR REPLACE
         sql = re.sub(r'INSERT\s+OR\s+IGNORE', 'INSERT IGNORE', sql, flags=re.IGNORECASE)
         sql = re.sub(r'INSERT\s+OR\s+REPLACE', 'REPLACE', sql, flags=re.IGNORECASE)
@@ -55,10 +66,12 @@ if USE_MYSQL:
             self._raw = raw
 
         def execute(self, sql, params=None):
-            sql2 = _translate_sql(sql, params is not None and len(params) > 0 if hasattr(params, '__len__') else params is not None)
-            if params is None:
-                return self._raw.execute(sql2)
-            return self._raw.execute(sql2, params)
+            sql2 = _translate_sql(sql, params is not None and (not hasattr(params, '__len__') or len(params) > 0))
+            if params is None or (hasattr(params, '__len__') and len(params) == 0):
+                self._raw.execute(sql2)
+            else:
+                self._raw.execute(sql2, params)
+            return self  # 返回 self 以支持链式调用：c.execute(sql).fetchone()
 
         def fetchone(self):
             return self._raw.fetchone()
@@ -1219,27 +1232,30 @@ def seed_data():
                 """, (role, resource, field))
     conn.commit()
 
-    default_model_guidance = [
-        ('解放轻卡4米2-虎6G140度纯电-宁德电池', 98000, 3500, 128000, 0.10, 0.025, 0.15, 0.025),
-        ('解放轻卡4米2-虎6G120度纯电-宁德电池', 98000, 3200, 120000, 0.10, 0.025, 0.15, 0.025),
-        ('解放轻卡-虎VR纯电-轻盈版', 90000, 3000, 115000, 0.10, 0.025, 0.15, 0.025),
-        ('解放轻卡4米2-虎6G 180混动-盟固利电池', 98000, 3300, 125000, 0.10, 0.025, 0.15, 0.025),
-        ('解放轻卡4米2-领途190马力', 98000, 3200, 125000, 0.10, 0.025, 0.15, 0.025),
-        ('解放轻卡4米2-领途150马力', 98000, 3000, 98000, 0.10, 0.025, 0.15, 0.025),
-        ('解放轻卡3米8-云内150排半', 90000, 2800, 90000, 0.10, 0.025, 0.15, 0.025),
-    ]
-    for car_type, legacy_price, lease_price, sale_price, lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio in default_model_guidance:
-        c.execute("""
-            INSERT OR IGNORE INTO model_guidance_prices
-                (car_type, guidance_price, lease_installment_price, sale_total_price,
-                 lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
-                 remark, updated_by, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, '系统默认车型指导口径', '系统', datetime('now','localtime'))
-        """, (
-            car_type, legacy_price, lease_price, sale_price,
-            lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
-        ))
-    conn.commit()
+    # (removed) # 只在 model_guidance_prices 为空时插入默认指导价
+    # (removed) c.execute("SELECT COUNT(*) AS cnt FROM model_guidance_prices")
+    # (removed) if c.fetchone()['cnt'] == 0:
+        # (removed) default_model_guidance = [
+            # (removed) ('解放轻卡4米2-虎6G140度纯电-宁德电池', 98000, 3500, 128000, 0.10, 0.025, 0.15, 0.025),
+            # (removed) ('解放轻卡4米2-虎6G120度纯电-宁德电池', 98000, 3200, 120000, 0.10, 0.025, 0.15, 0.025),
+            # (removed) ('解放轻卡-虎VR纯电-轻盈版', 90000, 3000, 115000, 0.10, 0.025, 0.15, 0.025),
+            # (removed) ('解放轻卡4米2-虎6G 180混动-盟固利电池', 98000, 3300, 125000, 0.10, 0.025, 0.15, 0.025),
+            # (removed) ('解放轻卡4米2-领途190马力', 98000, 3200, 125000, 0.10, 0.025, 0.15, 0.025),
+            # (removed) ('解放轻卡4米2-领途150马力', 98000, 3000, 98000, 0.10, 0.025, 0.15, 0.025),
+            # (removed) ('解放轻卡3米8-云内150排半', 90000, 2800, 90000, 0.10, 0.025, 0.15, 0.025),
+        # (removed) ]
+        # (removed) for car_type, legacy_price, lease_price, sale_price, lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio in default_model_guidance:
+            # (removed) c.execute("""
+                # (removed) INSERT OR IGNORE INTO model_guidance_prices
+                    # (removed) (car_type, guidance_price, lease_installment_price, sale_total_price,
+                     # (removed) lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
+                     # (removed) remark, updated_by, updated_at)
+                # (removed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '系统默认车型指导口径', '系统', datetime('now','localtime'))
+            # (removed) """, (
+                # (removed) car_type, legacy_price, lease_price, sale_price,
+                # (removed) lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
+            # (removed) ))
+        # (removed) conn.commit()
 
     c.execute("""
         INSERT OR IGNORE INTO receiving_companies
@@ -1253,146 +1269,9 @@ def seed_data():
     ))
     conn.commit()
 
-    c.execute("SELECT COUNT(*) as cnt FROM vehicles")
-    if c.fetchone()['cnt'] > 0:
-        conn.close()
-        print("Seed data already exists, skipping.")
-        return
-
-    # ====== 9 台真实车辆 ======
-    real_vehicles = [
-        ('LFNA4LDA1NAE08565', '陕ADU8101', '陕西金聚源汽车服务有限公司', 'J6F 81度电厢货', '新车', '2022-12-28', 99900),
-        ('LFNA4LDA7NAE08442', '陕AAY1263', '陕西金聚源汽车服务有限公司', 'J6F 81度电厢货', '新车', '2022-12-28', 99900),
-        ('LFNA4LDA8NAE08563', '陕AA06286', '陕西金聚源汽车服务有限公司', 'J6F 81度电厢货', '新车', '2023-01-04', 99900),
-        ('LFNA4LDA9NAE08443', '陕ADY4890', '金聚源挂靠玛特汇',           'J6F 81度电厢货', '二手车', '2023-01-04', 99900),
-        ('LFNA4LDA4NAE08978', '陕AA85625', '陕西金聚源汽车服务有限公司', 'J6F 81度电厢货', '新车', '2023-01-17', 157000),
-        ('LFNA4LDA3NAE08972', '陕AA00662', '陕西金聚源汽车服务有限公司', 'J6F 81度电厢货', '新车', '2023-01-17', 157000),
-        ('LFNA4LDA7NAE08974', '陕AA10855', '陕西金聚源汽车服务有限公司', 'J6F 81度电厢货', '新车', '2023-01-17', 157000),
-        ('LFNA4LDA8PAE19629', '陕AA28012', '陕西金聚源汽车服务有限公司', 'J6F 81度电厢货', '新车', '2023-06-05', 139000),
-        ('LFNA4LDA4PAE19630', '陕AA25685', '陕西金聚源汽车服务有限公司', 'J6F 81度电厢货', '新车', '2023-06-06', 139000),
-    ]
-    statuses = ['已结清', '已结清', '经营租赁', '经营租赁', '经营租赁', '经营租赁', '经营租赁', '经营租赁', '经营租赁']
-
-    # 客户种子数据
-    customers = [
-        ('张三丰', '13800000001', '610102199001010011', '西安市未央区'),
-        ('李四光', '13800000002', '610102199002020022', '西安市雁塔区'),
-        ('王五常', '13800000003', '610102199003030033', '西安市碑林区'),
-        ('赵六合', '13800000004', '610102199004040044', '西安市新城区'),
-        ('钱七星', '13800000005', '610102199005050055', '西安市莲湖区'),
-        ('孙八斗', '13800000006', '610102199006060066', '西安市灞桥区'),
-        ('周九天', '13800000007', '610102199007070077', '西安市长安区'),
-    ]
-    for cu in customers:
-        c.execute("INSERT INTO customers (name, phone, id_card, address) VALUES (?, ?, ?, ?)", cu)
-
-    for i, v in enumerate(real_vehicles):
-        invoice_date = datetime.strptime(v[5], '%Y-%m-%d')
-        months_passed = (datetime.now() - invoice_date).days // 30
-        residual_rate = max(0.3, 1.0 - months_passed * 0.01)
-        residual = round(v[6] * residual_rate, 2)
-        guidance = round(residual * 1.05, 2)
-
-        c.execute('''
-        INSERT INTO vehicles (vin, plate_number, company, car_type, is_new, invoice_date,
-                              invoice_price, purchase_price, estimated_residual_value, guidance_price, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[6], residual, guidance, statuses[i]))
-
-    # ====== 9 份真实合同（增加 customer_id 关联）======
-    # (vehicle_id, rental_method, total_price, loan_amount, monthly_payment, rent, loan_periods, deposit,
-    #  paid_principal, loan_balance, collected_deposit, collected_rent, customer_id)
-    real_contracts = [
-        (1, '经营租赁', 99900, 150000, 6648.09, 4000, 24, 1000, 150000, '已结清', 11000, 67000, 1),
-        (2, '经营租赁', 99900, 150000, 6648.09, 3600, 24, 1000, 150000, '已结清', 7000, 85980, 2),
-        (3, '经营租赁', 99900, 142999, 2610.12, 3200, 60, 7149.95, 73031.53, '62817.52', 6000, 81000, 3),
-        (4, '经营租赁', 99900, 125000, 3871.08, 3800, 36, 6250, 80309.19, '38440.81', 8000, 69167, 4),
-        (5, '经营租赁', 157000, 116142.35, 3533.28, 3500, 36, 0, 112626.83, '3515.52', 0, 76115, 5),
-        (6, '经营租赁', 157000, 116142.35, 3533.28, 3500, 36, 0, 109128.62, '7013.73', 10000, 82666.67, 5),
-        (7, '经营租赁', 157000, 148268.70, 4510.62, 3800, 36, 0, 139314.65, '8954.05', 5000, 72926.40, 6),
-        (8, '经营租赁', 139000, 179281, 3281.06, 3500, 60, 8964.05, 91440.83, '78876.12', 12260, 99165, 7),
-        (9, '经营租赁', 139000, 179281, 3281.06, 4000, 60, 8964.05, 91440.83, '78876.12', 0, 106147, 7),
-    ]
-
-    for ct in real_contracts:
-        contract_status = '已结清' if ct[9] == '已结清' else '执行中'
-        # 获取车辆开票日期作为合同起始日
-        c.execute("SELECT invoice_date, guidance_price, invoice_price FROM vehicles WHERE id = ?", (ct[0],))
-        vrow = c.fetchone()
-        start_date_str = vrow['invoice_date']
-        start_dt = datetime.strptime(start_date_str, '%Y-%m-%d')
-        end_dt = start_dt + timedelta(days=30 * ct[6])
-
-        c.execute('''
-        INSERT INTO contracts (vehicle_id, customer_id, business_mode, rental_method, repayment_day,
-                               start_date, end_date, total_price, loan_amount, monthly_payment,
-                               rent, loan_periods, deposit, paid_principal, loan_balance,
-                               collected_deposit, collected_rent, contract_status,
-                               snapshot_guidance_price, snapshot_invoice_price)
-        VALUES (?, ?, '转租', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?)
-        ''', (ct[0], ct[12], ct[1], start_date_str, end_dt.strftime('%Y-%m-%d'),
-              ct[2], ct[3], ct[4], ct[5], ct[6], ct[7], ct[8], ct[9], ct[10], ct[11], contract_status,
-              vrow['guidance_price'], vrow['invoice_price']))
-
-    # ====== 为活跃合同生成双向还款计划 ======
-    for ct in real_contracts:
-        if ct[9] == '已结清':
-            continue
-
-        vehicle_id = ct[0]
-        contract_id = vehicle_id  # seed 数据中 1:1 对应
-        periods = ct[6]
-        factory_monthly = ct[4]   # 厂家月供
-        customer_rent = ct[5]     # 客户月租
-
-        c.execute("SELECT invoice_date FROM vehicles WHERE id = ?", (vehicle_id,))
-        start_date = datetime.strptime(c.fetchone()['invoice_date'], '%Y-%m-%d')
-
-        # 计算已还期数
-        factory_paid_count = int(ct[8] / factory_monthly) if factory_monthly > 0 else 0
-        customer_paid_count = int(ct[11] / customer_rent) if customer_rent > 0 else 0
-
-        for p in range(1, periods + 1):
-            due = start_date + timedelta(days=30 * p)
-            due_str = due.strftime('%Y-%m-%d')
-            is_past_due = due < datetime.now()
-
-            # --- 厂家还款（公司 → 一汽解放）---
-            if p <= factory_paid_count:
-                f_status = '已还款'
-                f_paid = (due + timedelta(days=p % 5)).strftime('%Y-%m-%d')
-            elif p == factory_paid_count + 1 and is_past_due:
-                f_status = '逾期'
-                f_paid = None
-            else:
-                f_status = '待还款'
-                f_paid = None
-
-            c.execute('''
-            INSERT INTO factory_repayments (contract_id, period, due_date, amount, status, paid_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ''', (contract_id, p, due_str, factory_monthly, f_status, f_paid))
-
-            # --- 客户还款（客户 → 公司）---
-            if p <= customer_paid_count:
-                c_status = '已还款'
-                c_paid = (due + timedelta(days=p % 3)).strftime('%Y-%m-%d')
-            elif p == customer_paid_count + 1 and is_past_due:
-                c_status = '逾期'
-                c_paid = None
-            else:
-                c_status = '待还款'
-                c_paid = None
-
-            c.execute('''
-            INSERT INTO repayments (contract_id, period, due_date, amount, status, paid_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ''', (contract_id, p, due_str, customer_rent, c_status, c_paid))
-
-    conn.commit()
+    # 不再插入测试车辆/合同/还款数据 —— 全新系统
     conn.close()
-    print("Seed data inserted successfully.")
+    print("Seed data inserted successfully (users & permissions only).")
 
 
 # ================================================================

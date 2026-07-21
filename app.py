@@ -2094,7 +2094,13 @@ def index():
 def _fetch_scalar(c, sql, params=()):
     c.execute(sql, params)
     row = c.fetchone()
-    return row[0] if row else 0
+    if row is None:
+        return 0
+    # sqlite3: row[0] 可用；MySQL DictCursor: row 是 dict
+    if isinstance(row, dict):
+        values = list(row.values())
+        return values[0] if values else 0
+    return row[0]
 
 
 def _money_expr(expr="amount", paid_expr="paid_amount"):
@@ -2134,10 +2140,14 @@ def build_dashboard_metrics(conn):
 
     total_invoice = parse_money(_fetch_scalar(c, "SELECT COALESCE(SUM(invoice_price),0) FROM vehicles"))
     total_residual = parse_money(_fetch_scalar(c, "SELECT COALESCE(SUM(estimated_residual_value),0) FROM vehicles"))
-    c.execute("SELECT COALESCE(SUM(loan_amount),0), COALESCE(SUM(paid_principal),0) FROM contracts")
-    total_loan, total_paid_principal = c.fetchone()
-    c.execute("SELECT COALESCE(SUM(collected_rent),0), COALESCE(SUM(collected_deposit),0) FROM contracts")
-    total_rent, total_deposit = c.fetchone()
+    c.execute("SELECT COALESCE(SUM(loan_amount),0) AS v1, COALESCE(SUM(paid_principal),0) AS v2 FROM contracts")
+    r = c.fetchone()
+    total_loan = parse_money(r['v1'] if isinstance(r, dict) else r[0])
+    total_paid_principal = parse_money(r['v2'] if isinstance(r, dict) else r[1])
+    c.execute("SELECT COALESCE(SUM(collected_rent),0) AS v1, COALESCE(SUM(collected_deposit),0) AS v2 FROM contracts")
+    r = c.fetchone()
+    total_rent = parse_money(r['v1'] if isinstance(r, dict) else r[0])
+    total_deposit = parse_money(r['v1'] if isinstance(r, dict) else r[1])
 
     overdue_count = _fetch_scalar(c, f"""
         SELECT COUNT(*)
@@ -2774,6 +2784,7 @@ def import_guidance_prices():
 
 # 文件上传
 @app.route('/api/upload', methods=['POST'])
+@login_required
 def upload_file():
     if 'file' not in request.files:
         return jsonify({'success': False, 'message': '没有文件'}), 400
@@ -2889,9 +2900,16 @@ def _excel_cell_text(value):
 
 
 @app.route('/api/vehicles/import', methods=['POST'])
-@require_role('车管')
 def import_vehicles():
-    """上传经销商买断库存 Excel，批量入库车辆。"""
+    """上传经销商买断库存 Excel，批量入库车辆。
+    注意：所有错误都返回 200（success=false），避免 el-upload on-error 无法拿到错误消息。"""
+    # 手动鉴权，不依赖 require_role（否则 401/403 会触发 el-upload on-error）
+    user = get_current_user()
+    if not user:
+        return jsonify({'success': False, 'message': '登录已失效，请刷新页面'}), 200
+    if user['role'] not in ('车管', '老板'):
+        return jsonify({'success': False, 'message': '仅车管角色可以批量导入'}), 200
+    request.current_user = user
     file_url = ''
     if request.is_json:
         file_url = ((request.json or {}).get('file_url') or '').strip()
@@ -2903,25 +2921,25 @@ def import_vehicles():
     elif 'file' in request.files:
         f = request.files['file']
         if not f.filename:
-            return jsonify({'success': False, 'message': '文件名为空'}), 400
+            return jsonify({'success': False, 'message': '文件名为空'}), 200
         ext = os.path.splitext(f.filename)[1].lower()
         if ext not in ('.xls', '.xlsx'):
-            return jsonify({'success': False, 'message': '仅支持 xls / xlsx 格式'}), 400
+            return jsonify({'success': False, 'message': '仅支持 xls / xlsx 格式'}), 200
         local_path = os.path.join(UPLOAD_DIR, uuid.uuid4().hex + ext)
         f.save(local_path)
     else:
-        return jsonify({'success': False, 'message': '请上传车辆信息 Excel'}), 400
+        return jsonify({'success': False, 'message': '请上传车辆信息 Excel'}), 200
 
     if not local_path or not os.path.exists(local_path):
-        return jsonify({'success': False, 'message': '导入文件不存在，请重新上传'}), 400
+        return jsonify({'success': False, 'message': '导入文件不存在，请重新上传'}), 200
     if not local_path.lower().endswith(('.xls', '.xlsx')):
-        return jsonify({'success': False, 'message': '仅支持 xls / xlsx 格式'}), 400
+        return jsonify({'success': False, 'message': '仅支持 xls / xlsx 格式'}), 200
 
     try:
         wb = load_workbook(local_path, data_only=True)
         ws = wb.active
     except Exception as e:
-        return jsonify({'success': False, 'message': '解析 Excel 失败：' + str(e)}), 400
+        return jsonify({'success': False, 'message': '解析 Excel 失败：' + str(e)}), 200
 
     # 自动定位表头行：在前若干行中查找包含 "VIN" 的行
     header_row = None
@@ -2937,6 +2955,15 @@ def import_vehicles():
         header_row = 3
         header = [_excel_cell_text(cell.value) for cell in ws[header_row]]
 
+    # 根据表头动态定位 VIN 所在列（经销商给的 Excel 列位置可能变化）
+    vin_column_index = None
+    for i, h in enumerate(header):
+        if h and 'VIN' in h.upper():
+            vin_column_index = i
+            break
+    if vin_column_index is None:
+        vin_column_index = 18  # 没找到就回退原硬编码位置
+
     conn = get_db()
     c = conn.cursor()
 
@@ -2949,11 +2976,19 @@ def import_vehicles():
             cells = ws[r]
             row_vals = {}
             for idx, field in VEHICLE_IMPORT_COLUMNS.items():
-                cell = cells[idx] if idx < len(cells) else None
-                row_vals[field] = _excel_cell_text(cell.value) if cell is not None else ''
+                # VIN 列用动态检测的列号，不用硬编码
+                actual_idx = vin_column_index if field == 'vin' else idx
+                cell = cells[actual_idx] if actual_idx < len(cells) else None
+                if cell is not None and cell.value is not None:
+                    # VIN列读到 datetime（空行被Excel格式化为日期）→ 视为空
+                    if field == 'vin' and isinstance(cell.value, datetime):
+                        row_vals[field] = ''
+                    else:
+                        row_vals[field] = _excel_cell_text(cell.value)
+                else:
+                    row_vals[field] = ''
 
             vin = (row_vals.get('vin') or '').strip().upper()
-            # 无 VIN 视为空行或小计/合计汇总行，直接跳过且不计入失败
             if not vin:
                 continue
             if len(vin) != 17:
@@ -3033,7 +3068,7 @@ def import_vehicles():
     except Exception as e:
         conn.rollback()
         conn.close()
-        return jsonify({'success': False, 'message': '导入失败：' + str(e)}), 400
+        return jsonify({'success': False, 'message': '导入失败：' + str(e)}), 200
     finally:
         try:
             conn.close()
