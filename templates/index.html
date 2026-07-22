@@ -330,19 +330,40 @@
                                     <el-option label="新车" value="新车"></el-option>
                                     <el-option label="二手车" value="二手车"></el-option>
                                 </el-select>
+                                <el-checkbox v-if="currentUser.role==='老板'" v-model="showDeleted" style="margin-left:12px;white-space:nowrap">
+                                    显示已删除
+                                </el-checkbox>
+                                <el-button size="small" plain style="margin-left:8px" @click="showColSettings = true">
+                                    <el-icon><Setting/></el-icon> 列设置
+                                </el-button>
+                                <el-dialog v-model="showColSettings" title="列设置" width="360" :close-on-click-modal="true">
+                                    <div style="margin-bottom:8px;display:flex;gap:8px">
+                                        <el-button size="small" @click="selectAllColumns">全选</el-button>
+                                        <el-button size="small" @click="deselectAllColumns">取消全选</el-button>
+                                        <span style="font-size:12px;color:#9ca3af;line-height:28px">已选 {{ ALL_COLUMNS.length - hiddenColumns.size }} / {{ ALL_COLUMNS.length }} 列</span>
+                                    </div>
+                                    <div style="max-height:480px;overflow-y:auto">
+                                        <el-checkbox v-for="col in ALL_COLUMNS" :key="col.key"
+                                            :model-value="!hiddenColumns.has(col.key)"
+                                            @update:model-value="toggleColumn(col.key)"
+                                            style="display:flex;margin-bottom:4px;white-space:nowrap">
+                                            {{ col.label }}
+                                        </el-checkbox>
+                                    </div>
+                                </el-dialog>
                             </div>
                         </div>
                         <div class="card" style="margin-top: 16px;">
                             <div class="card-title-row">
                                 <div class="card-title">车辆全景表</div>
-                                <span class="card-count">共 {{ filteredAssetRows.length }} 台车辆</span>
+                                <span class="card-count">共 {{ vehiclePageTotal }} 台车辆，第 {{ assetPage }} / {{ assetTotalPages }} 页</span>
                             </div>
                             <el-table
                                 :data="filteredAssetRows"
                                 class="asset-panorama-table"
                                 style="width: 100%"
                                 stripe
-                                max-height="calc(100vh - 300px)"
+                                max-height="calc(100vh - 360px)"
                                 @expand-change="handleContractExpand">
                                 <el-table-column type="expand">
                                     <template #default="props">
@@ -354,12 +375,11 @@
                                                 </el-radio-group>
                                             </div>
                                             <el-table :data="repaymentTab==='customer' ? currentRepayments : currentFactoryRepayments" size="small" max-height="300">
-                                                <el-table-column prop="period" label="期数" width="70"></el-table-column>
-                                                <el-table-column prop="due_date" label="应还日期" width="120"></el-table-column>
+                                                <el-table-column prop="period" label="期数" width="70" due_date" label="应还日期" width="120"></el-table-column>
                                                 <el-table-column label="应还金额" width="120">
                                                     <template #default="s"><span class="num">¥{{ numberFormat(s.row.amount) }}</span></template>
                                                 </el-table-column>
-                                                <el-table-column prop="status" label="状态" width="100">
+                                                <el-table-column prop="status" label="状态" width="100" v-if="colVisible('asset_status')">
                                                     <template #default="s">
                                                         <span class="status-badge" :class="repayClass(s.row.status)">{{ s.row.status }}</span>
                                                     </template>
@@ -377,152 +397,341 @@
                                         <div v-else style="padding:18px 8px;color:#9ca3af">当前车辆暂无合同明细</div>
                                     </template>
                                 </el-table-column>
-                                <el-table-column type="index" label="#" width="50"></el-table-column>
-                                <el-table-column prop="vin" label="车架号 (VIN)" width="190">
+                                <el-table-column type="index" label="#" width="50" v-if="colVisible('idx')"></el-table-column>
+                                <el-table-column prop="vin" label="车架号 (VIN)" width="190" v-if="colVisible('vin')">
                                     <template #default="s"><span class="mono-text">{{ s.row.vin }}</span></template>
                                 </el-table-column>
-                                <el-table-column prop="plate_number" label="车牌号" width="110"></el-table-column>
-                                <el-table-column prop="car_type" label="车型" width="160"></el-table-column>
-                                <el-table-column prop="is_new" label="类型" width="80">
+                                <el-table-column prop="plate_number" label="车牌号" width="110" v-if="colVisible('plate_number')"></el-table-column>
+                                <el-table-column prop="car_type" label="车型" width="160" v-if="colVisible('car_type')"></el-table-column>
+                                <el-table-column prop="is_new" label="类型" width="80" v-if="colVisible('is_new')">
                                     <template #default="s">
                                         <el-tag :type="s.row.is_new==='新车' ? 'primary' : 'info'" size="small" round>{{ s.row.is_new }}</el-tag>
                                     </template>
                                 </el-table-column>
-                                <el-table-column prop="customer_name" label="客户" width="90">
+                                <el-table-column prop="customer_name" label="客户" width="90" v-if="colVisible('customer_name')">
                                     <template #default="s">{{ s.row.customer_name || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="contract_type" label="合同类型" width="100">
+                                <el-table-column prop="contract_type" label="合同类型" width="100" v-if="colVisible('contract_type')">
                                     <template #default="s">{{ s.row.contract_type || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="business_mode" label="模式" width="80">
+                                <el-table-column prop="business_mode" label="模式" width="80" v-if="colVisible('business_mode')">
                                     <template #default="s">
                                         <el-tag v-if="s.row.business_mode" size="small" :type="{'转租':'primary','以租代售':'warning','卖车':'success'}[s.row.business_mode]||'info'" round>{{ s.row.business_mode }}</el-tag>
                                         <span v-else style="color:#9ca3af">-</span>
                                     </template>
                                 </el-table-column>
-                                <el-table-column prop="invoice_date" label="开票日期" width="110"></el-table-column>
-                                <el-table-column label="发票价" width="110" sortable sort-by="invoice_price">
+                                <el-table-column prop="invoice_date" label="开票日期" width="110" v-if="colVisible('invoice_date')"></el-table-column>
+                                <el-table-column label="发票价" width="110" sortable sort-by="invoice_price" v-if="colVisible('invoice_price')">
                                     <template #default="s"><span class="num">¥{{ numberFormat(s.row.invoice_price) }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="出厂价" width="100">
+                                <el-table-column label="出厂价" width="100" v-if="colVisible('snapshot_invoice_price')">
                                     <template #default="s"><span class="num">¥{{ numberFormat(s.row.snapshot_invoice_price || s.row.invoice_price || 0) }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="整车指导价" width="120">
+                                <el-table-column label="整车指导价" width="120" v-if="colVisible('guidance_price')">
                                     <template #default="s"><span class="num text-red">¥{{ numberFormat(guidancePriceForCarType(s.row.car_type).sale || s.row.guidance_price || 0) }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="售价/总价" width="100">
+                                <el-table-column label="售价/总价" width="100" v-if="colVisible('total_price')">
                                     <template #default="s"><span class="num" style="font-weight:600;color:#2563eb">{{ s.row.total_price ? '¥' + numberFormat(s.row.total_price) : '-' }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="厂家月供" width="110">
+                                <el-table-column label="厂家月供" width="110" v-if="colVisible('monthly_payment')">
                                     <template #default="s"><span class="num">¥{{ numberFormat(s.row.monthly_payment) }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="客户月租" width="100">
+                                <el-table-column label="客户月租" width="100" v-if="colVisible('rent')">
                                     <template #default="s"><span class="num">¥{{ numberFormat(s.row.rent) }}</span></template>
                                 </el-table-column>
                                 <el-table-column label="月利差" width="100">
                                     <template #default="s"><span class="num" :class="(s.row.rent - s.row.monthly_payment) >= 0 ? 'text-green' : 'text-red'">¥{{ numberFormat(s.row.rent - s.row.monthly_payment) }}</span></template>
                                 </el-table-column>
-                                <el-table-column prop="loan_periods" label="期数" width="60"></el-table-column>
-                                <el-table-column label="贷款余额" width="120">
+                                <el-table-column prop="loan_periods" label="期数" width="60" v-if="colVisible('loan_periods')"></el-table-column>
+                                <el-table-column label="贷款余额" width="120" v-if="colVisible('loan_balance')">
                                     <template #default="s">
                                         <span v-if="s.row.loan_balance==='已结清'" class="text-green">✓ 已结清</span>
                                         <span v-else class="num text-red">¥{{ numberFormat(parseFloat(s.row.loan_balance||0)) }}</span>
                                     </template>
                                 </el-table-column>
-                                <el-table-column label="已收租金" width="110">
+                                <el-table-column label="已收租金" width="110" v-if="colVisible('collected_rent')">
                                     <template #default="s"><span class="num text-blue">¥{{ numberFormat(s.row.collected_rent) }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="状态" width="180">
+                                <el-table-column label="状态" width="180" v-if="colVisible('asset_status')">
                                     <template #default="s">
-                                        <span class="status-badge" :class="assetStatusClass(s.row.asset_status)">{{ s.row.asset_status }}</span>
+                                        <span v-if="s.row.is_deleted" class="status-badge badge-gray">已删除</span>
+                                        <span v-else class="status-badge" :class="assetStatusClass(s.row.asset_status)">{{ s.row.asset_status }}</span>
                                     </template>
                                 </el-table-column>
-                                <el-table-column label="合同状态" width="100">
+                                <el-table-column label="合同状态" width="100" v-if="colVisible('contract_status')">
                                     <template #default="s">
                                         <span v-if="s.row.contract_status" class="status-badge" :class="{'执行中':'badge-blue','已结清':'badge-green','逾期中':'badge-red'}[s.row.contract_status]||'badge-gray'">{{ s.row.contract_status }}</span>
                                         <span v-else style="color:#9ca3af">-</span>
                                     </template>
                                 </el-table-column>
-                                <el-table-column label="交付状态" width="120">
+                                <el-table-column label="交付状态" width="120" v-if="colVisible('delivery_status')">
                                     <template #default="s">
                                         <span v-if="s.row.delivery_status" class="status-badge" :class="deliveryStatusClass(s.row.delivery_status)">{{ s.row.delivery_status }}</span>
                                         <span v-else style="color:#9ca3af">-</span>
                                     </template>
                                 </el-table-column>
-                                <el-table-column label="首次支付状态" width="120">
+                                <el-table-column label="首次支付状态" width="120" v-if="colVisible('initial_payment_status')">
                                     <template #default="s">
                                         <span v-if="s.row.initial_payment_status" class="status-badge" :class="deliveryStatusClass(s.row.initial_payment_status)">{{ s.row.initial_payment_status }}</span>
                                         <span v-else style="font-size:12px;color:#9ca3af">-</span>
                                     </template>
                                 </el-table-column>
-                                <el-table-column prop="product_name" label="产品名称" width="160" show-overflow-tooltip>
+                                <el-table-column prop="product_name" label="产品名称" width="160" show-overflow-tooltip v-if="colVisible('product_name')">
                                     <template #default="s">{{ s.row.product_name || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="announce_model" label="公告车型" width="180" show-overflow-tooltip>
+                                <el-table-column prop="announce_model" label="公告车型" width="180" show-overflow-tooltip v-if="colVisible('announce_model')">
                                     <template #default="s"><span class="mono-text">{{ s.row.announce_model || '-' }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="结算价格" width="120" sortable sort-by="settlement_price">
+                                <el-table-column label="结算价格" width="120" sortable sort-by="settlement_price" v-if="colVisible('settlement_price')">
                                     <template #default="s"><span class="num" v-if="s.row.settlement_price">¥{{ numberFormat(s.row.settlement_price) }}</span><span v-else style="color:#9ca3af">-</span></template>
                                 </el-table-column>
-                                <el-table-column prop="stock_in_date" label="入库日期" width="110">
+                                <el-table-column prop="stock_in_date" label="入库日期" width="110" v-if="colVisible('stock_in_date')">
                                     <template #default="s">{{ s.row.stock_in_date || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="energy_type" label="能源类型" width="100">
+                                <el-table-column prop="energy_type" label="能源类型" width="100" v-if="colVisible('energy_type')">
                                     <template #default="s">{{ s.row.energy_type || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="product_category" label="产品大类" width="110">
+                                <el-table-column prop="product_category" label="产品大类" width="110" v-if="colVisible('product_category')">
                                     <template #default="s">{{ s.row.product_category || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="drive_form" label="驱动形式" width="90">
+                                <el-table-column prop="drive_form" label="驱动形式" width="90" v-if="colVisible('drive_form')">
                                     <template #default="s">{{ s.row.drive_form || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="vehicle_cab" label="驾驶室" width="160" show-overflow-tooltip>
+                                <el-table-column prop="vehicle_cab" label="驾驶室" width="160" show-overflow-tooltip v-if="colVisible('vehicle_cab')">
                                     <template #default="s">{{ s.row.vehicle_cab || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="engine_factory" label="发动机厂家" width="150" show-overflow-tooltip>
+                                <el-table-column prop="engine_factory" label="发动机厂家" width="150" show-overflow-tooltip v-if="colVisible('engine_factory')">
                                     <template #default="s">{{ s.row.engine_factory || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="engine_power" label="发动机功率" width="110">
+                                <el-table-column prop="engine_power" label="发动机功率" width="110" v-if="colVisible('engine_power')">
                                     <template #default="s">{{ s.row.engine_power || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="vehicle_gearbox" label="变速箱" width="120" show-overflow-tooltip>
+                                <el-table-column prop="vehicle_gearbox" label="变速箱" width="120" show-overflow-tooltip v-if="colVisible('vehicle_gearbox')">
                                     <template #default="s">{{ s.row.vehicle_gearbox || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="rear_axle" label="后桥" width="90">
+                                <el-table-column prop="rear_axle" label="后桥" width="90" v-if="colVisible('rear_axle')">
                                     <template #default="s">{{ s.row.rear_axle || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="axle_ratio" label="后桥速比" width="100">
+                                <el-table-column prop="axle_ratio" label="后桥速比" width="100" v-if="colVisible('axle_ratio')">
                                     <template #default="s">{{ s.row.axle_ratio || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="wheelbase" label="轴距" width="90">
+                                <el-table-column prop="wheelbase" label="轴距" width="90" v-if="colVisible('wheelbase')">
                                     <template #default="s">{{ s.row.wheelbase || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="tire" label="轮胎" width="140" show-overflow-tooltip>
+                                <el-table-column prop="tire" label="轮胎" width="140" show-overflow-tooltip v-if="colVisible('tire')">
                                     <template #default="s">{{ s.row.tire || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="certificate_no" label="合格证号" width="150" show-overflow-tooltip>
+                                <el-table-column prop="certificate_no" label="合格证号" width="150" show-overflow-tooltip v-if="colVisible('certificate_no')">
                                     <template #default="s"><span class="mono-text">{{ s.row.certificate_no || '-' }}</span></template>
                                 </el-table-column>
-                                <el-table-column prop="dealer_name" label="经销商" width="200" show-overflow-tooltip>
+                                <el-table-column prop="dealer_name" label="经销商" width="200" show-overflow-tooltip v-if="colVisible('dealer_name')">
                                     <template #default="s">{{ s.row.dealer_name || '-' }}</template>
                                 </el-table-column>
-                                <el-table-column prop="fund_source" label="资金来源" width="110">
+                                <el-table-column prop="fund_source" label="资金来源" width="110" v-if="colVisible('fund_source')">
                                     <template #default="s">{{ s.row.fund_source || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="product_series" label="品系" width="100" show-overflow-tooltip v-if="colVisible('product_series')">
+                                    <template #default="s">{{ s.row.product_series || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="production_month" label="排产月份" width="100" v-if="colVisible('production_month')">
+                                    <template #default="s">{{ s.row.production_month || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="sales_level" label="畅销级别" width="90" v-if="colVisible('sales_level')">
+                                    <template #default="s">{{ s.row.sales_level || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="modification_type" label="委改类型" width="100" v-if="colVisible('modification_type')">
+                                    <template #default="s">{{ s.row.modification_type || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="invoice_no" label="发票号" width="160" show-overflow-tooltip v-if="colVisible('invoice_no')">
+                                    <template #default="s"><span class="mono-text">{{ s.row.invoice_no || '-' }}</span></template>
+                                </el-table-column>
+                                <el-table-column prop="invoice_type" label="发票类型" width="100" v-if="colVisible('invoice_type')">
+                                    <template #default="s">{{ s.row.invoice_type || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="invoice_unit_name" label="开票单位" width="160" show-overflow-tooltip v-if="colVisible('invoice_unit_name')">
+                                    <template #default="s">{{ s.row.invoice_unit_name || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="pickup_order_no" label="提车单号" width="140" show-overflow-tooltip v-if="colVisible('pickup_order_no')">
+                                    <template #default="s"><span class="mono-text">{{ s.row.pickup_order_no || '-' }}</span></template>
+                                </el-table-column>
+                                <el-table-column prop="company_remark" label="公司备注" width="160" show-overflow-tooltip v-if="colVisible('company_remark')">
+                                    <template #default="s">{{ s.row.company_remark || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="confirm_date" label="确认日期" width="110" v-if="colVisible('confirm_date')">
+                                    <template #default="s">{{ s.row.confirm_date || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="production_date" label="下线日期" width="110" v-if="colVisible('production_date')">
+                                    <template #default="s">{{ s.row.production_date || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="warehouse_date" label="入仓日期" width="110" v-if="colVisible('warehouse_date')">
+                                    <template #default="s">{{ s.row.warehouse_date || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="sales_cycle" label="销售周期" width="100" v-if="colVisible('sales_cycle')">
+                                    <template #default="s">{{ s.row.sales_cycle || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="pickup_warehouse_code" label="提车仓代码" width="120" v-if="colVisible('pickup_warehouse_code')">
+                                    <template #default="s"><span class="mono-text">{{ s.row.pickup_warehouse_code || '-' }}</span></template>
+                                </el-table-column>
+                                <el-table-column prop="dest_code" label="终止地代码" width="120" v-if="colVisible('dest_code')">
+                                    <template #default="s">{{ s.row.dest_code || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="dest_name" label="终止地名称" width="160" show-overflow-tooltip v-if="colVisible('dest_name')">
+                                    <template #default="s">{{ s.row.dest_name || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="outbound_date" label="出库日期" width="110" v-if="colVisible('outbound_date')">
+                                    <template #default="s">{{ s.row.outbound_date || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="dealer_price" label="网员价" width="110" v-if="colVisible('dealer_price')">
+                                    <template #default="s"><span class="num" v-if="s.row.dealer_price">¥{{ numberFormat(s.row.dealer_price) }}</span><span v-else style="color:#9ca3af">-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="sale_total" label="销售总金额" width="110" v-if="colVisible('sale_total')">
+                                    <template #default="s"><span class="num" v-if="s.row.sale_total">¥{{ numberFormat(s.row.sale_total) }}</span><span v-else style="color:#9ca3af">-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="sale_tax" label="销售税额" width="100" v-if="colVisible('sale_tax')">
+                                    <template #default="s"><span class="num" v-if="s.row.sale_tax">¥{{ numberFormat(s.row.sale_tax) }}</span><span v-else style="color:#9ca3af">-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="body_amount" label="上装金额" width="110" v-if="colVisible('body_amount')">
+                                    <template #default="s"><span class="num" v-if="s.row.body_amount">¥{{ numberFormat(s.row.body_amount) }}</span><span v-else style="color:#9ca3af">-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="battery_invoice_no" label="电池发票号" width="140" show-overflow-tooltip v-if="colVisible('battery_invoice_no')">
+                                    <template #default="s"><span class="mono-text">{{ s.row.battery_invoice_no || '-' }}</span></template>
+                                </el-table-column>
+                                <el-table-column prop="battery_sale_amount" label="电池销售金额" width="120" v-if="colVisible('battery_sale_amount')">
+                                    <template #default="s"><span class="num" v-if="s.row.battery_sale_amount">¥{{ numberFormat(s.row.battery_sale_amount) }}</span><span v-else style="color:#9ca3af">-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="battery_sale_tax" label="电池销售税额" width="110" v-if="colVisible('battery_sale_tax')">
+                                    <template #default="s"><span class="num" v-if="s.row.battery_sale_tax">¥{{ numberFormat(s.row.battery_sale_tax) }}</span><span v-else style="color:#9ca3af">-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="battery_settle_code" label="电池结算代码" width="130" v-if="colVisible('battery_settle_code')">
+                                    <template #default="s"><span class="mono-text">{{ s.row.battery_settle_code || '-' }}</span></template>
+                                </el-table-column>
+                                <el-table-column prop="battery_settle_name" label="电池结算名称" width="130" show-overflow-tooltip v-if="colVisible('battery_settle_name')">
+                                    <template #default="s">{{ s.row.battery_settle_name || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="battery_fund_source" label="电池资金来源" width="130" v-if="colVisible('battery_fund_source')">
+                                    <template #default="s">{{ s.row.battery_fund_source || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="price_file_no" label="价格文件编号" width="120" v-if="colVisible('price_file_no')">
+                                    <template #default="s">{{ s.row.price_file_no || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="fixed_rebate" label="固定返利" width="110" v-if="colVisible('fixed_rebate')">
+                                    <template #default="s"><span class="num" v-if="s.row.fixed_rebate">¥{{ numberFormat(s.row.fixed_rebate) }}</span><span v-else style="color:#9ca3af">-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="fixed_rebate_tax" label="固定返利税额" width="120" v-if="colVisible('fixed_rebate_tax')">
+                                    <template #default="s"><span class="num" v-if="s.row.fixed_rebate_tax">¥{{ numberFormat(s.row.fixed_rebate_tax) }}</span><span v-else style="color:#9ca3af">-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="base_rebate" label="基础返利" width="110" v-if="colVisible('base_rebate')">
+                                    <template #default="s"><span class="num" v-if="s.row.base_rebate">¥{{ numberFormat(s.row.base_rebate) }}</span><span v-else style="color:#9ca3af">-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="base_rebate_tax" label="基础返利税额" width="120" v-if="colVisible('base_rebate_tax')">
+                                    <template #default="s"><span class="num" v-if="s.row.base_rebate_tax">¥{{ numberFormat(s.row.base_rebate_tax) }}</span><span v-else style="color:#9ca3af">-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="base_rebate_standard" label="基础返利标准" width="120" v-if="colVisible('base_rebate_standard')">
+                                    <template #default="s"><span class="num" v-if="s.row.base_rebate_standard">¥{{ numberFormat(s.row.base_rebate_standard) }}</span><span v-else style="color:#9ca3af">-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="quantity" label="数量" width="60" v-if="colVisible('quantity')">
+                                    <template #default="s">{{ s.row.quantity || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="front_axle" label="前桥" width="120" show-overflow-tooltip v-if="colVisible('front_axle')">
+                                    <template #default="s">{{ s.row.front_axle || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="others" label="其他" width="140" show-overflow-tooltip v-if="colVisible('others')">
+                                    <template #default="s">{{ s.row.others || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="fuel_category" label="燃料种类" width="100" v-if="colVisible('fuel_category')">
+                                    <template #default="s">{{ s.row.fuel_category || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="fuel_form" label="燃料形式" width="100" v-if="colVisible('fuel_form')">
+                                    <template #default="s">{{ s.row.fuel_form || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="vehicle_physical_status" label="车辆状态" width="100" v-if="colVisible('vehicle_physical_status')">
+                                    <template #default="s">{{ s.row.vehicle_physical_status || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="vehicle_type" label="车辆类型" width="100" v-if="colVisible('vehicle_type')">
+                                    <template #default="s">{{ s.row.vehicle_type || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="cab_type" label="驾驶室类型" width="120" show-overflow-tooltip v-if="colVisible('cab_type')">
+                                    <template #default="s">{{ s.row.cab_type || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="engine_factory_power" label="发动机厂家及功率" width="140" show-overflow-tooltip v-if="colVisible('engine_factory_power')">
+                                    <template #default="s">{{ s.row.engine_factory_power || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="gearbox_factory_model" label="变速箱厂家及型号" width="140" show-overflow-tooltip v-if="colVisible('gearbox_factory_model')">
+                                    <template #default="s">{{ s.row.gearbox_factory_model || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="rear_axle_type" label="后桥类型" width="100" v-if="colVisible('rear_axle_type')">
+                                    <template #default="s">{{ s.row.rear_axle_type || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="market_segment" label="细分市场" width="120" show-overflow-tooltip v-if="colVisible('market_segment')">
+                                    <template #default="s">{{ s.row.market_segment || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="wheelbase_spec" label="轴距" width="120" v-if="colVisible('wheelbase')">
+                                    <template #default="s">{{ s.row.wheelbase_spec || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="saddle_spec" label="鞍座/上装规格" width="130" show-overflow-tooltip v-if="colVisible('saddle_spec')">
+                                    <template #default="s">{{ s.row.saddle_spec || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="engine_manufacturer" label="发动机厂家" width="120" show-overflow-tooltip v-if="colVisible('engine_factory')">
+                                    <template #default="s">{{ s.row.engine_manufacturer || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="emission_standard" label="国标" width="100" v-if="colVisible('emission_standard')">
+                                    <template #default="s">{{ s.row.emission_standard || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="engine_model" label="发动机型号" width="120" v-if="colVisible('engine_model')">
+                                    <template #default="s">{{ s.row.engine_model || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="transmission_manufacturer" label="变速器厂家" width="120" v-if="colVisible('transmission_manufacturer')">
+                                    <template #default="s">{{ s.row.transmission_manufacturer || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="transmission_model" label="变速器型号" width="120" v-if="colVisible('transmission_model')">
+                                    <template #default="s">{{ s.row.transmission_model || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="drive_motor_model" label="驱动电机型号" width="130" v-if="colVisible('drive_motor_model')">
+                                    <template #default="s">{{ s.row.drive_motor_model || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="battery_model" label="新能源电池型号" width="140" show-overflow-tooltip v-if="colVisible('battery_model')">
+                                    <template #default="s">{{ s.row.battery_model || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="battery_layout" label="电池布置" width="100" v-if="colVisible('battery_layout')">
+                                    <template #default="s">{{ s.row.battery_layout || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="frame_main" label="车架主体" width="130" show-overflow-tooltip v-if="colVisible('frame_main')">
+                                    <template #default="s">{{ s.row.frame_main || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="fuel_tank" label="油箱/气瓶" width="120" show-overflow-tooltip v-if="colVisible('fuel_tank')">
+                                    <template #default="s">{{ s.row.fuel_tank || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="suspension_model" label="悬架型号" width="120" show-overflow-tooltip v-if="colVisible('suspension_model')">
+                                    <template #default="s">{{ s.row.suspension_model || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column prop="electrical_interface" label="电气预留接口" width="130" show-overflow-tooltip v-if="colVisible('electrical_interface')">
+                                    <template #default="s">{{ s.row.electrical_interface || '-' }}</template>
                                 </el-table-column>
                 <el-table-column label="操作" width="400" fixed="right">
                     <template #default="s">
                         <el-button type="info" size="small" plain round @click="openVehicleDetail(s.row)">详情</el-button>
-                        <el-button v-if="canInitiateVehicleOrder(s.row)" type="warning" size="small" plain round @click="openSalesOrderFromVehicle(s.row)">发起报单</el-button>
-                        <el-button v-if="currentUser.role==='运营' && s.row.contract_type==='以租代售'" type="success" size="small" plain round @click="openTransferDialog(s.row)">过户</el-button>
-                        <el-button v-if="canInitiateVehicleReturn(s.row)" type="success" size="small" round @click="openReturnForm(s.row)">发起退车</el-button>
-                                        <el-popconfirm v-if="currentUser.role==='老板'" title="确认删除？" @confirm="deleteVehicle(s.row.id)">
-                                            <template #reference>
-                                                <el-button link type="danger" size="small"><el-icon><Delete/></el-icon></el-button>
-                                            </template>
-                                        </el-popconfirm>
-                                    </template>
-                                </el-table-column>
+                        <el-button v-if="!s.row.is_deleted && canInitiateVehicleOrder(s.row)" type="warning" size="small" plain round @click="openSalesOrderFromVehicle(s.row)">发起报单</el-button>
+                        <el-button v-if="!s.row.is_deleted && currentUser.role==='运营' && s.row.contract_type==='以租代售'" type="success" size="small" plain round @click="openTransferDialog(s.row)">过户</el-button>
+                        <el-button v-if="!s.row.is_deleted && canInitiateVehicleReturn(s.row)" type="success" size="small" round @click="openReturnForm(s.row)">发起退车</el-button>
+                        <el-button v-if="s.row.is_deleted && currentUser.role==='老板'" type="success" size="small" round @click="restoreVehicle(s.row.id)">恢复</el-button>
+                        <el-popconfirm v-if="!s.row.is_deleted && currentUser.role==='老板'" title="确认将车辆及关联数据隐藏？" confirm-button-text="隐藏" @confirm="deleteVehicle(s.row.id)">
+                            <template #reference>
+                                <el-button link type="danger" size="small"><el-icon><Delete/></el-icon></el-button>
+                            </template>
+                        </el-popconfirm>
+                    </template>
+                </el-table-column>
                             </el-table>
+                            <div style="display:flex;justify-content:center;margin-top:12px">
+                            <el-pagination
+                                v-model:current-page="assetPage"
+                                :page-size="assetPageSize"
+                                :total="vehiclePageTotal"
+                                layout="prev, pager, next, jumper"
+                                background
+                                small>
+                            </el-pagination>
+                            </div>
                         </div>
                     </div>
                     <!-- ================== INVOICE ================== -->
@@ -1848,7 +2057,7 @@
         <!-- ========== ADD VEHICLE DIALOG ========== -->
         <el-dialog v-model="showAddVehicle" title="上传入库（Excel 批量）" width="860" :close-on-click-modal="false">
             <el-alert type="info" :closable="false" show-icon style="margin-bottom:16px"
-                title="上传经销商买断库存 Excel（.xlsx/.xls），系统按 VIN 自动批量入库，并按表格中的全部维度展示车辆信息。已在库的 VIN 会自动跳过。">
+                title="上传车管入库信息 Excel（.xlsx/.xls），系统按 VIN 自动批量入库，并按表格中的全部维度展示车辆信息。已在库的 VIN 会自动跳过。">
             </el-alert>
             <el-upload
                 drag
@@ -1863,7 +2072,7 @@
                 <el-icon class="el-icon--upload"><Upload/></el-icon>
                 <div class="el-upload__text">将车辆信息 Excel 拖到此处，或 <em>点击选择文件</em></div>
                 <template #tip>
-                    <div class="el-upload__tip">仅支持 .xlsx / .xls；表头需包含 VIN码、产品名称、经销商名称等维度</div>
+                    <div class="el-upload__tip">仅支持 .xlsx / .xls；表头需包含 VIN、产品名称、公告车型等维度</div>
                 </template>
             </el-upload>
             <div v-if="vehicleImportLoading" style="margin-top:16px;color:#2563eb;display:flex;align-items:center;gap:8px">
@@ -2855,8 +3064,97 @@
             const assetFilter = ref('');
             const carTypeFilter = ref('');
             const isNewFilter = ref('');
+            const showDeleted = ref(false);
             const contractSearch = ref('');
             const contractFilter = ref('');
+            // 车辆全景表分页
+            const assetPageSize = 20;
+            const assetPage = ref(1);
+            // 列设置（按角色存 localStorage）
+            const ALL_COLUMNS = [
+                {key:'idx',label:'#'},{key:'vin',label:'车架号(VIN)'},{key:'plate_number',label:'车牌号'},
+                {key:'car_type',label:'车型'},{key:'is_new',label:'类型'},{key:'customer_name',label:'客户'},
+                {key:'contract_type',label:'合同类型'},{key:'business_mode',label:'模式'},{key:'invoice_date',label:'开票日期'},
+                {key:'invoice_price',label:'发票价'},{key:'snapshot_invoice_price',label:'出厂价'},{key:'guidance_price',label:'整车指导价'},
+                {key:'total_price',label:'售价/总价'},{key:'monthly_payment',label:'厂家月供'},{key:'rent',label:'客户月租'},
+                {key:'diff',label:'月利差'},{key:'loan_periods',label:'期数'},{key:'loan_balance',label:'贷款余额'},
+                {key:'collected_rent',label:'已收租金'},{key:'asset_status',label:'状态'},{key:'contract_status',label:'合同状态'},
+                {key:'delivery_status',label:'交付状态'},{key:'initial_payment_status',label:'首次支付状态'},
+                {key:'product_name',label:'产品名称'},{key:'announce_model',label:'公告车型'},{key:'settlement_price',label:'结算价格'},
+                {key:'stock_in_date',label:'入库日期'},{key:'energy_type',label:'能源类型'},{key:'product_category',label:'产品大类'},
+                {key:'drive_form',label:'驱动形式'},{key:'vehicle_cab',label:'驾驶室'},{key:'engine_factory',label:'发动机厂家'},
+                {key:'engine_power',label:'发动机功率'},{key:'vehicle_gearbox',label:'变速箱'},{key:'rear_axle',label:'后桥'},
+                {key:'axle_ratio',label:'后桥速比'},{key:'wheelbase',label:'轴距'},{key:'tire',label:'轮胎'},
+                {key:'certificate_no',label:'合格证号'},{key:'dealer_name',label:'经销商'},{key:'fund_source',label:'资金来源'},
+                {key:'product_series',label:'品系'},{key:'production_month',label:'排产月份'},{key:'sales_level',label:'畅销级别'},
+                {key:'modification_type',label:'委改类型'},{key:'invoice_no',label:'发票号'},{key:'invoice_type',label:'发票类型'},
+                {key:'invoice_unit_name',label:'开票单位'},{key:'pickup_order_no',label:'提车单号'},{key:'company_remark',label:'公司备注'},
+                {key:'confirm_date',label:'确认日期'},{key:'production_date',label:'下线日期'},{key:'warehouse_date',label:'入仓日期'},
+                {key:'sales_cycle',label:'销售周期'},{key:'pickup_warehouse_code',label:'提车仓代码'},{key:'dest_code',label:'终止地代码'},
+                {key:'dest_name',label:'终止地名称'},{key:'outbound_date',label:'出库日期'},{key:'dealer_price',label:'网员价'},
+                {key:'sale_total',label:'销售总金额'},{key:'sale_tax',label:'销售税额'},{key:'body_amount',label:'上装金额'},
+                {key:'battery_invoice_no',label:'电池发票号'},{key:'battery_sale_amount',label:'电池销售金额'},{key:'battery_sale_tax',label:'电池销售税额'},
+                {key:'battery_settle_code',label:'电池结算代码'},{key:'battery_settle_name',label:'电池结算名称'},{key:'battery_fund_source',label:'电池资金来源'},
+                {key:'price_file_no',label:'价格文件编号'},{key:'fixed_rebate',label:'固定返利'},{key:'fixed_rebate_tax',label:'固定返利税额'},
+                {key:'base_rebate',label:'基础返利'},{key:'base_rebate_tax',label:'基础返利税额'},{key:'base_rebate_standard',label:'基础返利标准'},
+                {key:'quantity',label:'数量'},{key:'front_axle',label:'前桥'},{key:'others',label:'其他'},
+                {key:'fuel_category',label:'燃料种类'},{key:'fuel_form',label:'燃料形式'},{key:'vehicle_physical_status',label:'车辆状态'},
+                {key:'vehicle_type',label:'车辆类型'},{key:'cab_type',label:'驾驶室类型'},{key:'engine_factory_power',label:'发动机厂家及功率'},
+                {key:'gearbox_factory_model',label:'变速箱厂家及型号'},{key:'rear_axle_type',label:'后桥类型'},{key:'market_segment',label:'细分市场'},
+                {key:'wheelbase_spec',label:'轴距(带单位)'},{key:'saddle_spec',label:'鞍座/上装规格'},{key:'engine_manufacturer',label:'发动机厂家'},
+                {key:'emission_standard',label:'国标'},{key:'engine_model',label:'发动机型号'},{key:'transmission_manufacturer',label:'变速器厂家'},
+                {key:'transmission_model',label:'变速器型号'},{key:'drive_motor_model',label:'驱动电机型号'},{key:'battery_model',label:'新能源电池型号'},
+                {key:'battery_layout',label:'电池布置'},{key:'frame_main',label:'车架主体'},{key:'fuel_tank',label:'油箱/气瓶'},
+                {key:'suspension_model',label:'悬架型号'},{key:'electrical_interface',label:'电气预留接口'},
+            ];
+            const showColSettings = ref(false);
+            const hiddenColumns = ref(new Set());
+            function loadHiddenColumns() {
+                try {
+                    const raw = localStorage.getItem('vehicle_hidden_cols_' + (currentUser.value?.id || '0'));
+                    return raw ? JSON.parse(raw) : [];
+                } catch(e) { return []; }
+            }
+            function toggleColumn(key) {
+                const s = new Set(hiddenColumns.value);
+                if (s.has(key)) s.delete(key); else s.add(key);
+                hiddenColumns.value = s;
+                if (currentUser.value) {
+                    localStorage.setItem('vehicle_hidden_cols_' + currentUser.value.id, JSON.stringify([...s]));
+                }
+            }
+            // 登录后加载隐藏列设置
+            if (currentUser.value) {
+                try {
+                    const raw = localStorage.getItem('vehicle_hidden_cols_' + currentUser.value.id);
+                    hiddenColumns.value = new Set(raw ? JSON.parse(raw) : []);
+                } catch(e) { hiddenColumns.value = new Set(); }
+            } else {
+                // 登录后 watch 加载
+                const unsub = watch(currentUser, (u) => {
+                    if (u) {
+                        try {
+                            const raw = localStorage.getItem('vehicle_hidden_cols_' + u.id);
+                            hiddenColumns.value = new Set(raw ? JSON.parse(raw) : []);
+                        } catch(e) { hiddenColumns.value = new Set(); }
+                        unsub();
+                    }
+                });
+            }
+            function colVisible(key) { return !hiddenColumns.value.has(key); }
+            function selectAllColumns() {
+                hiddenColumns.value = new Set();
+                if (currentUser.value) {
+                    localStorage.setItem('vehicle_hidden_cols_' + currentUser.value.id, '[]');
+                }
+            }
+            function deselectAllColumns() {
+                const all = ALL_COLUMNS.map(c => c.key);
+                hiddenColumns.value = new Set(all);
+                if (currentUser.value) {
+                    localStorage.setItem('vehicle_hidden_cols_' + currentUser.value.id, JSON.stringify(all));
+                }
+            }
             const carTypeOptions = ref([]);
             const salesOrderCarOptions = ref([]);
             const salesOrderCommonOptions = ref({ gearbox_options: [], color_options: [], box_options: [], box_remark_placeholder: '' });
@@ -3211,12 +3509,12 @@
             // ===== Stat Cards =====
 	            // 车管端仪表盘只展示 4 个维度：库存车辆、以租代售数量、租赁数量、退车中
 	            const fleetStatCards = computed(() => {
-	                const rows = assetRows.value;
-	                const countByStatus = (status) => rows.filter(row => row.asset_status === status).length;
+	                const rows = vehicles.value;
+	                const countByStatus = (status) => rows.filter(row => row.status === status).length;
 	                return [
 	                    { label: '库存车辆', value: countByStatus('在库'), svg: '🚛', bg: '#f3f4f6', color: '#6b7280' },
-	                    { label: '以租代售数量', value: countByStatus('已经出库（以租代售）'), svg: '🤝', bg: '#ede9fe', color: '#7c3aed' },
-	                    { label: '租赁数量', value: countByStatus('已经出库（租赁）'), svg: '📄', bg: '#dbeafe', color: '#2563eb' },
+	                    { label: '以租代售数量', value: countByStatus('以租代售'), svg: '🤝', bg: '#ede9fe', color: '#7c3aed' },
+	                    { label: '租赁数量', value: countByStatus('租赁中'), svg: '📄', bg: '#dbeafe', color: '#2563eb' },
 	                    { label: '退车中', value: countByStatus('退车中'), svg: '↩️', bg: '#fee2e2', color: '#ef4444' },
 	                ];
 	            });
@@ -3246,12 +3544,28 @@
                 factory_paid: 0,
             }));
 
+	            const vehiclePageData = ref([]);
+	            const vehiclePageTotal = ref(0);
 	            // ===== Fetch =====
 	            const fetchAll = async () => {
-	                const [sRes, vRes] = await Promise.all([fetch('/api/dashboard/stats'), fetch('/api/vehicles')]);
+	                const [sRes, vRes, lRes] = await Promise.all([
+	                    fetch('/api/dashboard/stats'),
+	                    fetch('/api/vehicles?page=1&page_size=20'),
+	                    fetch('/api/vehicles/list'),
+	                ]);
 	                stats.value = await sRes.json();
-	                vehicles.value = await vRes.json();
+	                const page = await vRes.json();
+	                vehicles.value = await lRes.json();
+	                vehiclePageTotal.value = page.total || 0;
+	                vehiclePageData.value = page.data || [];
+	                assetPage.value = 1;
 	                if (currentPage.value === 'dashboard') setTimeout(initCharts, 100);
+	            };
+	            const fetchVehiclePage = async (page) => {
+	                const r = await (await fetch('/api/vehicles?page=' + page + '&page_size=20')).json();
+	                vehiclePageData.value = r.data || [];
+	                vehiclePageTotal.value = r.total || 0;
+	                assetPage.value = page;
 	            };
             const fetchSalesOrders = async () => { salesOrders.value = await (await fetch('/api/sales-orders')).json(); };
             const fetchContracts = async () => { contracts.value = await (await fetch('/api/contracts')).json(); };
@@ -3360,6 +3674,7 @@
 	                fetchReceivingCompanies();
 	                fetchRecon();
 	                fetchReturns();
+	                fetchAll();
 	            }
 
             let assetChart = null, statusChartInst = null;
@@ -3411,7 +3726,7 @@
 	            watch(currentPage, (page) => {
 	                if (page === 'dashboard') refreshDashboardPanels();
                 if (page === 'orders') fetchSalesOrders();
-                if (page === 'assets') fetchContracts();
+                if (page === 'assets') { fetchAll(); fetchContracts(); }
                 if (page === 'approvals') { fetchApprovals(); fetchApprovalReminders(); fetchLockRequests(); fetchContracts(); fetchReturns(); }
                 if (page === 'risk') { fetchOverdue(); fetchInsuranceWarnings(); }
                 if (page === 'bills') { fetchBills(); fetchContracts(); fetchInvoices(); fetchReceivingCompanies(); }
@@ -3679,7 +3994,7 @@
                 if (row.vehicle_status === '在库') return '在库';
                 return row.vehicle_status || '在库';
             }
-            const assetRows = computed(() => vehicles.value.map(vehicle => {
+            const assetRows = computed(() => vehiclePageData.value.map(vehicle => {
                 const contract = latestContractsByVehicle.value[vehicle.id];
                 const row = {
                     ...vehicle,
@@ -3708,22 +4023,9 @@
                 row.asset_status = assetLifecycleStatus(row);
                 return row;
             }));
-            const filteredAssetRows = computed(() => {
-                let list = assetRows.value;
-                if (assetFilter.value) list = list.filter(row => row.asset_status === assetFilter.value);
-                if (carTypeFilter.value) list = list.filter(row => row.car_type === carTypeFilter.value);
-                if (isNewFilter.value) list = list.filter(row => row.is_new === isNewFilter.value);
-                if (search.value) {
-                    const q = search.value.toLowerCase();
-                    list = list.filter(row =>
-                        (row.vin && row.vin.toLowerCase().includes(q)) ||
-                        (row.plate_number && row.plate_number.includes(q)) ||
-                        (row.car_type && row.car_type.includes(q)) ||
-                        (row.customer_name && row.customer_name.toLowerCase().includes(q))
-                    );
-                }
-                return list;
-            });
+                        const filteredAssetRows = computed(() => assetRows.value);
+            const assetTotalPages = computed(() => Math.max(1, Math.ceil(vehiclePageTotal.value / assetPageSize)));
+            watch(assetPage, (p) => { if (p > 0) fetchVehiclePage(p); });
             const returnableAssetRows = computed(() =>
                 assetRows.value.filter(row => row.asset_status === '已经出库（租赁）')
             );
@@ -4516,9 +4818,18 @@
                 }).catch(() => {});
             }
             async function deleteVehicle(id) {
-                await fetch(`/api/vehicles/${id}`, { method: 'DELETE' });
-                ElementPlus.ElMessage.success('已删除');
-                fetchAll();
+                const res = await (await fetch(`/api/vehicles/${id}`, { method: 'DELETE' })).json();
+                if (res.success) {
+                    ElementPlus.ElMessage.success(res.message || '已删除');
+                    fetchAll();
+                }
+            }
+            async function restoreVehicle(id) {
+                const res = await (await fetch(`/api/vehicles/${id}/restore`, { method: 'POST' })).json();
+                if (res.success) {
+                    ElementPlus.ElMessage.success(res.message || '已恢复');
+                    fetchAll();
+                }
             }
             // ===== 文件上传处理 =====
             function attachmentList(value) {
@@ -5100,7 +5411,34 @@
                 ['后桥速比', 'axle_ratio'], ['轴距', 'wheelbase'], ['轮胎', 'tire'],
                 ['合格证号', 'certificate_no'], ['产品代码', 'product_code'], ['技术路线', 'tech_route'],
                 ['经销商代码', 'dealer_code'], ['经销商名称', 'dealer_name'], ['提车仓库', 'pickup_warehouse'],
-                ['资金来源', 'fund_source'], ['状态', 'status']
+                ['资金来源', 'fund_source'], ['状态', 'status'],
+                // 新模板扩展维度
+                ['品系', 'product_series'], ['排产月份', 'production_month'], ['畅销级别', 'sales_level'],
+                ['委改类型', 'modification_type'], ['发票号', 'invoice_no'], ['发票类型', 'invoice_type'],
+                ['开票单位', 'invoice_unit_name'], ['提车单号', 'pickup_order_no'],
+                ['公司备注', 'company_remark'], ['确认日期', 'confirm_date'], ['下线日期', 'production_date'],
+                ['入仓日期', 'warehouse_date'], ['销售周期', 'sales_cycle'],
+                ['提车仓代码', 'pickup_warehouse_code'], ['终止地代码', 'dest_code'],
+                ['终止地名称', 'dest_name'], ['出库日期', 'outbound_date'], ['在库时间', 'storage_days'],
+                ['网员价', 'dealer_price'], ['销售总金额', 'sale_total'], ['销售税额', 'sale_tax'],
+                ['上装金额', 'body_amount'], ['电池发票号', 'battery_invoice_no'],
+                ['电池销售金额', 'battery_sale_amount'], ['电池销售税额', 'battery_sale_tax'],
+                ['电池结算代码', 'battery_settle_code'], ['电池结算名称', 'battery_settle_name'],
+                ['电池资金来源', 'battery_fund_source'], ['价格文件编号', 'price_file_no'],
+                ['固定返利', 'fixed_rebate'], ['固定返利税额', 'fixed_rebate_tax'],
+                ['基础返利', 'base_rebate'], ['基础返利税额', 'base_rebate_tax'],
+                ['基础返利标准', 'base_rebate_standard'], ['数量', 'quantity'], ['前桥', 'front_axle'],
+                ['其他', 'others'], ['燃料种类', 'fuel_category'], ['燃料形式', 'fuel_form'],
+                ['车辆状态', 'vehicle_physical_status'], ['车辆类型', 'vehicle_type'],
+                ['驾驶室类型', 'cab_type'], ['发动机厂家及功率', 'engine_factory_power'],
+                ['变速箱厂家及型号', 'gearbox_factory_model'], ['后桥类型', 'rear_axle_type'],
+                ['细分市场', 'market_segment'], ['轴距(带单位)', 'wheelbase_spec'],
+                ['鞍座/上装规格', 'saddle_spec'], ['发动机厂家', 'engine_manufacturer'],
+                ['国标', 'emission_standard'], ['发动机型号', 'engine_model'],
+                ['变速器厂家', 'transmission_manufacturer'], ['变速器型号', 'transmission_model'],
+                ['驱动电机型号', 'drive_motor_model'], ['新能源电池型号', 'battery_model'],
+                ['电池布置', 'battery_layout'], ['车架主体', 'frame_main'], ['油箱/气瓶', 'fuel_tank'],
+                ['悬架型号', 'suspension_model'], ['电气预留接口', 'electrical_interface'],
             ];
             const vehicleDetailRows = computed(() => {
                 const v = vehicleDetail.value;
@@ -5767,7 +6105,8 @@
                 canEditReturnSalesSection, canEditReturnFleetSection, canEditReturnOperatorSection, canEditReturnFinanceSection, canEditReturnRemark,
                 // App
                 currentPage, menuItems, visibleMenuItems, pageMeta, roles,
-                search, assetFilter, carTypeFilter, isNewFilter, contractSearch, contractFilter,
+                search, assetFilter, carTypeFilter, isNewFilter, showDeleted, contractSearch, contractFilter,
+                hiddenColumns, toggleColumn, colVisible, ALL_COLUMNS, showColSettings, selectAllColumns, deselectAllColumns,
                 carTypeOptions, carTypeGroups, salesOrderCarOptions, currentSalesOrderCarConfig, currentVehicleCarConfig, availableGearboxOptions, availableColorOptions, availableBoxOptions, availableVehicleGearboxOptions, availableVehicleColorOptions, availableVehicleBoxOptions, boxRemarkPlaceholder, vehicleBoxRemarkPlaceholder,
                 vehicles, contracts, stats, salesOrders, overdueList, insuranceWarnings, pendingBills, feeItems, profitData, profitSummary, returnList, returnableAssetRows,
                 invoiceRequests, receivingCompanies, bossDashboard, slaReminders, customerBlacklist, vehicleRebates,
@@ -5791,10 +6130,11 @@
                 doApprove, doReject, doResubmit, doDeliver,
                 // UI
                 statCards, statusDistribution, filteredAssetRows, filteredContracts, eligibleInitialPaymentContracts, canLaunchApprovalActions, pendingApprovalItems, pendingApprovalCount, pendingDeliveryCount, pendingDeliveryContracts, pendingSalesOrderCount, pendingInitialPaymentCount, approvalsMenuCount, pendingReconCount, pendingReturnCount, totalReminderCount,
+                vehiclePageTotal, vehiclePageData, assetTotalPages, assetPageSize, assetPage, fetchVehiclePage,
                 numberFormat, statusClass, repayClass, calcOverdueDays, riskLevel,
                 approvalTypeLabel, approvalTypeClass, approvalVehicleLabel, deliveryStatusClass, paymentCategoryClass, assetStatusClass, returnStatusClass,
                 initialPaymentAmount, initialPaymentType, canInitiateInitialPayment, canInitiateVehicleOrder, canInitiateVehicleReturn, canReturnFromOrder, initiateReturnFromOrder, returnNextStep, currentApprovalStepLabel, isPendingApproval, approvalCardId,
-                handleMenuSelect, handlePageAction, handleContractExpand, editPrice, deleteVehicle,
+                handleMenuSelect, handlePageAction, handleContractExpand, editPrice, deleteVehicle, restoreVehicle,
                 fetchModelGuidancePrices, fetchMissingGuidanceAlerts, onModelGuidanceCarTypeChange, editModelGuidancePrice, focusGuidanceAlert, submitModelGuidancePrice, onGuidanceImportSuccess, onGuidanceImportError, showGuidanceEditDialog,
                 submitVehicle, openVehicleImport, beforeVehicleImport, onVehicleImportSuccess, onVehicleImportError, openVehicleDetail, submitContract, submitSalesOrder, editSalesOrderDraft, deleteSalesOrderDraft, copySalesOrderDraft, activateOrder, createContractFromOrder, confirmRepayment, confirmFactoryRepayment, requestLock, openApprovalReminderCenter, focusApprovalItem,
                 deliverVehicle, matchContractVehicle, openSalesOrderFromVehicle,

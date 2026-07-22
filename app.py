@@ -42,9 +42,18 @@ ROLE_ACTIONS = {
     '销售': ['create_contract', 'view_contracts', 'upload_screenshot', 'view_overdue', 'initiate_return', 'request_lock', 'initiate_initial_payment', 'create_order'],
 }
 
+# AA-AR 财务敏感字段（对所有非财务/非老板角色隐藏）
+_AA_AR_FIELDS = [
+    'fund_source', 'dealer_price', 'invoice_price', 'sale_total', 'sale_tax',
+    'body_amount', 'battery_invoice_no', 'battery_sale_amount', 'battery_sale_tax',
+    'battery_settle_code', 'battery_settle_name', 'battery_fund_source',
+    'price_file_no', 'fixed_rebate', 'fixed_rebate_tax', 'base_rebate',
+    'base_rebate_tax', 'base_rebate_standard',
+]
+
 ROLE_HIDDEN_FIELDS = {
     '销售': {
-        'vehicles': ['purchase_price', 'tax_rate', 'estimated_residual_value', 'guidance_price'],
+        'vehicles': ['purchase_price', 'tax_rate', 'estimated_residual_value', 'guidance_price'] + _AA_AR_FIELDS,
         'contracts': [
             'loan_amount', 'monthly_payment', 'factory_guarantee_deposit', 'paid_principal',
             'loan_balance', 'collected_deposit', 'collected_rent', 'expected_profit_floor',
@@ -56,7 +65,7 @@ ROLE_HIDDEN_FIELDS = {
         'customer_blacklist': ['*'],
     },
     '运营': {
-        'vehicles': ['purchase_price', 'tax_rate', 'guidance_price'],
+        'vehicles': ['purchase_price', 'tax_rate', 'guidance_price'] + _AA_AR_FIELDS,
         'contracts': ['snapshot_guidance_price', 'snapshot_invoice_price'],
         'factory_repayments': ['amount'],
         'vehicle_rebates': ['*'],
@@ -67,7 +76,7 @@ ROLE_HIDDEN_FIELDS = {
         'vehicles': [
             'purchase_price', 'tax_rate', 'estimated_residual_value', 'paid_principal',
             'loan_balance', 'collected_deposit', 'collected_rent',
-        ],
+        ] + _AA_AR_FIELDS,
         'contracts': [
             'loan_amount', 'monthly_payment', 'factory_guarantee_deposit', 'paid_principal',
             'loan_balance', 'collected_deposit', 'collected_rent', 'deposit', 'down_payment',
@@ -501,7 +510,8 @@ def unresolved_guidance_vehicle_count(conn):
         SELECT COUNT(*) as cnt
         FROM vehicles v
         LEFT JOIN model_guidance_prices mgp ON mgp.car_type = v.car_type
-        WHERE (
+        WHERE (v.is_deleted IS NULL OR v.is_deleted = 0)
+          AND (
               COALESCE(mgp.lease_deposit_ratio, 0) <= 0
               OR COALESCE(mgp.lease_repayment_ratio, 0) <= 0
               OR COALESCE(mgp.sale_down_payment_ratio, 0) <= 0
@@ -2127,10 +2137,10 @@ def build_dashboard_metrics(conn):
         AND c.delivery_status='已出库'
     """
 
-    total_vehicles = _fetch_scalar(c, "SELECT COUNT(*) FROM vehicles")
+    total_vehicles = _fetch_scalar(c, "SELECT COUNT(*) FROM vehicles WHERE (is_deleted IS NULL OR is_deleted = 0)")
     active_vehicles = _fetch_scalar(
         c,
-        "SELECT COUNT(*) FROM vehicles WHERE COALESCE(status,'') NOT IN ('已售/已过户')"
+        "SELECT COUNT(*) FROM vehicles WHERE COALESCE(status,'') NOT IN ('已售/已过户') AND (is_deleted IS NULL OR is_deleted = 0)"
     )
     active_contract_count = _fetch_scalar(
         c,
@@ -2138,8 +2148,8 @@ def build_dashboard_metrics(conn):
     )
     open_order_count = _fetch_scalar(c, f"SELECT COUNT(*) FROM sales_orders WHERE {open_order_where}")
 
-    total_invoice = parse_money(_fetch_scalar(c, "SELECT COALESCE(SUM(invoice_price),0) FROM vehicles"))
-    total_residual = parse_money(_fetch_scalar(c, "SELECT COALESCE(SUM(estimated_residual_value),0) FROM vehicles"))
+    total_invoice = parse_money(_fetch_scalar(c, "SELECT COALESCE(SUM(invoice_price),0) FROM vehicles WHERE (is_deleted IS NULL OR is_deleted = 0)"))
+    total_residual = parse_money(_fetch_scalar(c, "SELECT COALESCE(SUM(estimated_residual_value),0) FROM vehicles WHERE (is_deleted IS NULL OR is_deleted = 0)"))
     c.execute("SELECT COALESCE(SUM(loan_amount),0) AS v1, COALESCE(SUM(paid_principal),0) AS v2 FROM contracts")
     r = c.fetchone()
     total_loan = parse_money(r['v1'] if isinstance(r, dict) else r[0])
@@ -2208,17 +2218,19 @@ def build_dashboard_metrics(conn):
           AND insurance_expiry_date != ''
           AND date(insurance_expiry_date) <= date(?, '+30 day')
           AND COALESCE(status,'') NOT IN ('已售/已过户')
+          AND (is_deleted IS NULL OR is_deleted = 0)
     """, (today_str,))
 
     c.execute("""
         SELECT COALESCE(NULLIF(status, ''), '未知') AS label, COUNT(*) AS count
         FROM vehicles
+        WHERE (is_deleted IS NULL OR is_deleted = 0)
         GROUP BY COALESCE(NULLIF(status, ''), '未知')
         ORDER BY count DESC, label ASC
     """)
     status_distribution = [dict(row) for row in c.fetchall()]
 
-    c.execute("SELECT invoice_date, created_at, invoice_price FROM vehicles")
+    c.execute("SELECT invoice_date, created_at, invoice_price FROM vehicles WHERE (is_deleted IS NULL OR is_deleted = 0)")
     vehicle_rows = [dict(row) for row in c.fetchall()]
     c.execute("""
         SELECT paid_at,
@@ -2330,8 +2342,17 @@ def get_stats():
 @login_required
 def get_vehicles():
     user = request.current_user
+    page = request.args.get('page', 1, type=int)
+    page_size = request.args.get('page_size', 20, type=int)
+    page_size = max(1, min(page_size, 100))
+
     conn = get_db()
     c = conn.cursor()
+
+    c.execute("SELECT COUNT(*) AS cnt FROM vehicles WHERE COALESCE(is_deleted,0)=0")
+    total = c.fetchone()['cnt']
+
+    offset = (page - 1) * page_size
     c.execute("""
         SELECT v.*, c.rental_method, c.business_mode, c.loan_amount, c.monthly_payment, c.rent,
                c.loan_periods, c.deposit, c.paid_principal, c.loan_balance,
@@ -2340,12 +2361,33 @@ def get_vehicles():
         FROM vehicles v
         LEFT JOIN contracts c ON c.vehicle_id = v.id
         LEFT JOIN customers cu ON cu.id = c.customer_id
+        WHERE COALESCE(v.is_deleted, 0) = 0
         ORDER BY v.id ASC
-    """)
+        LIMIT ? OFFSET ?
+    """, (page_size, offset))
     vehicles = [dict(row) for row in c.fetchall()]
     vehicles = redact_for_role(conn, user['role'], 'vehicles', vehicles)
     conn.close()
-    return jsonify(vehicles)
+    return jsonify({'total': total, 'page': page, 'page_size': page_size, 'data': vehicles})
+
+
+@app.route('/api/vehicles/list', methods=['GET'])
+@login_required
+def get_vehicles_list():
+    """精简车辆列表（id/vin/car_type/plate_number/status/is_new），供搜索/车型统计用"""
+    user = request.current_user
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT v.id, v.vin, v.car_type, v.plate_number, v.status,
+               v.is_new, v.is_deleted
+        FROM vehicles v
+        ORDER BY v.id ASC
+    """)
+    rows = [dict(row) for row in c.fetchall()]
+    rows = redact_for_role(conn, user['role'], 'vehicles', rows)
+    conn.close()
+    return jsonify(rows)
 
 
 # 车型预设列表（按能源类型分组）
@@ -2436,6 +2478,7 @@ def get_model_guidance_prices():
                AVG(COALESCE(guidance_price, 0)) as avg_vehicle_guidance_price
         FROM vehicles
         WHERE COALESCE(car_type, '') != ''
+          AND (is_deleted IS NULL OR is_deleted = 0)
         GROUP BY car_type
         ORDER BY car_type ASC
     """)
@@ -2501,7 +2544,8 @@ def get_guidance_price_alerts():
                COALESCE(mgp.sale_repayment_ratio, 0) as sale_repayment_ratio
         FROM vehicles v
         LEFT JOIN model_guidance_prices mgp ON mgp.car_type = v.car_type
-        WHERE (
+        WHERE (v.is_deleted IS NULL OR v.is_deleted = 0)
+          AND (
               COALESCE(mgp.lease_deposit_ratio, 0) <= 0
               OR COALESCE(mgp.lease_repayment_ratio, 0) <= 0
               OR COALESCE(mgp.sale_down_payment_ratio, 0) <= 0
@@ -2583,7 +2627,7 @@ def upsert_model_guidance_price():
         old_lease_price = existing['lease_installment_price'] if existing else 0
         old_sale_price = existing['sale_total_price'] if existing else 0
 
-        c.execute("SELECT id, guidance_price FROM vehicles WHERE car_type=?", (car_type,))
+        c.execute("SELECT id, guidance_price FROM vehicles WHERE car_type=? AND (is_deleted IS NULL OR is_deleted = 0)", (car_type,))
         affected_vehicles = c.fetchall()
         affected_count = len(affected_vehicles)
 
@@ -2830,15 +2874,33 @@ def add_vehicle():
             if model_price and parse_money(model_price['guidance_price']) > 0:
                 guidance_price = parse_money(model_price['guidance_price'])
 
-        c.execute('''
-        INSERT INTO vehicles (vin, plate_number, company, car_type, is_new, invoice_date,
-                              invoice_price, purchase_price, tax_rate, estimated_residual_value,
-                              guidance_price, insurance_expiry_date, annual_review_date,
-                              engine_number, vehicle_category, vehicle_cab, vehicle_engine_battery,
-                              vehicle_power_battery, vehicle_gearbox, vehicle_color, vehicle_box_type,
-                              box_type_remark, invoice_contract_file, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
+        NEW_FIELDS = [
+            'product_series', 'production_month', 'sales_level', 'modification_type',
+            'invoice_no', 'invoice_type', 'invoice_unit_name', 'pickup_order_no',
+            'company_remark', 'confirm_date', 'production_date', 'warehouse_date',
+            'sales_cycle', 'pickup_warehouse_code', 'dest_code', 'dest_name',
+            'outbound_date', 'storage_days', 'dealer_price', 'sale_total', 'sale_tax',
+            'body_amount', 'battery_invoice_no', 'battery_sale_amount', 'battery_sale_tax',
+            'battery_settle_code', 'battery_settle_name', 'battery_fund_source',
+            'price_file_no', 'fixed_rebate', 'fixed_rebate_tax', 'base_rebate',
+            'base_rebate_tax', 'base_rebate_standard', 'quantity', 'front_axle',
+            'others', 'fuel_category', 'fuel_form', 'vehicle_physical_status',
+            'vehicle_type', 'cab_type', 'engine_factory_power', 'gearbox_factory_model',
+            'rear_axle_type', 'market_segment', 'wheelbase_spec', 'saddle_spec',
+            'engine_manufacturer', 'emission_standard', 'engine_model',
+            'transmission_manufacturer', 'transmission_model', 'drive_motor_model',
+            'battery_model', 'battery_layout', 'frame_main', 'fuel_tank',
+            'suspension_model', 'electrical_interface',
+        ]
+        base_cols = ['vin', 'plate_number', 'company', 'car_type', 'is_new', 'invoice_date',
+                     'invoice_price', 'purchase_price', 'tax_rate', 'estimated_residual_value',
+                     'guidance_price', 'insurance_expiry_date', 'annual_review_date',
+                     'engine_number', 'vehicle_category', 'vehicle_cab', 'vehicle_engine_battery',
+                     'vehicle_power_battery', 'vehicle_gearbox', 'vehicle_color', 'vehicle_box_type',
+                     'box_type_remark', 'invoice_contract_file', 'status']
+        all_cols = base_cols + NEW_FIELDS
+        placeholders = ', '.join('?' for _ in all_cols)
+        base_vals = [
             vin, data.get('plate_number'), data.get('company', '陕西金聚源汽车服务有限公司'),
             car_type, data.get('is_new', '新车'), data.get('invoice_date'),
             data.get('invoice_price', 0), data.get('purchase_price', 0), data.get('tax_rate', 0.13),
@@ -2855,7 +2917,13 @@ def add_vehicle():
             data.get('box_type_remark', ''),
             data.get('invoice_contract_file', ''),
             data.get('status', '在库')
-        ))
+        ]
+        for f in NEW_FIELDS:
+            base_vals.append(data.get(f, ''))
+        c.execute(f'''
+        INSERT INTO vehicles ({', '.join(all_cols)})
+        VALUES ({placeholders})
+        ''', base_vals)
         vehicle_id = c.lastrowid
         if guidance_price <= 0:
             log_audit(conn, '缺少指导价提醒', 'vehicle', vehicle_id,
@@ -2872,16 +2940,51 @@ def add_vehicle():
     finally:
         conn.close()
 
-# 新车 Excel 批量上传入库（经销商买断库存表）
-# 表头位于第3行（openpyxl 1-based），数据自第4行起；按列索引映射，VIN 在第18列。
-VEHICLE_IMPORT_COLUMNS = {
-    5: 'dealer_code', 6: 'dealer_name', 7: 'network_type', 8: 'pickup_address',
-    9: 'product_code', 10: 'product_name', 11: 'announce_model', 12: 'tech_route',
-    13: 'energy_type', 17: 'product_category', 18: 'vin', 20: 'engine_number',
-    21: 'settlement_price', 25: 'fund_source', 26: 'certificate_no', 27: 'stock_in_date',
-    31: 'pickup_warehouse', 35: 'vehicle_cab', 36: 'drive_form', 37: 'engine_factory',
-    38: 'engine_power', 39: 'vehicle_gearbox', 40: 'rear_axle', 41: 'wheelbase',
-    42: 'tire', 43: 'axle_ratio',
+# 新车 Excel 批量上传入库（车管入库信息表 — 79列模板）
+# 表头位于第4行（openpyxl 1-based，第3行为可见性标识），数据自第5行起
+# 按表头中文名匹配，列顺序变化也不影响
+VEHICLE_HEADER_MAP = {
+    '公告车型': 'announce_model', '产品代码': 'product_code', '产品名称': 'product_name',
+    '品系': 'product_series', '发动机号': 'engine_number',
+    'VIN': 'vin', 'VIN码': 'vin',
+    '排产月份': 'production_month', '畅销级别': 'sales_level', '委改类型': 'modification_type',
+    '发票号': 'invoice_no', '开发票类型': 'invoice_type', '发票日期': 'invoice_date',
+    '开票网员单位名称': 'invoice_unit_name', '提车单号': 'pickup_order_no',
+    '公司备注': 'company_remark', '确认日期': 'confirm_date', '下线日期': 'production_date',
+    '入卡车仓库日期': 'warehouse_date', '销售周期': 'sales_cycle',
+    '提车仓库代码': 'pickup_warehouse_code',
+    '提车仓库名称': 'dealer_name', '经销商名称': 'dealer_name',
+    '终止地代码': 'dest_code', '终止地名称': 'dest_name',
+    '入库日期': 'stock_in_date', '出库日期': 'outbound_date', '在库时间': 'storage_days',
+    '资金来源': 'fund_source', '网员价': 'dealer_price',
+    '开票价': 'invoice_price', '发票价': 'invoice_price',
+    '销售总金额': 'sale_total', '销售税额': 'sale_tax',
+    '上装销售金额': 'body_amount', '上装金额': 'body_amount',
+    '电池发票号': 'battery_invoice_no',
+    '电池销售金额': 'battery_sale_amount', '电池销售税额': 'battery_sale_tax',
+    '电池结算单位代码': 'battery_settle_code', '电池结算单位名称': 'battery_settle_name',
+    '电池资金来源': 'battery_fund_source', '价格文件编号': 'price_file_no',
+    '固定返利': 'fixed_rebate', '固定返利税额': 'fixed_rebate_tax',
+    '基础返利': 'base_rebate', '基础返利税额': 'base_rebate_tax',
+    '基础返利标准': 'base_rebate_standard',
+    '驾驶室': 'vehicle_cab', '数量': 'quantity', '驱动形式': 'drive_form',
+    '发动机厂家及型号': 'engine_factory', '发动机厂家': 'engine_manufacturer',
+    '发动机功率': 'engine_power',
+    '变速箱': 'vehicle_gearbox', '前桥': 'front_axle',
+    '后桥': 'rear_axle', '轴距': 'wheelbase',
+    '轮胎': 'tire', '后桥速比': 'axle_ratio',
+    '其他': 'others', '燃料种类': 'fuel_category', '燃料形式': 'fuel_form',
+    '车辆状态': 'vehicle_physical_status', '车辆类型': 'vehicle_type',
+    '驾驶室类型': 'cab_type', '发动机厂家及功率': 'engine_factory_power',
+    '变速箱厂家及型号': 'gearbox_factory_model', '后桥类型': 'rear_axle_type',
+    '细分市场': 'market_segment', '轴距(带单位)': 'wheelbase_spec',
+    '鞍座/上装规格': 'saddle_spec',
+    '国标': 'emission_standard', '发动机型号': 'engine_model',
+    '变速器厂家': 'transmission_manufacturer', '变速器型号': 'transmission_model',
+    '驱动电机型号': 'drive_motor_model',
+    '新能源动力电池型号': 'battery_model', '电池布置': 'battery_layout',
+    '车架主体': 'frame_main', '油箱/气瓶': 'fuel_tank',
+    '悬架型号': 'suspension_model', '电气预留接口': 'electrical_interface',
 }
 
 
@@ -2952,17 +3055,24 @@ def import_vehicles():
             header = values
             break
     if header_row is None:
-        header_row = 3
+        header_row = 4
         header = [_excel_cell_text(cell.value) for cell in ws[header_row]]
 
-    # 根据表头动态定位 VIN 所在列（经销商给的 Excel 列位置可能变化）
-    vin_column_index = None
-    for i, h in enumerate(header):
-        if h and 'VIN' in h.upper():
-            vin_column_index = i
-            break
-    if vin_column_index is None:
-        vin_column_index = 18  # 没找到就回退原硬编码位置
+    # 按表头中文名建立列映射（列顺序变化也不影响）
+    col_map = {}
+    for col_idx, h in enumerate(header):
+        h_clean = h.replace(' ', '').replace('\u3000', '').replace('\uff1a', ':')
+        if h_clean in VEHICLE_HEADER_MAP:
+            col_map[VEHICLE_HEADER_MAP[h_clean]] = col_idx
+        for cn_name, field in VEHICLE_HEADER_MAP.items():
+            if field not in col_map and cn_name in h_clean:
+                col_map[field] = col_idx
+
+    if 'vin' not in col_map:
+        for i, h in enumerate(header):
+            if 'VIN' in h.upper():
+                col_map['vin'] = i
+                break
 
     conn = get_db()
     c = conn.cursor()
@@ -2975,12 +3085,9 @@ def import_vehicles():
         for r in range(header_row + 1, ws.max_row + 1):
             cells = ws[r]
             row_vals = {}
-            for idx, field in VEHICLE_IMPORT_COLUMNS.items():
-                # VIN 列用动态检测的列号，不用硬编码
-                actual_idx = vin_column_index if field == 'vin' else idx
-                cell = cells[actual_idx] if actual_idx < len(cells) else None
+            for field, col_idx in col_map.items():
+                cell = cells[col_idx] if col_idx < len(cells) else None
                 if cell is not None and cell.value is not None:
-                    # VIN列读到 datetime（空行被Excel格式化为日期）→ 视为空
                     if field == 'vin' and isinstance(cell.value, datetime):
                         row_vals[field] = ''
                     else:
@@ -3008,7 +3115,7 @@ def import_vehicles():
                 cell = cells[idx] if idx < len(cells) else None
                 raw[key] = _excel_cell_text(cell.value) if cell is not None else ''
 
-            settlement_price = parse_money(row_vals.get('settlement_price'), 0)
+            settlement_price = parse_money(row_vals.get('invoice_price'), 0)
             stock_in_date = row_vals.get('stock_in_date') or ''
             car_type = row_vals.get('product_name') or ''
 
@@ -3021,33 +3128,107 @@ def import_vehicles():
                 if mp and parse_money(mp['guidance_price']) > 0:
                     guidance_price = parse_money(mp['guidance_price'])
 
+            # 所有入库字段（新模板79列）
+            VINSERT = [
+                ('vin', vin), ('company', row_vals.get('dealer_name') or '陕西金聚源汽车服务有限公司'),
+                ('car_type', car_type), ('is_new', '新车'),
+                ('invoice_date', stock_in_date), ('invoice_price', settlement_price),
+                ('guidance_price', guidance_price),
+                ('engine_number', row_vals.get('engine_number') or ''),
+                ('vehicle_cab', row_vals.get('vehicle_cab') or ''),
+                ('vehicle_gearbox', row_vals.get('vehicle_gearbox') or ''),
+                ('status', '在库'),
+                ('settlement_price', settlement_price),
+                ('stock_in_date', stock_in_date),
+                ('certificate_no', row_vals.get('certificate_no') or ''),
+                ('product_code', row_vals.get('product_code') or ''),
+                ('product_name', car_type),
+                ('announce_model', row_vals.get('announce_model') or ''),
+                ('tech_route', row_vals.get('tech_route') or ''),
+                ('energy_type', row_vals.get('energy_type') or ''),
+                ('product_category', row_vals.get('product_category') or ''),
+                ('drive_form', row_vals.get('drive_form') or ''),
+                ('engine_factory', row_vals.get('engine_factory') or ''),
+                ('engine_power', row_vals.get('engine_power') or ''),
+                ('rear_axle', row_vals.get('rear_axle') or ''),
+                ('wheelbase', row_vals.get('wheelbase') or ''),
+                ('tire', row_vals.get('tire') or ''),
+                ('axle_ratio', row_vals.get('axle_ratio') or ''),
+                ('dealer_code', row_vals.get('dealer_code') or ''),
+                ('dealer_name', row_vals.get('dealer_name') or ''),
+                ('pickup_warehouse', row_vals.get('pickup_warehouse') or ''),
+                ('fund_source', row_vals.get('fund_source') or ''),
+                ('import_raw', json.dumps(raw, ensure_ascii=False)),
+                # 新模板扩展字段
+                ('product_series', row_vals.get('product_series') or ''),
+                ('production_month', row_vals.get('production_month') or ''),
+                ('sales_level', row_vals.get('sales_level') or ''),
+                ('modification_type', row_vals.get('modification_type') or ''),
+                ('invoice_no', row_vals.get('invoice_no') or ''),
+                ('invoice_type', row_vals.get('invoice_type') or ''),
+                ('invoice_unit_name', row_vals.get('invoice_unit_name') or ''),
+                ('pickup_order_no', row_vals.get('pickup_order_no') or ''),
+                ('company_remark', row_vals.get('company_remark') or ''),
+                ('confirm_date', row_vals.get('confirm_date') or ''),
+                ('production_date', row_vals.get('production_date') or ''),
+                ('warehouse_date', row_vals.get('warehouse_date') or ''),
+                ('sales_cycle', row_vals.get('sales_cycle') or ''),
+                ('pickup_warehouse_code', row_vals.get('pickup_warehouse_code') or ''),
+                ('dest_code', row_vals.get('dest_code') or ''),
+                ('dest_name', row_vals.get('dest_name') or ''),
+                ('outbound_date', row_vals.get('outbound_date') or ''),
+                ('storage_days', parse_money(row_vals.get('storage_days'), 0)),
+                ('dealer_price', parse_money(row_vals.get('dealer_price'), 0)),
+                ('sale_total', parse_money(row_vals.get('sale_total'), 0)),
+                ('sale_tax', parse_money(row_vals.get('sale_tax'), 0)),
+                ('body_amount', parse_money(row_vals.get('body_amount'), 0)),
+                ('battery_invoice_no', row_vals.get('battery_invoice_no') or ''),
+                ('battery_sale_amount', parse_money(row_vals.get('battery_sale_amount'), 0)),
+                ('battery_sale_tax', parse_money(row_vals.get('battery_sale_tax'), 0)),
+                ('battery_settle_code', row_vals.get('battery_settle_code') or ''),
+                ('battery_settle_name', row_vals.get('battery_settle_name') or ''),
+                ('battery_fund_source', row_vals.get('battery_fund_source') or ''),
+                ('price_file_no', row_vals.get('price_file_no') or ''),
+                ('fixed_rebate', parse_money(row_vals.get('fixed_rebate'), 0)),
+                ('fixed_rebate_tax', parse_money(row_vals.get('fixed_rebate_tax'), 0)),
+                ('base_rebate', parse_money(row_vals.get('base_rebate'), 0)),
+                ('base_rebate_tax', parse_money(row_vals.get('base_rebate_tax'), 0)),
+                ('base_rebate_standard', parse_money(row_vals.get('base_rebate_standard'), 0)),
+                ('quantity', parse_money(row_vals.get('quantity'), 0)),
+                ('front_axle', row_vals.get('front_axle') or ''),
+                ('others', row_vals.get('others') or ''),
+                ('fuel_category', row_vals.get('fuel_category') or ''),
+                ('fuel_form', row_vals.get('fuel_form') or ''),
+                ('vehicle_physical_status', row_vals.get('vehicle_physical_status') or ''),
+                ('vehicle_type', row_vals.get('vehicle_type') or ''),
+                ('cab_type', row_vals.get('cab_type') or ''),
+                ('engine_factory_power', row_vals.get('engine_factory_power') or ''),
+                ('gearbox_factory_model', row_vals.get('gearbox_factory_model') or ''),
+                ('rear_axle_type', row_vals.get('rear_axle_type') or ''),
+                ('market_segment', row_vals.get('market_segment') or ''),
+                ('wheelbase_spec', row_vals.get('wheelbase_spec') or ''),
+                ('saddle_spec', row_vals.get('saddle_spec') or ''),
+                ('engine_manufacturer', row_vals.get('engine_manufacturer') or ''),
+                ('emission_standard', row_vals.get('emission_standard') or ''),
+                ('engine_model', row_vals.get('engine_model') or ''),
+                ('transmission_manufacturer', row_vals.get('transmission_manufacturer') or ''),
+                ('transmission_model', row_vals.get('transmission_model') or ''),
+                ('drive_motor_model', row_vals.get('drive_motor_model') or ''),
+                ('battery_model', row_vals.get('battery_model') or ''),
+                ('battery_layout', row_vals.get('battery_layout') or ''),
+                ('frame_main', row_vals.get('frame_main') or ''),
+                ('fuel_tank', row_vals.get('fuel_tank') or ''),
+                ('suspension_model', row_vals.get('suspension_model') or ''),
+                ('electrical_interface', row_vals.get('electrical_interface') or ''),
+            ]
+            cols = ', '.join(v[0] for v in VINSERT)
+            placeholders = ', '.join('?' for _ in VINSERT)
+            vals = tuple(v[1] for v in VINSERT)
+
             try:
                 c.execute(
-                    "INSERT INTO vehicles ("
-                    "vin, company, car_type, is_new, invoice_date, invoice_price,"
-                    "guidance_price, engine_number, vehicle_cab, vehicle_gearbox, status,"
-                    "settlement_price, stock_in_date, certificate_no, product_code, product_name,"
-                    "announce_model, tech_route, energy_type, product_category, drive_form,"
-                    "engine_factory, engine_power, rear_axle, wheelbase, tire, axle_ratio,"
-                    "dealer_code, dealer_name, pickup_warehouse, fund_source, import_raw"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        vin,
-                        row_vals.get('dealer_name') or '陕西金聚源汽车服务有限公司',
-                        car_type, '新车', stock_in_date, settlement_price,
-                        guidance_price, row_vals.get('engine_number') or '',
-                        row_vals.get('vehicle_cab') or '', row_vals.get('vehicle_gearbox') or '', '在库',
-                        settlement_price, stock_in_date, row_vals.get('certificate_no') or '',
-                        row_vals.get('product_code') or '', car_type,
-                        row_vals.get('announce_model') or '', row_vals.get('tech_route') or '',
-                        row_vals.get('energy_type') or '', row_vals.get('product_category') or '',
-                        row_vals.get('drive_form') or '', row_vals.get('engine_factory') or '',
-                        row_vals.get('engine_power') or '', row_vals.get('rear_axle') or '',
-                        row_vals.get('wheelbase') or '', row_vals.get('tire') or '',
-                        row_vals.get('axle_ratio') or '', row_vals.get('dealer_code') or '',
-                        row_vals.get('dealer_name') or '', row_vals.get('pickup_warehouse') or '',
-                        row_vals.get('fund_source') or '', json.dumps(raw, ensure_ascii=False),
-                    )
+                    f"INSERT INTO vehicles ({cols}) VALUES ({placeholders})",
+                    vals
                 )
                 vehicle_id = c.lastrowid
                 if guidance_price <= 0:
@@ -3101,7 +3282,24 @@ def update_vehicle(vid):
                 'invoice_price', 'purchase_price', 'tax_rate', 'guidance_price', 'invoice_contract_file', 'status',
                 'insurance_expiry_date', 'annual_review_date', 'engine_number',
                 'vehicle_category', 'vehicle_cab', 'vehicle_engine_battery', 'vehicle_power_battery',
-                'vehicle_gearbox', 'vehicle_color', 'vehicle_box_type', 'box_type_remark']:
+                'vehicle_gearbox', 'vehicle_color', 'vehicle_box_type', 'box_type_remark',
+                # 新模板扩展字段
+                'product_series', 'production_month', 'sales_level', 'modification_type',
+                'invoice_no', 'invoice_type', 'invoice_unit_name', 'pickup_order_no',
+                'company_remark', 'confirm_date', 'production_date', 'warehouse_date',
+                'sales_cycle', 'pickup_warehouse_code', 'dest_code', 'dest_name',
+                'outbound_date', 'storage_days', 'dealer_price', 'sale_total', 'sale_tax',
+                'body_amount', 'battery_invoice_no', 'battery_sale_amount', 'battery_sale_tax',
+                'battery_settle_code', 'battery_settle_name', 'battery_fund_source',
+                'price_file_no', 'fixed_rebate', 'fixed_rebate_tax', 'base_rebate',
+                'base_rebate_tax', 'base_rebate_standard', 'quantity', 'front_axle',
+                'others', 'fuel_category', 'fuel_form', 'vehicle_physical_status',
+                'vehicle_type', 'cab_type', 'engine_factory_power', 'gearbox_factory_model',
+                'rear_axle_type', 'market_segment', 'wheelbase_spec', 'saddle_spec',
+                'engine_manufacturer', 'emission_standard', 'engine_model',
+                'transmission_manufacturer', 'transmission_model', 'drive_motor_model',
+                'battery_model', 'battery_layout', 'frame_main', 'fuel_tank',
+                'suspension_model', 'electrical_interface']:
         if key in data:
             fields.append(f"{key} = ?")
             values.append(data[key])
@@ -3117,13 +3315,37 @@ def update_vehicle(vid):
 def delete_vehicle(vid):
     conn = get_db()
     c = conn.cursor()
-    c.execute("DELETE FROM repayments WHERE contract_id IN (SELECT id FROM contracts WHERE vehicle_id=?)", (vid,))
-    c.execute("DELETE FROM factory_repayments WHERE contract_id IN (SELECT id FROM contracts WHERE vehicle_id=?)", (vid,))
-    c.execute("DELETE FROM contracts WHERE vehicle_id=?", (vid,))
-    c.execute("DELETE FROM vehicles WHERE id=?", (vid,))
+    c.execute("SELECT id, vin, plate_number FROM vehicles WHERE id=?", (vid,))
+    v = c.fetchone()
+    if not v:
+        conn.close()
+        return jsonify({'success': False, 'message': '车辆不存在'}), 404
+    # 软删除：标记为已删除，数据保留
+    c.execute("UPDATE vehicles SET is_deleted = 1 WHERE id = ?", (vid,))
+    log_audit(conn, '软删除车辆', 'vehicle', vid,
+              f'{request.current_user["display_name"]} 软删除了车辆 VIN:{v["vin"]} {v["plate_number"] or ""}',
+              request.current_user['display_name'])
     conn.commit()
     conn.close()
-    return jsonify({'success': True})
+    return jsonify({'success': True, 'message': '车辆已隐藏，所有关联数据保留'})
+
+@app.route('/api/vehicles/<int:vid>/restore', methods=['POST'])
+@require_role('老板')
+def restore_vehicle(vid):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, vin, plate_number FROM vehicles WHERE id=?", (vid,))
+    v = c.fetchone()
+    if not v:
+        conn.close()
+        return jsonify({'success': False, 'message': '车辆不存在'}), 404
+    c.execute("UPDATE vehicles SET is_deleted = 0 WHERE id = ?", (vid,))
+    log_audit(conn, '恢复车辆', 'vehicle', vid,
+              f'{request.current_user["display_name"]} 恢复了车辆 VIN:{v["vin"]} {v["plate_number"] or ""}',
+              request.current_user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '车辆已恢复'})
 
 @app.route('/api/vehicles/<int:vid>/guidance_price', methods=['POST'])
 @require_role('老板')
@@ -3278,6 +3500,7 @@ def list_vehicle_rebates():
         SELECT vr.*, v.vin, v.plate_number, v.car_type
         FROM vehicle_rebates vr
         JOIN vehicles v ON v.id = vr.vehicle_id
+        WHERE (v.is_deleted IS NULL OR v.is_deleted = 0)
         ORDER BY vr.id DESC
     """)
     rows = [dict(row) for row in c.fetchall()]
@@ -4153,6 +4376,7 @@ def get_contracts():
         FROM contracts c
         JOIN vehicles v ON v.id = c.vehicle_id
         LEFT JOIN customers cu ON cu.id = c.customer_id
+        WHERE (v.is_deleted IS NULL OR v.is_deleted = 0)
         ORDER BY c.id ASC
     """)
     contracts = [dict(row) for row in c.fetchall()]
@@ -4758,6 +4982,7 @@ def get_profit_by_vehicle():
                COALESCE((SELECT SUM(rebate_amount) FROM vehicle_rebates WHERE vehicle_id=v.id), 0) AS rebate_total
         FROM vehicles v
         JOIN contracts c ON c.vehicle_id = v.id
+        WHERE (v.is_deleted IS NULL OR v.is_deleted = 0)
         ORDER BY v.id ASC, c.id ASC
     """)
     rows = []
@@ -4867,6 +5092,7 @@ def list_ownership_transfers():
         LEFT JOIN vehicles v ON v.id = ot.vehicle_id
         LEFT JOIN contracts c ON c.id = ot.contract_id
         LEFT JOIN customers cu ON cu.id = c.customer_id
+        WHERE (v.is_deleted IS NULL OR v.is_deleted = 0 OR v.id IS NULL)
         ORDER BY ot.id DESC
     """)
     rows = [dict(row) for row in c.fetchall()]
@@ -5192,6 +5418,7 @@ def get_overdue():
           AND r.period >= 1
           AND COALESCE(c.contract_file, '')!=''
           AND c.delivery_status='已出库'
+          AND (v.is_deleted IS NULL OR v.is_deleted = 0)
         ORDER BY r.due_date ASC
     """)
     overdue = [dict(row) for row in c.fetchall()]
@@ -5210,6 +5437,7 @@ def get_factory_overdue():
         JOIN vehicles v ON v.id = c.vehicle_id
         WHERE fr.status = '逾期'
           AND COALESCE(c.contract_file, '')!=''
+          AND (v.is_deleted IS NULL OR v.is_deleted = 0)
         ORDER BY fr.due_date ASC
     """)
     overdue = [dict(row) for row in c.fetchall()]
@@ -5225,8 +5453,9 @@ def get_insurance_expiry():
     c.execute("""
         SELECT id, vin, plate_number, car_type, company, insurance_expiry_date, annual_review_date, status
         FROM vehicles
-        WHERE (insurance_expiry_date IS NOT NULL AND insurance_expiry_date != '')
-           OR (annual_review_date IS NOT NULL AND annual_review_date != '')
+        WHERE ((insurance_expiry_date IS NOT NULL AND insurance_expiry_date != '')
+           OR (annual_review_date IS NOT NULL AND annual_review_date != ''))
+          AND (is_deleted IS NULL OR is_deleted = 0)
         ORDER BY insurance_expiry_date ASC, annual_review_date ASC
     """)
     rows = []
@@ -5271,6 +5500,7 @@ def get_pending_bills():
           AND r.period >= 1
           AND COALESCE(c.contract_file, '')!=''
           AND c.delivery_status='已出库'
+          AND (v.is_deleted IS NULL OR v.is_deleted = 0)
         ORDER BY r.due_date ASC
     """)
     bills = [dict(row) for row in c.fetchall()]
@@ -5525,6 +5755,7 @@ def get_receivables_list():
         JOIN vehicles v ON v.id = c.vehicle_id
         LEFT JOIN customers cu ON cu.id = c.customer_id
         WHERE rv.status != '已结清' AND rv.receivable_type = 'initial_payment_shortfall'
+          AND (v.is_deleted IS NULL OR v.is_deleted = 0)
         ORDER BY rv.promised_repay_date ASC
     """).fetchall()
     conn.close()

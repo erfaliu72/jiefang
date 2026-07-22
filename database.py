@@ -1104,6 +1104,69 @@ def init_db():
         ("vehicles", "pickup_warehouse", "TEXT"),                # 提车仓库
         ("vehicles", "fund_source", "TEXT"),                     # 资金来源
         ("vehicles", "import_raw", "TEXT"),                      # 原始Excel全部52列(JSON)
+        # === 新车管入库信息.xlsx 维度的扩展列（79列模板）===
+        ("vehicles", "product_series", "TEXT"),
+        ("vehicles", "production_month", "TEXT"),
+        ("vehicles", "sales_level", "TEXT"),
+        ("vehicles", "modification_type", "TEXT"),
+        ("vehicles", "invoice_no", "TEXT"),
+        ("vehicles", "invoice_type", "TEXT"),
+        ("vehicles", "invoice_unit_name", "TEXT"),
+        ("vehicles", "pickup_order_no", "TEXT"),
+        ("vehicles", "company_remark", "TEXT"),
+        ("vehicles", "confirm_date", "TEXT"),
+        ("vehicles", "production_date", "TEXT"),
+        ("vehicles", "warehouse_date", "TEXT"),
+        ("vehicles", "sales_cycle", "TEXT"),
+        ("vehicles", "pickup_warehouse_code", "TEXT"),
+        ("vehicles", "dest_code", "TEXT"),
+        ("vehicles", "dest_name", "TEXT"),
+        ("vehicles", "outbound_date", "TEXT"),
+        ("vehicles", "storage_days", "INTEGER DEFAULT 0"),
+        ("vehicles", "dealer_price", "REAL DEFAULT 0"),
+        ("vehicles", "sale_total", "REAL DEFAULT 0"),
+        ("vehicles", "sale_tax", "REAL DEFAULT 0"),
+        ("vehicles", "body_amount", "REAL DEFAULT 0"),
+        ("vehicles", "battery_invoice_no", "TEXT"),
+        ("vehicles", "battery_sale_amount", "REAL DEFAULT 0"),
+        ("vehicles", "battery_sale_tax", "REAL DEFAULT 0"),
+        ("vehicles", "battery_settle_code", "TEXT"),
+        ("vehicles", "battery_settle_name", "TEXT"),
+        ("vehicles", "battery_fund_source", "TEXT"),
+        ("vehicles", "price_file_no", "TEXT"),
+        ("vehicles", "fixed_rebate", "REAL DEFAULT 0"),
+        ("vehicles", "fixed_rebate_tax", "REAL DEFAULT 0"),
+        ("vehicles", "base_rebate", "REAL DEFAULT 0"),
+        ("vehicles", "base_rebate_tax", "REAL DEFAULT 0"),
+        ("vehicles", "base_rebate_standard", "REAL DEFAULT 0"),
+        ("vehicles", "quantity", "INTEGER DEFAULT 0"),
+        ("vehicles", "front_axle", "TEXT"),
+        ("vehicles", "others", "TEXT"),
+        ("vehicles", "fuel_category", "TEXT"),
+        ("vehicles", "fuel_form", "TEXT"),
+        ("vehicles", "vehicle_physical_status", "TEXT"),
+        ("vehicles", "vehicle_type", "TEXT"),
+        ("vehicles", "cab_type", "TEXT"),
+        ("vehicles", "engine_factory_power", "TEXT"),
+        ("vehicles", "gearbox_factory_model", "TEXT"),
+        ("vehicles", "rear_axle_type", "TEXT"),
+        ("vehicles", "market_segment", "TEXT"),
+        ("vehicles", "wheelbase_spec", "TEXT"),
+        ("vehicles", "saddle_spec", "TEXT"),
+        ("vehicles", "engine_manufacturer", "TEXT"),
+        ("vehicles", "emission_standard", "TEXT"),
+        ("vehicles", "engine_model", "TEXT"),
+        ("vehicles", "transmission_manufacturer", "TEXT"),
+        ("vehicles", "transmission_model", "TEXT"),
+        ("vehicles", "drive_motor_model", "TEXT"),
+        ("vehicles", "battery_model", "TEXT"),
+        ("vehicles", "battery_layout", "TEXT"),
+        ("vehicles", "frame_main", "TEXT"),
+        ("vehicles", "fuel_tank", "TEXT"),
+        ("vehicles", "suspension_model", "TEXT"),
+        ("vehicles", "electrical_interface", "TEXT"),
+        # === 软删除标记（老板端删除车辆后数据保留，前端不再展现）===
+        ("vehicles", "is_deleted", "INTEGER DEFAULT 0"),
         # === 退车验车：新增随车工具/棚杆/洗车费/车体广告清洗/其他 ===
         ("return_inspections", "tool_kit", "INTEGER DEFAULT 0"),       # 随车工具
         ("return_inspections", "tent_pole", "INTEGER DEFAULT 0"),       # 棚杆
@@ -1178,7 +1241,15 @@ def seed_data():
     }
     hidden_fields = {
         '销售': {
-            'vehicles': ['purchase_price', 'tax_rate', 'estimated_residual_value', 'guidance_price'],
+            'vehicles': [
+                'purchase_price', 'tax_rate', 'estimated_residual_value', 'guidance_price',
+                # AA-AR 列（仅财务/老板可见）
+                'fund_source', 'dealer_price', 'invoice_price', 'sale_total', 'sale_tax',
+                'body_amount', 'battery_invoice_no', 'battery_sale_amount', 'battery_sale_tax',
+                'battery_settle_code', 'battery_settle_name', 'battery_fund_source',
+                'price_file_no', 'fixed_rebate', 'fixed_rebate_tax', 'base_rebate',
+                'base_rebate_tax', 'base_rebate_standard',
+            ],
             'contracts': [
                 'loan_amount', 'monthly_payment', 'factory_guarantee_deposit', 'paid_principal',
                 'loan_balance', 'collected_deposit', 'collected_rent', 'expected_profit_floor',
@@ -1191,7 +1262,15 @@ def seed_data():
             'customer_blacklist': ['*'],
         },
         '运营': {
-            'vehicles': ['purchase_price', 'tax_rate', 'guidance_price'],
+            'vehicles': [
+                'purchase_price', 'tax_rate', 'guidance_price',
+                # AA-AR 列（仅财务/老板可见）
+                'fund_source', 'dealer_price', 'invoice_price', 'sale_total', 'sale_tax',
+                'body_amount', 'battery_invoice_no', 'battery_sale_amount', 'battery_sale_tax',
+                'battery_settle_code', 'battery_settle_name', 'battery_fund_source',
+                'price_file_no', 'fixed_rebate', 'fixed_rebate_tax', 'base_rebate',
+                'base_rebate_tax', 'base_rebate_standard',
+            ],
             'contracts': ['snapshot_guidance_price', 'snapshot_invoice_price'],
             'factory_repayments': ['amount'],
             'vehicle_rebates': ['*'],
@@ -1202,6 +1281,12 @@ def seed_data():
             'vehicles': [
                 'purchase_price', 'tax_rate', 'estimated_residual_value', 'paid_principal',
                 'loan_balance', 'collected_deposit', 'collected_rent',
+                # AA-AR 列（仅财务/老板可见）
+                'fund_source', 'dealer_price', 'invoice_price', 'sale_total', 'sale_tax',
+                'body_amount', 'battery_invoice_no', 'battery_sale_amount', 'battery_sale_tax',
+                'battery_settle_code', 'battery_settle_name', 'battery_fund_source',
+                'price_file_no', 'fixed_rebate', 'fixed_rebate_tax', 'base_rebate',
+                'base_rebate_tax', 'base_rebate_standard',
             ],
             'contracts': [
                 'loan_amount', 'monthly_payment', 'factory_guarantee_deposit', 'paid_principal',
