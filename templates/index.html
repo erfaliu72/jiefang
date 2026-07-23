@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>陕西金聚源车辆管理系统</title>
     <meta name="description" content="陕西金聚源解放轻卡西安区 - 车辆全生命周期资产管控系统">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
-    <script src="https://unpkg.com/element-plus"></script>
-    <script src="https://unpkg.com/@element-plus/icons-vue"></script>
+    <script src="https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/element-plus@2.9.7/dist/index.css" />
+    <script src="https://unpkg.com/element-plus@2.9.7"></script>
+    <script src="https://unpkg.com/@element-plus/icons-vue@2.3.1"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <link rel="stylesheet" href="/static/style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -464,6 +464,15 @@
                                         <span v-else style="color:#9ca3af">-</span>
                                     </template>
                                 </el-table-column>
+                                <el-table-column label="字典校验" width="100" v-if="colVisible('validation_status')">
+                                    <template #default="s">
+                                        <el-tag v-if="s.row.validation_status==='valid'" type="success" size="small" effect="plain">通过</el-tag>
+                                        <el-tag v-else-if="s.row.validation_status==='invalid'" type="danger" size="small" effect="dark"
+                                                :title="s.row.validation_message">未通过</el-tag>
+                                        <el-tag v-else-if="s.row.validation_status==='warning'" type="warning" size="small">待确认</el-tag>
+                                        <span v-else style="color:#9ca3af">-</span>
+                                    </template>
+                                </el-table-column>
                                 <el-table-column label="交付状态" width="120" v-if="colVisible('delivery_status')">
                                     <template #default="s">
                                         <span v-if="s.row.delivery_status" class="status-badge" :class="deliveryStatusClass(s.row.delivery_status)">{{ s.row.delivery_status }}</span>
@@ -707,9 +716,10 @@
                                 <el-table-column prop="electrical_interface" label="电气预留接口" width="130" show-overflow-tooltip v-if="colVisible('electrical_interface')">
                                     <template #default="s">{{ s.row.electrical_interface || '-' }}</template>
                                 </el-table-column>
-                <el-table-column label="操作" width="400" fixed="right">
+                <el-table-column label="操作" width="460" fixed="right">
                     <template #default="s">
                         <el-button type="info" size="small" plain round @click="openVehicleDetail(s.row)">详情</el-button>
+                        <el-button v-if="!s.row.is_deleted && s.row.validation_status==='invalid'" type="danger" size="small" plain round @click="openVehicleValidationFix(s.row)">修正</el-button>
                         <el-button v-if="!s.row.is_deleted && canInitiateVehicleOrder(s.row)" type="warning" size="small" plain round @click="openSalesOrderFromVehicle(s.row)">发起报单</el-button>
                         <el-button v-if="!s.row.is_deleted && currentUser.role==='运营' && s.row.contract_type==='以租代售'" type="success" size="small" plain round @click="openTransferDialog(s.row)">过户</el-button>
                         <el-button v-if="!s.row.is_deleted && canInitiateVehicleReturn(s.row)" type="success" size="small" round @click="openReturnForm(s.row)">发起退车</el-button>
@@ -1712,6 +1722,7 @@
                                     <el-upload action="/api/model-guidance-prices/import" :show-file-list="false" :with-credentials="true" :on-success="onGuidanceImportSuccess" :on-error="onGuidanceImportError" accept=".xlsx,.xls">
                                         <el-button type="success"><el-icon><Upload/></el-icon> 批量导入 Excel</el-button>
                                     </el-upload>
+                                    <el-button type="warning" plain @click="revalidateAllVehicles" :loading="revalidating"><el-icon><Refresh/></el-icon> 重新校验所有车辆</el-button>
                                 </div>
                             </div>
                             <el-input v-model="modelGuidanceSearch" placeholder="搜索车型..." clearable style="width:320px;margin:12px 0 8px" :prefix-icon="Search"></el-input>
@@ -2084,6 +2095,7 @@
                     <el-tag type="warning" size="large">重复跳过 {{ vehicleImportResult.skipped }} 台</el-tag>
                     <el-tag type="danger" size="large">失败 {{ vehicleImportResult.failed }} 台</el-tag>
                     <el-tag v-if="vehicleImportResult.missing_guidance" type="info" size="large">{{ vehicleImportResult.missing_guidance }} 台缺指导价</el-tag>
+                    <el-tag v-if="vehicleImportResult.dictionary_invalid" type="danger" size="large">{{ vehicleImportResult.dictionary_invalid }} 台未通过字典校验</el-tag>
                 </div>
                 <el-table :data="vehicleImportResult.details" size="small" max-height="320" border>
                     <el-table-column prop="row" label="行号" width="70"></el-table-column>
@@ -2098,7 +2110,13 @@
                         </template>
                     </el-table-column>
                     <el-table-column label="说明">
-                        <template #default="s">{{ s.row.car_type || s.row.reason || '-' }}</template>
+                        <template #default="s">
+                            <span v-if="s.row.status==='imported'">
+                                {{ s.row.car_type || '-' }}
+                                <el-tag v-if="s.row.validation_status==='invalid'" type="danger" size="small" style="margin-left:4px" :title="s.row.validation_message">字典校验未通过</el-tag>
+                            </span>
+                            <span v-else>{{ s.row.reason || '-' }}</span>
+                        </template>
                     </el-table-column>
                 </el-table>
             </div>
@@ -2110,6 +2128,12 @@
         <!-- ========== VEHICLE DETAIL DIALOG（上传入库全维度） ========== -->
         <el-dialog v-model="showVehicleDetail" title="车辆详情 · 入库全维度" width="900" :close-on-click-modal="false">
             <template v-if="vehicleDetail">
+                <el-alert v-if="vehicleDetail.validation_status==='invalid'" type="error" show-icon :closable="false" style="margin-bottom:12px"
+                    :title="'字典校验失败：' + (vehicleDetail.validation_message || '车型未通过校验')">
+                </el-alert>
+                <el-alert v-else-if="vehicleDetail.validation_status==='warning'" type="warning" show-icon :closable="false" style="margin-bottom:12px"
+                    :title="'字典校验警告：' + (vehicleDetail.validation_message || '信息待确认')">
+                </el-alert>
                 <div style="margin-bottom:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
                     <span class="mono-text" style="font-size:16px;font-weight:700">{{ vehicleDetail.vin }}</span>
                     <el-tag :type="vehicleDetail.is_new==='新车'?'primary':'info'" size="small" round>{{ vehicleDetail.is_new || '-' }}</el-tag>
@@ -2134,6 +2158,35 @@
                 <el-button @click="showVehicleDetail = false">关闭</el-button>
             </template>
         </el-dialog>
+
+        <!-- ========== VEHICLE VALIDATION FIX DIALOG ========== -->
+        <el-dialog v-model="showVehicleValidationFix" title="修正车辆字典校验" width="520" :close-on-click-modal="false">
+            <template v-if="vehicleValidationFixTarget">
+                <el-alert type="error" show-icon :closable="false" style="margin-bottom:16px">
+                    <template #title>
+                        <span style="font-weight:500">{{ vehicleValidationFixTarget.validation_message || '车型未通过字典校验' }}</span>
+                    </template>
+                </el-alert>
+                <el-form label-position="top">
+                    <el-form-item label="VIN">
+                        <el-input :model-value="vehicleValidationFixTarget.vin" disabled></el-input>
+                    </el-form-item>
+                    <el-form-item label="当前车型">
+                        <el-input :model-value="vehicleValidationFixTarget.car_type" disabled></el-input>
+                    </el-form-item>
+                    <el-form-item label="修正为（从已维护指导价的车型中选择）">
+                        <el-select v-model="vehicleValidationFixNewCarType" filterable placeholder="请选择车型" style="width:100%">
+                            <el-option v-for="ct in modelGuidanceCarTypes" :key="ct" :label="ct" :value="ct"></el-option>
+                        </el-select>
+                    </el-form-item>
+                </el-form>
+            </template>
+            <template #footer>
+                <el-button @click="showVehicleValidationFix = false">取消</el-button>
+                <el-button type="primary" @click="submitVehicleValidationFix" :loading="vehicleValidationFixLoading">确认修正</el-button>
+            </template>
+        </el-dialog>
+
         <!-- ========== ADD CONTRACT DIALOG ========== -->
         <el-dialog v-model="showAddContract" :title="contractDialogTitle()" width="720" :close-on-click-modal="false">
             <el-form :model="newContract" label-position="top">
@@ -2966,7 +3019,7 @@
                 return currentUser.value && ['销售', '老板'].includes(currentUser.value.role);
             }
             function canInitiateVehicleOrder(row) {
-                return isSalesOrAdmin() && row && row.asset_status === '在库';
+                return isSalesOrAdmin() && row && row.asset_status === '在库' && row.validation_status !== 'invalid';
             }
             function canInitiateVehicleReturn(row) {
                 return isSalesOrAdmin() && row && row.asset_status === '已经出库（租赁）';
@@ -3010,7 +3063,12 @@
             }
             function openSalesOrderFromVehicle(row) {
                 if (!row || !row.vin) return ElementPlus.ElMessage.warning('该车辆缺少 VIN，无法发起报单');
-                if (!canInitiateVehicleOrder(row)) return ElementPlus.ElMessage.warning('仅在库车辆可以发起报单');
+                if (!canInitiateVehicleOrder(row)) {
+                    if (row.validation_status === 'invalid') {
+                        return ElementPlus.ElMessage.warning(row.validation_message || '该车辆车型未通过字典校验，请在车辆管理中使用"修正"功能');
+                    }
+                    return ElementPlus.ElMessage.warning('仅在库车辆可以发起报单');
+                }
                 currentPage.value = 'orders';
                 currentOrderDraftId.value = null;
                 orderPrefillLock.value = true;
@@ -3106,6 +3164,7 @@
                 {key:'transmission_model',label:'变速器型号'},{key:'drive_motor_model',label:'驱动电机型号'},{key:'battery_model',label:'新能源电池型号'},
                 {key:'battery_layout',label:'电池布置'},{key:'frame_main',label:'车架主体'},{key:'fuel_tank',label:'油箱/气瓶'},
                 {key:'suspension_model',label:'悬架型号'},{key:'electrical_interface',label:'电气预留接口'},
+                {key:'validation_status',label:'字典校验'},
             ];
             const showColSettings = ref(false);
             const hiddenColumns = ref(new Set());
@@ -3232,6 +3291,12 @@
             const vehicleImportResult = ref(null);
             const showVehicleDetail = ref(false);
             const vehicleDetail = ref(null);
+            const showVehicleValidationFix = ref(false);
+            const vehicleValidationFixTarget = ref(null);
+            const vehicleValidationFixNewCarType = ref('');
+            const vehicleValidationFixLoading = ref(false);
+            const modelGuidanceCarTypes = ref([]);
+            const revalidating = ref(false);
             const showAddContract = ref(false);
             const showPlanningDialog = ref(false);
             const showOrderDialog = ref(false);
@@ -5462,6 +5527,56 @@
                 vehicleDetail.value = full;
                 showVehicleDetail.value = true;
             }
+            function openVehicleValidationFix(row) {
+                vehicleValidationFixTarget.value = { ...row };
+                vehicleValidationFixNewCarType.value = '';
+                vehicleValidationFixLoading.value = false;
+                // 加载指导价字典中的车型作为选项
+                fetch('/api/model-guidance-prices?dict_only=1')
+                    .then(r => r.json())
+                    .then(data => {
+                        modelGuidanceCarTypes.value = (data || []).map(i => i.car_type).filter(Boolean);
+                    })
+                    .catch(() => modelGuidanceCarTypes.value = []);
+                showVehicleValidationFix.value = true;
+            }
+            async function submitVehicleValidationFix() {
+                if (!vehicleValidationFixNewCarType.value) {
+                    return ElementPlus.ElMessage.warning('请选择新车型');
+                }
+                vehicleValidationFixLoading.value = true;
+                const target = vehicleValidationFixTarget.value;
+                const res = await fetch(`/api/vehicles/${target.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ car_type: vehicleValidationFixNewCarType.value })
+                });
+                const data = await res.json();
+                vehicleValidationFixLoading.value = false;
+                if (data.success) {
+                    ElementPlus.ElMessage.success('车型已修正，字典校验已更新');
+                    showVehicleValidationFix.value = false;
+                    fetchAll();
+                } else {
+                    ElementPlus.ElMessage.error(data.message || '修正失败');
+                }
+            }
+            async function revalidateAllVehicles() {
+                revalidating.value = true;
+                try {
+                    const res = await fetch('/api/vehicles/revalidate-all', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.success) {
+                        ElementPlus.ElMessage.success(data.message);
+                        fetchAll();
+                    } else {
+                        ElementPlus.ElMessage.error(data.message || '重新校验失败');
+                    }
+                } catch (e) {
+                    ElementPlus.ElMessage.error('网络错误');
+                }
+                revalidating.value = false;
+            }
             function openVehicleImport() {
                 vehicleImportResult.value = null;
                 vehicleImportLoading.value = false;
@@ -6118,6 +6233,7 @@
                 showReconDetailDialog, reconDetail, reconDetailAllocations, openReconDetail, isReconCompleted, allocTypeLabel,
                 currentRepayments, currentFactoryRepayments, repaymentTab, currentOrderDraftId,
                 repaymentLoading, showAddVehicle, vehicleImportLoading, vehicleImportResult, showVehicleDetail, vehicleDetail, vehicleDetailRows, showAddContract, showPlanningDialog, showOrderDialog, showFeeDialog, showReturnDialog,
+                showVehicleValidationFix, vehicleValidationFixTarget, vehicleValidationFixNewCarType, vehicleValidationFixLoading, modelGuidanceCarTypes,
                 showInitialPaymentDialog, showInitialPaymentPicker, showDeliveryDialog, showInvoiceDialog, showTransferDialog, showRebateDialog, initialPaymentTarget, deliveryTarget,
                 newVehicle, newContract, newOrder, initialPaymentForm, deliveryForm, returnForm, feeForm, factoryImportForm,
                 receivingCompanyForm, blacklistForm, invoiceForm, transferForm, rebateForm,
@@ -6137,7 +6253,7 @@
                 initialPaymentAmount, initialPaymentType, canInitiateInitialPayment, canInitiateVehicleOrder, canInitiateVehicleReturn, canReturnFromOrder, initiateReturnFromOrder, returnNextStep, currentApprovalStepLabel, isPendingApproval, approvalCardId,
                 handleMenuSelect, handlePageAction, handleContractExpand, editPrice, deleteVehicle, restoreVehicle,
                 fetchModelGuidancePrices, fetchMissingGuidanceAlerts, onModelGuidanceCarTypeChange, editModelGuidancePrice, focusGuidanceAlert, submitModelGuidancePrice, onGuidanceImportSuccess, onGuidanceImportError, showGuidanceEditDialog,
-                submitVehicle, openVehicleImport, beforeVehicleImport, onVehicleImportSuccess, onVehicleImportError, openVehicleDetail, submitContract, submitSalesOrder, editSalesOrderDraft, deleteSalesOrderDraft, copySalesOrderDraft, activateOrder, createContractFromOrder, confirmRepayment, confirmFactoryRepayment, requestLock, openApprovalReminderCenter, focusApprovalItem,
+                submitVehicle, openVehicleImport, beforeVehicleImport, onVehicleImportSuccess, onVehicleImportError, openVehicleDetail, openVehicleValidationFix, submitVehicleValidationFix, submitContract, submitSalesOrder, editSalesOrderDraft, deleteSalesOrderDraft, copySalesOrderDraft, activateOrder, createContractFromOrder, confirmRepayment, confirmFactoryRepayment, requestLock, openApprovalReminderCenter, focusApprovalItem,
                 deliverVehicle, matchContractVehicle, openSalesOrderFromVehicle,
                 openPlanningDialog, onPlanningFactoryUpload, savePlanningContract, importPlanningFactory, confirmPlanningDifference,
                 onFactoryPlanUpload, submitFactoryImport, submitFeeItem,
@@ -6154,6 +6270,7 @@
                 showIssueInvoiceDialog, issueInvoiceForm, submitIssueInvoice, onInvoiceFileUpload,
                 openTransferDialog, submitOwnershipTransfer,
                 openRebateDialog, submitVehicleRebate, startRepair, completeRepair,
+                revalidating, revalidateAllVehicles,
             };
         }
     });

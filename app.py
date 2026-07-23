@@ -359,6 +359,23 @@ def format_ratio(value):
     return f"{round(normalize_ratio(value) * 100, 2)}%"
 
 
+def validate_vehicle_dict(conn, car_type):
+    """校验车辆数据字典字段，返回 (validation_status, validation_message)。
+    可扩展：后续追加 product_code、announce_model 等字典检查。
+    """
+    checks = []
+    if car_type:
+        row = conn.execute(
+            "SELECT 1 FROM model_guidance_prices WHERE car_type=?",
+            (car_type,)
+        ).fetchone()
+        if not row:
+            checks.append(f"车型「{car_type}」不在已维护的指导价字典中，请先维护车型指导价")
+    if checks:
+        return ('invalid', '；'.join(checks))
+    return ('valid', '')
+
+
 def guidance_exception_reason(result):
     parts = []
     if result['below']:
@@ -2478,6 +2495,10 @@ def get_model_guidance_prices():
     """)
     configured = {row['car_type']: dict(row) for row in c.fetchall()}
 
+    if request.args.get('dict_only'):
+        conn.close()
+        return jsonify(list(configured.values()))
+
     c.execute("""
         SELECT car_type,
                COUNT(*) as vehicle_count,
@@ -2926,6 +2947,11 @@ def add_vehicle():
         ]
         for f in NEW_FIELDS:
             base_vals.append(data.get(f, ''))
+        # 字典校验
+        val_status, val_msg = validate_vehicle_dict(conn, car_type)
+        all_cols = all_cols + ['validation_status', 'validation_message']
+        base_vals = base_vals + [val_status, val_msg]
+        placeholders = ', '.join('?' for _ in all_cols)
         c.execute(f'''
         INSERT INTO vehicles ({', '.join(all_cols)})
         VALUES ({placeholders})
@@ -2938,6 +2964,8 @@ def add_vehicle():
         message = '车辆入库成功'
         if guidance_price <= 0:
             message = '车辆入库成功，该车未设置指导价，已提醒老板维护'
+        if val_status == 'invalid':
+            message += f'；{val_msg}'
         return jsonify({'success': True, 'id': vehicle_id, 'message': message, 'missing_guidance_price': guidance_price <= 0})
     except Exception as e:
         conn.rollback()
@@ -3086,6 +3114,7 @@ def import_vehicles():
     imported, skipped, failed = 0, 0, 0
     details = []
     missing_guidance_count = 0
+    dictionary_invalid_count = 0
 
     try:
         for r in range(header_row + 1, ws.max_row + 1):
@@ -3133,6 +3162,11 @@ def import_vehicles():
                 ).fetchone()
                 if mp and parse_money(mp['guidance_price']) > 0:
                     guidance_price = parse_money(mp['guidance_price'])
+
+            # === 字典校验 ===
+            imp_val_status, imp_val_msg = validate_vehicle_dict(conn, car_type)
+            if imp_val_status == 'invalid':
+                dictionary_invalid_count += 1
 
             # 所有入库字段（新模板79列）
             VINSERT = [
@@ -3226,6 +3260,8 @@ def import_vehicles():
                 ('fuel_tank', row_vals.get('fuel_tank') or ''),
                 ('suspension_model', row_vals.get('suspension_model') or ''),
                 ('electrical_interface', row_vals.get('electrical_interface') or ''),
+                ('validation_status', imp_val_status),
+                ('validation_message', imp_val_msg),
             ]
             cols = ', '.join(v[0] for v in VINSERT)
             placeholders = ', '.join('?' for _ in VINSERT)
@@ -3242,7 +3278,8 @@ def import_vehicles():
                     log_audit(conn, '缺少指导价提醒', 'vehicle', vehicle_id,
                               '上传入库车辆 VIN:' + vin + ' 车型:' + (car_type or '-') + ' 未设置指导价，请老板维护指导价')
                 imported += 1
-                details.append({'row': r, 'vin': vin, 'status': 'imported', 'car_type': car_type})
+                details.append({'row': r, 'vin': vin, 'status': 'imported', 'car_type': car_type,
+                                'validation_status': imp_val_status, 'validation_message': imp_val_msg})
             except Exception as e:
                 failed += 1
                 msg = '车辆已在库' if 'UNIQUE constraint failed' in str(e) else str(e)
@@ -3265,6 +3302,8 @@ def import_vehicles():
     message = '上传入库完成：成功 ' + str(imported) + ' 台，重复跳过 ' + str(skipped) + ' 台，失败 ' + str(failed) + ' 台'
     if missing_guidance_count:
         message += '；其中 ' + str(missing_guidance_count) + ' 台未匹配指导价，已提醒老板维护'
+    if dictionary_invalid_count:
+        message += '；其中 ' + str(dictionary_invalid_count) + ' 台车型不在指导价字典中，请及时维护'
     return jsonify({
         'success': True,
         'message': message,
@@ -3272,6 +3311,7 @@ def import_vehicles():
         'skipped': skipped,
         'failed': failed,
         'missing_guidance': missing_guidance_count,
+        'dictionary_invalid': dictionary_invalid_count,
         'details': details,
     })
 
@@ -3312,9 +3352,33 @@ def update_vehicle(vid):
     if fields:
         values.append(vid)
         c.execute(f"UPDATE vehicles SET {', '.join(fields)} WHERE id = ?", values)
-        conn.commit()
+    # 字典校验：若修改了 car_type 则重新校验并更新状态
+    if 'car_type' in data:
+        val_status, val_msg = validate_vehicle_dict(conn, data['car_type'])
+        c.execute("UPDATE vehicles SET validation_status=?, validation_message=? WHERE id=?", (val_status, val_msg, vid))
+    conn.commit()
     conn.close()
     return jsonify({'success': True})
+
+
+@app.route('/api/vehicles/revalidate-all', methods=['POST'])
+@require_role('车管', '老板')
+def revalidate_all_vehicles():
+    """对所有库存车辆重新执行字典校验（新增字段时用于回填）"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, car_type FROM vehicles WHERE COALESCE(is_deleted,0)=0")
+    rows = c.fetchall()
+    updated = 0
+    for row in rows:
+        status, msg = validate_vehicle_dict(conn, row['car_type'])
+        c.execute("UPDATE vehicles SET validation_status=?, validation_message=? WHERE id=?",
+                  (status, msg, row['id']))
+        updated += 1
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': f'已完成 {updated} 台车辆的字典校验'})
+
 
 @app.route('/api/vehicles/<int:vid>', methods=['DELETE'])
 @require_role('老板')
@@ -3800,7 +3864,7 @@ def create_sales_order():
         if len(vin) != 17:
             conn.close()
             return jsonify({'success': False, 'message': '如填写车架号，请填写17位(VIN)'}), 400
-        c.execute("SELECT id, plate_number, car_type, status, guidance_price FROM vehicles WHERE vin=?", (vin,))
+        c.execute("SELECT id, plate_number, car_type, status, guidance_price, validation_status, validation_message FROM vehicles WHERE vin=?", (vin,))
         vehicle = c.fetchone()
         if not vehicle:
             conn.close()
@@ -3808,6 +3872,11 @@ def create_sales_order():
         if not is_draft and vehicle['status'] not in ('在库', '报单锁定中'):
             conn.close()
             return jsonify({'success': False, 'message': '仅在库或报单锁定中车辆可以发起报单'}), 400
+        # 字典校验拦截：无效车辆不能发起报单
+        if not is_draft and vehicle and vehicle['validation_status'] == 'invalid':
+            v_msg = vehicle['validation_message'] or '车型未在指导价字典中维护'
+            conn.close()
+            return jsonify({'success': False, 'message': f'车辆字典校验不通过：{v_msg}，请先修正车辆信息'}), 400
 
     if not is_draft and vehicle:
         c.execute("""
@@ -3984,11 +4053,15 @@ def update_sales_order_draft(order_id):
         if len(vin) != 17:
             conn.close()
             return jsonify({'success': False, 'message': '如填写车架号，请填写17位(VIN)'}), 400
-        c.execute("SELECT id, plate_number, car_type, status, guidance_price FROM vehicles WHERE vin=?", (vin,))
+        c.execute("SELECT id, plate_number, car_type, status, guidance_price, validation_status, validation_message FROM vehicles WHERE vin=?", (vin,))
         vehicle = c.fetchone()
         if not vehicle:
             conn.close()
             return jsonify({'success': False, 'message': '未找到对应库存车辆'}), 404
+        if submit_now and vehicle and vehicle['validation_status'] == 'invalid':
+            v_msg = vehicle['validation_message'] or '车型未在指导价字典中维护'
+            conn.close()
+            return jsonify({'success': False, 'message': f'车辆字典校验不通过：{v_msg}，请先修正车辆信息'}), 400
 
     sales_mode = normalize_sales_mode(data.get('sales_mode', order['sales_mode']))
     sale_total_price = parse_money(data.get('sale_total_price'), order['sale_total_price'])

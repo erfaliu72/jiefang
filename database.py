@@ -1165,6 +1165,9 @@ def init_db():
         ("vehicles", "fuel_tank", "TEXT"),
         ("vehicles", "suspension_model", "TEXT"),
         ("vehicles", "electrical_interface", "TEXT"),
+        # === 车辆字典校验状态（车型等字段 vs 数据字典）===
+        ("vehicles", "validation_status", "TEXT DEFAULT 'valid'"),   # valid / invalid / warning
+        ("vehicles", "validation_message", "TEXT DEFAULT ''"),
         # === 软删除标记（老板端删除车辆后数据保留，前端不再展现）===
         ("vehicles", "is_deleted", "INTEGER DEFAULT 0"),
         # === 退车验车：新增随车工具/棚杆/洗车费/车体广告清洗/其他 ===
