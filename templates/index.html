@@ -3232,25 +3232,52 @@
             const uploadedFiles = ref([]);
             const vehicles = ref([]);
             const contracts = ref([]);
-            // 操作列宽度（按角色可见按钮数估算，含间隙）
-            // 销售报单：销售见3(编辑+删除+退车/复制),财务见2(生成计划+确认),运营见1(上传合同)
-            const opWidthSales = computed(() => {
-                const role = currentUser.value?.role;
-                if (role === '销售') return 260;
-                if (role === '财务' || role === '老板') return 180;
-                if (role === '运营') return 120;
-                return 80;
-            });
-            // 车辆全景：老板/运营最多5按钮,销售/车管3按钮
-            const opWidthVehicles = computed(() => {
-                const role = currentUser.value?.role;
-                if (role === '老板' || role === '运营') return 420;
-                return 260;
-            });
-            // 发票管理：财务见3按钮(开票+作废+红冲)
-            const opWidthInvoices = computed(() => {
-                return currentUser.value?.role === '财务' ? 260 : 80;
-            });
+            // 操作列宽度：扫描当前页数据行，取最大按钮数计算（上限 520px）
+            const BTN_W = 100; // 每个按钮约100px（按钮宽+padding+间距）
+            const calcOpWidth = (rows, role, counter) => {
+                const arr = rows.value || rows;
+                if (!arr || !arr.length) return 80;
+                let max = 0;
+                for (const row of arr) {
+                    const n = counter(row, role);
+                    if (n > max) max = n;
+                }
+                return Math.min(Math.max(max, 1) * BTN_W + 20, 520);
+            };
+            // 销售报单按钮计数
+            const _salesBtnCount = (row, role) => {
+                let n = 0;
+                if (role === '销售' && row.order_status === '草稿') n += 2;
+                if (role === '销售' && row.order_status === '已作废') n += 1;
+                if (canReturnFromOrder(row)) n += 1;
+                if (role === '财务' && row.order_status === '待财务确认' && isInstallmentSalesOrder(row)) n += 1;
+                if (role === '财务' && row.order_status === '待财务确认' && canActivateSalesOrder(row)) n += 1;
+                if (role === '运营' && row.order_status === '已激活') n += 1;
+                return n;
+            };
+            const opWidthSales = computed(() => calcOpWidth(salesOrders, currentUser.value?.role, _salesBtnCount));
+            // 车辆全景按钮计数
+            const _vehicleBtnCount = (row, role) => {
+                let n = 1; // 详情始终可见
+                if (!row.is_deleted && row.validation_status === 'invalid') n += 1;
+                if (!row.is_deleted && canInitiateVehicleOrder(row)) n += 1;
+                if (!row.is_deleted && role === '运营' && row.contract_type === '以租代售') n += 1;
+                if (!row.is_deleted && canInitiateVehicleReturn(row)) n += 1;
+                if (row.is_deleted && role === '老板') n += 1;
+                if (!row.is_deleted && role === '老板') n += 1; // 删除按钮
+                return n;
+            };
+            const opWidthVehicles = computed(() => calcOpWidth(filteredAssetRows, currentUser.value?.role, _vehicleBtnCount));
+            // 发票管理按钮计数
+            const _invoiceBtnCount = (row, role) => {
+                if (role !== '财务') return 0;
+                let n = 0;
+                if (row.status === '待开票') n += 1;
+                if (['待开票','已开票'].includes(row.status)) n += 1;
+                if (row.status === '已开票') n += 1;
+                return n;
+            };
+            const opWidthInvoices = computed(() => calcOpWidth(invoiceRequests, currentUser.value?.role, _invoiceBtnCount));
             const stats = ref({});
             const salesOrders = ref([]);
             const overdueList = ref([]);
