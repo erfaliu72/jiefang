@@ -895,7 +895,7 @@
                                 <el-table-column prop="status" label="状态" width="100">
                                     <template #default="s"><span class="status-badge" :class="deliveryStatusClass(s.row.status)">{{ s.row.status }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="操作" width="260" fixed="right">
+                                <el-table-column label="操作" :width="opWidthInvoices" fixed="right">
                                     <template #default="s">
                                         <el-button v-if="currentUser.role==='财务' && s.row.status==='待开票'" size="small" type="success" @click="issueInvoice(s.row)">开票</el-button>
                                         <el-button v-if="currentUser.role==='财务' && ['待开票','已开票'].includes(s.row.status)" size="small" type="danger" plain @click="voidInvoice(s.row)">作废</el-button>
