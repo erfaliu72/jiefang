@@ -2345,15 +2345,21 @@ def get_vehicles():
     page = request.args.get('page', 1, type=int)
     page_size = request.args.get('page_size', 20, type=int)
     page_size = max(1, min(page_size, 100))
+    show_deleted = request.args.get('show_deleted', 0, type=int)
+
+    # 仅老板可以查看已删除车辆
+    if show_deleted and user['role'] != '老板':
+        show_deleted = 0
 
     conn = get_db()
     c = conn.cursor()
 
-    c.execute("SELECT COUNT(*) AS cnt FROM vehicles WHERE COALESCE(is_deleted,0)=0")
+    where_clause = "" if show_deleted else "WHERE COALESCE(is_deleted,0)=0"
+    c.execute(f"SELECT COUNT(*) AS cnt FROM vehicles {where_clause}")
     total = c.fetchone()['cnt']
 
     offset = (page - 1) * page_size
-    c.execute("""
+    c.execute(f"""
         SELECT v.*, c.rental_method, c.business_mode, c.loan_amount, c.monthly_payment, c.rent,
                c.loan_periods, c.deposit, c.paid_principal, c.loan_balance,
                c.collected_deposit, c.collected_rent, c.contract_status,
@@ -2361,7 +2367,7 @@ def get_vehicles():
         FROM vehicles v
         LEFT JOIN contracts c ON c.vehicle_id = v.id
         LEFT JOIN customers cu ON cu.id = c.customer_id
-        WHERE COALESCE(v.is_deleted, 0) = 0
+        {where_clause.replace('COALESCE(is_deleted,0)=0', 'COALESCE(v.is_deleted, 0) = 0') if not show_deleted else ''}
         ORDER BY v.id ASC
         LIMIT ? OFFSET ?
     """, (page_size, offset))

@@ -3550,7 +3550,7 @@
 	            const fetchAll = async () => {
 	                const [sRes, vRes, lRes] = await Promise.all([
 	                    fetch('/api/dashboard/stats'),
-	                    fetch('/api/vehicles?page=1&page_size=20'),
+	                    fetch('/api/vehicles?page=1&page_size=20' + (showDeleted.value ? '&show_deleted=1' : '')),
 	                    fetch('/api/vehicles/list'),
 	                ]);
 	                stats.value = await sRes.json();
@@ -3562,7 +3562,7 @@
 	                if (currentPage.value === 'dashboard') setTimeout(initCharts, 100);
 	            };
 	            const fetchVehiclePage = async (page) => {
-	                const r = await (await fetch('/api/vehicles?page=' + page + '&page_size=20')).json();
+	                const r = await (await fetch('/api/vehicles?page=' + page + '&page_size=20' + (showDeleted.value ? '&show_deleted=1' : ''))).json();
 	                vehiclePageData.value = r.data || [];
 	                vehiclePageTotal.value = r.total || 0;
 	                assetPage.value = page;
@@ -4026,6 +4026,7 @@
                         const filteredAssetRows = computed(() => assetRows.value);
             const assetTotalPages = computed(() => Math.max(1, Math.ceil(vehiclePageTotal.value / assetPageSize)));
             watch(assetPage, (p) => { if (p > 0) fetchVehiclePage(p); });
+            watch(showDeleted, () => { if (currentPage.value === 'assets') fetchAll(); });
             const returnableAssetRows = computed(() =>
                 assetRows.value.filter(row => row.asset_status === '已经出库（租赁）')
             );
