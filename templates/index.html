@@ -243,22 +243,34 @@
                             <div class="card-title">销售报单台账</div>
                             <span class="card-count">按交款、车辆、收款三段留痕，支持后续上传线下合同</span>
                         </div>
-                        <el-table :data="salesOrders" style="width:100%" stripe>
-                                <el-table-column prop="payment_date" label="交款日期" width="110"></el-table-column>
-                                <el-table-column prop="customer_name" label="客户" width="110"></el-table-column>
-                                <el-table-column prop="customer_phone" label="电话" width="120"></el-table-column>
-                                <el-table-column prop="sales_mode" label="销售方式" width="110"></el-table-column>
-                                <el-table-column prop="car_type" label="车型" min-width="180" show-overflow-tooltip></el-table-column>
+                        <el-table :data="salesOrders" style="width:100%" stripe row-key="id">
+                                <el-table-column label="交款日期" width="110">
+                                    <template #default="s"><span>{{ s.row.payment_date || '-' }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="客户" width="110">
+                                    <template #default="s"><span>{{ s.row.customer_name || '-' }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="电话" width="120">
+                                    <template #default="s"><span>{{ s.row.customer_phone || '-' }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="销售方式" width="110">
+                                    <template #default="s"><span>{{ s.row.sales_mode || '-' }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="车型" min-width="180" show-overflow-tooltip>
+                                    <template #default="s"><span>{{ s.row.car_type || '-' }}</span></template>
+                                </el-table-column>
                                 <el-table-column label="租赁指导价" width="120">
                                     <template #default="s"><span class="num text-blue">¥{{ numberFormat(s.row.snapshot_lease_installment_price || guidancePriceForCarType(s.row.car_type).lease || 0) }}</span></template>
                                 </el-table-column>
                                 <el-table-column label="整车指导价" width="120">
                                     <template #default="s"><span class="num text-red">¥{{ numberFormat(s.row.snapshot_sale_total_price || guidancePriceForCarType(s.row.car_type).sale || s.row.snapshot_guidance_price || 0) }}</span></template>
                                 </el-table-column>
-                                <el-table-column prop="vin" label="VIN" min-width="180">
-                                    <template #default="s"><span class="mono-text">{{ s.row.vin }}</span></template>
+                                <el-table-column label="VIN" min-width="180">
+                                    <template #default="s"><span class="mono-text">{{ s.row.vin || '-' }}</span></template>
                                 </el-table-column>
-                                <el-table-column prop="plate_number" label="车牌号" width="100"></el-table-column>
+                                <el-table-column label="车牌号" width="100">
+                                    <template #default="s"><span>{{ s.row.plate_number || '-' }}</span></template>
+                                </el-table-column>
                                 <el-table-column label="款项类别" width="110">
                                     <template #default="s"><span class="status-badge" :class="paymentCategoryClass(s.row.payment_category || defaultPaymentCategory(s.row.sales_mode))">{{ s.row.payment_category || defaultPaymentCategory(s.row.sales_mode) }}</span></template>
                                 </el-table-column>
@@ -276,8 +288,8 @@
                                         </div>
                                     </template>
                                 </el-table-column>
-                                <el-table-column prop="order_status" label="状态" width="110">
-                                    <template #default="s"><span class="status-badge" :class="deliveryStatusClass(s.row.order_status)">{{ s.row.order_status }}</span></template>
+                                <el-table-column label="状态" width="110">
+                                    <template #default="s"><span class="status-badge" :class="deliveryStatusClass(s.row.order_status)">{{ s.row.order_status || '-' }}</span></template>
                                 </el-table-column>
                                 <el-table-column label="合同状态" width="180">
                                     <template #default="s">
