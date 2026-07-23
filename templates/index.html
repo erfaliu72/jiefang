@@ -25,13 +25,6 @@
             color: #606266;
             box-sizing: border-box;
         }
-        .el-table .op-column .cell {
-            white-space: nowrap;
-            max-width: 560px;
-        }
-        .el-table .op-column {
-            min-width: 80px;
-        }
     </style>
 </head>
 <body>
@@ -306,7 +299,7 @@
                                         </div>
                                     </template>
                                 </el-table-column>
-                                <el-table-column label="操作" fixed="right" class-name="op-column">
+                                <el-table-column label="操作" :width="opWidthSales" fixed="right">
                                     <template #default="s">
                                         <el-button v-if="currentUser.role==='销售' && s.row.order_status==='草稿'" type="primary" size="small" plain round @click="editSalesOrderDraft(s.row)">编辑</el-button>
                                         <el-button v-if="currentUser.role==='销售' && s.row.order_status==='草稿'" type="danger" size="small" plain round @click="deleteSalesOrderDraft(s.row)">删除</el-button>
@@ -735,7 +728,7 @@
                                 <el-table-column prop="electrical_interface" label="电气预留接口" width="130" show-overflow-tooltip v-if="colVisible('electrical_interface')">
                                     <template #default="s">{{ s.row.electrical_interface || '-' }}</template>
                                 </el-table-column>
-                <el-table-column label="操作" fixed="right" class-name="op-column">
+                <el-table-column label="操作" :width="opWidthVehicles" fixed="right">
                     <template #default="s">
                         <el-button type="info" size="small" plain round @click="openVehicleDetail(s.row)">详情</el-button>
                         <el-button v-if="!s.row.is_deleted && s.row.validation_status==='invalid'" type="danger" size="small" plain round @click="openVehicleValidationFix(s.row)">修正</el-button>
@@ -902,7 +895,7 @@
                                 <el-table-column prop="status" label="状态" width="100">
                                     <template #default="s"><span class="status-badge" :class="deliveryStatusClass(s.row.status)">{{ s.row.status }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="操作" fixed="right" class-name="op-column">
+                                <el-table-column label="操作" width="260" fixed="right">
                                     <template #default="s">
                                         <el-button v-if="currentUser.role==='财务' && s.row.status==='待开票'" size="small" type="success" @click="issueInvoice(s.row)">开票</el-button>
                                         <el-button v-if="currentUser.role==='财务' && ['待开票','已开票'].includes(s.row.status)" size="small" type="danger" plain @click="voidInvoice(s.row)">作废</el-button>
@@ -1060,7 +1053,7 @@
                                         <span class="status-badge" :class="reconGroupStatusClass(s.row)">{{ reconGroupStatusText(s.row) }}</span>
                                     </template>
                                 </el-table-column>
-                                <el-table-column label="操作" fixed="right" class-name="op-column">
+                                <el-table-column label="操作" width="120" fixed="right">
                                     <template #default="s">
                                         <el-button size="small" type="primary" plain @click="toggleReconGroup(s.row)">
                                             {{ s.row.expanded ? '收起明细' : '查看明细' }}
@@ -1724,7 +1717,7 @@
                                     <template #default="s">¥{{ numberFormat(s.row.invoice_price || 0) }}</template>
                                 </el-table-column>
                                 <el-table-column prop="created_at" label="入库时间" width="170"></el-table-column>
-                                <el-table-column label="操作" fixed="right" class-name="op-column">
+                                <el-table-column label="操作" width="140" fixed="right">
                                     <template #default="s">
                                         <el-button type="warning" size="small" round @click="focusGuidanceAlert(s.row)">维护指导价</el-button>
                                     </template>
@@ -2699,7 +2692,7 @@
                         <span class="num text-blue">¥{{ numberFormat(initialPaymentAmount(s.row)) }}</span>
                     </template>
                 </el-table-column>
-                <el-table-column label="操作" fixed="right" class-name="op-column">
+                <el-table-column label="操作" width="140" fixed="right">
                     <template #default="s">
                         <el-button type="warning" size="small" round @click="selectInitialPaymentContract(s.row)">发起首次支付</el-button>
                     </template>
@@ -3239,6 +3232,25 @@
             const uploadedFiles = ref([]);
             const vehicles = ref([]);
             const contracts = ref([]);
+            // 操作列宽度（按角色可见按钮数估算，含间隙）
+            // 销售报单：销售见3(编辑+删除+退车/复制),财务见2(生成计划+确认),运营见1(上传合同)
+            const opWidthSales = computed(() => {
+                const role = currentUser.value?.role;
+                if (role === '销售') return 260;
+                if (role === '财务' || role === '老板') return 180;
+                if (role === '运营') return 120;
+                return 80;
+            });
+            // 车辆全景：老板/运营最多5按钮,销售/车管3按钮
+            const opWidthVehicles = computed(() => {
+                const role = currentUser.value?.role;
+                if (role === '老板' || role === '运营') return 420;
+                return 260;
+            });
+            // 发票管理：财务见3按钮(开票+作废+红冲)
+            const opWidthInvoices = computed(() => {
+                return currentUser.value?.role === '财务' ? 260 : 80;
+            });
             const stats = ref({});
             const salesOrders = ref([]);
             const overdueList = ref([]);
@@ -6269,6 +6281,7 @@
                 vehiclePageTotal, vehiclePageData, assetTotalPages, assetPageSize, assetPage, fetchVehiclePage,
                 numberFormat, statusClass, repayClass, calcOverdueDays, riskLevel,
                 approvalTypeLabel, approvalTypeClass, approvalVehicleLabel, deliveryStatusClass, paymentCategoryClass, defaultPaymentCategory, assetStatusClass, returnStatusClass,
+                opWidthSales, opWidthVehicles, opWidthInvoices,
                 initialPaymentAmount, initialPaymentType, canInitiateInitialPayment, canInitiateVehicleOrder, canInitiateVehicleReturn, canReturnFromOrder, initiateReturnFromOrder, returnNextStep, currentApprovalStepLabel, isPendingApproval, approvalCardId,
                 handleMenuSelect, handlePageAction, handleContractExpand, editPrice, deleteVehicle, restoreVehicle,
                 fetchModelGuidancePrices, fetchMissingGuidanceAlerts, onModelGuidanceCarTypeChange, editModelGuidancePrice, focusGuidanceAlert, submitModelGuidancePrice, onGuidanceImportSuccess, onGuidanceImportError, showGuidanceEditDialog,
