@@ -126,7 +126,7 @@ def stage_a_intake():
     check("A2 同VIN去重拦截", st2 != 200 or not r2.get("success"), str(r2.get("message", r2))[:40])
 
     # 校验入库后状态=在库
-    st3, vehicles = req(sales, "GET", "/api/vehicles")
+    st3, vehicles = req(sales, "GET", "/api/vehicles/list")
     v = next((x for x in as_list(vehicles) if x.get("vin") == vin), {})
     check("A3 入库后状态=在库", v.get("status") == "在库", f"status={v.get('status')}")
     return vin
@@ -309,7 +309,7 @@ def stage_f_deliver(cid, vehicle_id, sales_mode):
     ok = st == 200 and dv.get("success")
     check(f"F 车管确认出库[{sales_mode}]", ok, str(dv.get("message", dv))[:45])
     if ok:
-        st, vehicles = req(sales, "GET", "/api/vehicles")
+        st, vehicles = req(sales, "GET", "/api/vehicles/list")
         v = next((x for x in as_list(vehicles) if x.get("id") == vehicle_id), {})
         expect_status = {"整车销售": "已售", "经营租赁": "租赁中", "以租代售": "以租代售"}[sales_mode]
         check(f"F 出库后车辆状态={expect_status}[{sales_mode}]",
@@ -402,7 +402,7 @@ def stage_h_return(vehicle_id):
     ok = st == 200 and rp.get("success")
     check("H6 财务出款完成", ok, str(rp.get("message", rp))[:40])
     if ok:
-        st, vehicles = req(sales, "GET", "/api/vehicles")
+        st, vehicles = req(sales, "GET", "/api/vehicles/list")
         v = next((x for x in as_list(vehicles) if x.get("id") == vehicle_id), {})
         check("H7 退车后车辆回库/待维修",
               v.get("status") in ("在库", "待维修"), f"实际={v.get('status')}")
@@ -429,7 +429,7 @@ def stage_i_transfer(cid, vehicle_id):
         c = find_contract(ops, cid)
         check("I3 合同状态=已结清", c.get("contract_status") == "已结清",
               f"实际={c.get('contract_status')}")
-        st, vehicles = req(sales, "GET", "/api/vehicles")
+        st, vehicles = req(sales, "GET", "/api/vehicles/list")
         v = next((x for x in as_list(vehicles) if x.get("id") == vehicle_id), {})
         check("I4 车辆状态=已售/已过户", v.get("status") == "已售/已过户",
               f"实际={v.get('status')}")
