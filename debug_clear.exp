@@ -1,0 +1,83 @@
+#!/usr/bin/expect -f
+set timeout 180
+set password "fijSec-tuccyt-9dohxu"
+
+spawn ssh -o StrictHostKeyChecking=no root@8.156.91.120
+expect "password:"
+send "$password\r"
+expect "# "
+
+puts "==> 直连 MySQL 清空业务数据..."
+
+send {source /opt/jinjuyuan-venv/bin/activate && python3 << 'HEREDOC'
+import pymysql
+conn = pymysql.connect(
+    host='rm-2vc15as5od6ay3gl4zo.mysql.cn-chengdu.rds.aliyuncs.com',
+    port=3306,
+    user='dbroot',
+    password='fijSec-tuccyt-9dohxu',
+    database='jinjuyuan',
+    charset='utf8mb4'
+)
+c = conn.cursor()
+
+BUSINESS = [
+    'reconciliation_allocations','late_fee_ledger','urge_records','lock_requests',
+    'contract_fee_items','contract_initial_payments','factory_repayments','repayments',
+    'waivers','invoice_requests','return_inspections','ownership_transfers',
+    'vehicle_rebates','attachments','approval_flows','daily_job_runs',
+    'customer_prepayments','receivables','customer_blacklist','customers',
+    'sales_orders','contracts','vehicles','audit_logs',
+]
+
+c.execute('SET FOREIGN_KEY_CHECKS=0')
+for t in BUSINESS:
+    c.execute(f'SELECT COUNT(*) FROM {t}')
+    cnt = c.fetchone()[0]
+    if cnt > 0:
+        c.execute(f'TRUNCATE TABLE {t}')
+        print(f'  ✅ {t}: deleted {cnt} rows')
+    else:
+        print(f'  ⏭️  {t}: already empty')
+
+c.execute('SET FOREIGN_KEY_CHECKS=1')
+conn.commit()
+
+# Verify
+KEPT = ['users','role_pages','role_actions','role_field_permissions','model_guidance_prices','receiving_companies']
+for t in KEPT:
+    try:
+        c.execute(f'SELECT COUNT(*) FROM {t}')
+        print(f'  📦 {t}: {c.fetchone()[0]} rows (kept)')
+    except:
+        pass
+
+conn.close()
+print('CLEAR_DONE')
+HEREDOC
+} 2>&1\r
+
+expect {
+    "CLEAR_DONE" { puts "\n✅ 数据清空成功！" }
+    "Traceback" { puts "\n❌ Python 报错" }
+    timeout { puts "\n⏰ 超时" }
+}
+puts $expect_out(buffer)
+
+# Then restart app
+puts "\n==> 清理上传文件 & 重启..."
+send "rm -rf /opt/jinjuyuan/uploads/* /opt/jinjuyuan/generated-contracts/* 2>/dev/null && echo CLEANED\r"
+expect "CLEANED"
+
+send "systemctl restart jinjuyuan 2>/dev/null || (pkill -f gunicorn; sleep 2; cd /opt/jinjuyuan && source /opt/jinjuyuan-venv/bin/activate && export JJY_DB_HOST=rm-2vc15as5od6ay3gl4zo.mysql.cn-chengdu.rds.aliyuncs.com && export JJY_DB_PORT=3306 && export JJY_DB_USER=dbroot && export JJY_DB_PASSWORD=fijSec-tuccyt-9dohxu && export JJY_DB_NAME=jinjuyuan && nohup gunicorn -b 0.0.0.0:8081 -w 2 --timeout 120 wsgi:app >/tmp/jinjuyuan.log 2>&1 &) && echo APP_RESTARTED\r"
+expect "APP_RESTARTED"
+sleep 3
+
+# Verify app is up
+send "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/ && echo ''\r"
+expect -re "(\d+)"
+puts "HTTP: $expect_out(1,string)"
+
+send "exit\r"
+expect eof
+puts "\n✅ 全部完成！访问 http://8.156.91.120:8081"

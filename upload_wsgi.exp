@@ -1,0 +1,22 @@
+#!/usr/bin/expect -f
+set timeout 60
+set password "fijSec-tuccyt-9dohxu"
+set server "8.156.91.120"
+
+spawn scp -o StrictHostKeyChecking=no /Users/liuyuanchang/code/jiefang/wsgi.py root@$server:/opt/jinjuyuan/wsgi.py
+expect "password:"
+send "$password\r"
+expect eof
+
+spawn ssh -o StrictHostKeyChecking=no root@$server
+expect "password:"
+send "$password\r"
+expect "# "
+
+send "systemctl restart jinjuyuan 2>/dev/null; sleep 7; curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/; echo ''\r"
+expect -re "(\\d+)"
+puts "HTTP: $expect_out(1,string)"
+
+send "exit\r"
+expect eof
+puts "\n=== DONE ==="

@@ -1,0 +1,25 @@
+#!/usr/bin/expect -f
+set timeout 60
+set password "fijSec-tuccyt-9dohxu"
+set server "8.156.91.120"
+
+spawn ssh -o StrictHostKeyChecking=no root@$server
+expect "password:"
+send "$password\r"
+expect "# "
+
+puts "==> Check error log..."
+send "journalctl -u jinjuyuan --no-pager -n 15 2>&1 | grep -E 'Error|Traceback|except|failed|NoneType'\r"
+expect "# "
+puts "==> Kill any stale processes..."
+send "pkill -f gunicorn 2>/dev/null; pkill -f wsgi 2>/dev/null; sleep 2; echo KILLED\r"
+expect "KILLED"
+
+puts "==> Start app with env vars directly..."
+send "export JJY_DB_HOST=rm-2vc15as5od6ay3gl4zo.mysql.cn-chengdu.rds.aliyuncs.com && export JJY_DB_PORT=3306 && export JJY_DB_USER=dbroot && export JJY_DB_PASSWORD=fijSec-tuccyt-9dohxu && export JJY_DB_NAME=jinjuyuan && cd /opt/jinjuyuan && source /opt/jinjuyuan-venv/bin/activate && nohup gunicorn -b 0.0.0.0:8081 -w 1 --threads 8 --timeout 120 wsgi:application >/tmp/gunicorn.log 2>&1 & sleep 6 && tail -5 /tmp/gunicorn.log; echo ''; curl -s -o /dev/null -w 'HTTP_CODE:%{http_code}' http://127.0.0.1:8081/; echo ''\r"
+expect -re "HTTP_CODE:(\\d+)"
+puts "\nApp: $expect_out(1,string)"
+
+send "exit\r"
+expect eof
+puts "\n=== DONE ==="

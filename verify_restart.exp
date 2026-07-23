@@ -1,0 +1,23 @@
+#!/usr/bin/expect -f
+set timeout 60
+set password "fijSec-tuccyt-9dohxu"
+set server "8.156.91.120"
+
+spawn ssh -o StrictHostKeyChecking=no root@$server
+expect "password:"
+send "$password\r"
+expect "# "
+
+puts "==> Check gunicorn status..."
+send "ps aux | grep guni | grep -v grep; echo '---'; curl -s -o /dev/null -w 'HTTP:%{http_code}' http://127.0.0.1:8081/; echo ''; echo '---LOG---'; tail -20 /tmp/jinjuyuan.log 2>/dev/null || echo 'no log'\r"
+expect -re ".*---LOG---.*"
+puts $expect_out(buffer)
+
+puts "\n==> If not running, restart with debug info..."
+send "if ! curl -s -o /dev/null http://127.0.0.1:8081/ 2>/dev/null; then cd /opt/jinjuyuan && source /opt/jinjuyuan-venv/bin/activate && export JJY_DB_HOST=rm-2vc15as5od6ay3gl4zo.mysql.cn-chengdu.rds.aliyuncs.com && export JJY_DB_PORT=3306 && export JJY_DB_USER=dbroot && export JJY_DB_PASSWORD=fijSec-tuccyt-9dohxu && export JJY_DB_NAME=jinjuyuan && gunicorn -b 0.0.0.0:8081 -w 2 --timeout 120 wsgi:app --access-logfile /tmp/access.log --error-logfile /tmp/error.log & sleep 3 && curl -s -o /dev/null -w 'HTTP:%{http_code}' http://127.0.0.1:8081/; echo ''; fi\r"
+expect -re "HTTP:(\\d+)"
+puts "App HTTP: $expect_out(1,string)"
+
+send "exit\r"
+expect eof
+puts "\n=== DONE ==="

@@ -1,0 +1,15 @@
+#!/usr/bin/expect -f
+set timeout 30
+set password "fijSec-tuccyt-9dohxu"
+
+spawn ssh -o StrictHostKeyChecking=no root@8.156.91.120
+expect "password:"
+send "$password\r"
+expect "# "
+
+send "cd /opt/jinjuyuan && source /opt/jinjuyuan-venv/bin/activate && python3 -c 'import pymysql; conn=pymysql.connect(host=\"rm-2vc15as5od6ay3gl4zo.mysql.cn-chengdu.rds.aliyuncs.com\",port=3306,user=\"dbroot\",password=\"fijSec-tuccyt-9dohxu\",database=\"jinjuyuan\",charset=\"utf8mb4\"); c=conn.cursor(); c.execute(\"SELECT COUNT(*) FROM users\"); print(\"users:\"+str(c.fetchone()[0])); c.execute(\"SELECT COUNT(*) FROM vehicles\"); print(\"vehicles:\"+str(c.fetchone()[0])); c.execute(\"SELECT COUNT(*) FROM contracts\"); print(\"contracts:\"+str(c.fetchone()[0])); c.execute(\"SELECT COUNT(*) FROM audit_logs\"); print(\"audit_logs:\"+str(c.fetchone()[0])); conn.close()'\r"
+expect -re "users"
+puts $expect_out(buffer)
+
+send "exit\r"
+expect eof

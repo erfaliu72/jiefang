@@ -1,0 +1,22 @@
+#!/usr/bin/expect -f
+set timeout 300
+set password "fijSec-tuccyt-9dohxu"
+set server "8.156.91.120"
+
+spawn scp -o StrictHostKeyChecking=no /Users/liuyuanchang/code/jiefang/clear_all_ecs.sh root@$server:/tmp/
+expect "password:"
+send "$password\r"
+expect eof
+
+spawn ssh -o StrictHostKeyChecking=no root@$server
+expect "password:"
+send "$password\r"
+expect "# "
+
+send "chmod +x /tmp/clear_all_ecs.sh && bash /tmp/clear_all_ecs.sh 2>&1\r"
+expect "ALL DONE"
+puts $expect_out(buffer)
+
+send "exit\r"
+expect eof
+puts "\n=== COMPLETE ==="
