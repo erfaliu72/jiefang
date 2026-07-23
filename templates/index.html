@@ -3232,52 +3232,77 @@
             const uploadedFiles = ref([]);
             const vehicles = ref([]);
             const contracts = ref([]);
-            // 操作列宽度：扫描当前页数据行，取最大按钮数计算（上限 520px）
-            const BTN_W = 100; // 每个按钮约100px（按钮宽+padding+间距）
-            const calcOpWidth = (rows, role, counter) => {
+            // 操作列宽度：按按钮文字+padding+间距精确计算（上限 520px）
+            // Element Plus small button: border=2, padding-h=22(11*2), font=12px, gap=12
+            const _tw = (s) => { let w=0; for(const c of s){w += (c>='一'&&c<='鿿')?12:7.2 } return w; };
+            const _bw = (text) => _tw(text) + 22 + 2; // text + padding + border
+            const _gap = 12;
+            const _sumBtnW = (widths) => widths.reduce((a,b)=>a+b,0) + (widths.length-1)*_gap;
+            const _round100 = (v) => Math.ceil(v/10)*10 + 10; // 向上取整到10px + 额外余量
+
+            // 已知按钮宽度预计算
+            const BTN = {
+                detail: _bw('详情'),
+                fix: _bw('修正'),
+                order: _bw('发起报单'),
+                transfer: _bw('过户'),
+                returnCar: _bw('发起退车'),
+                restore: _bw('恢复'),
+                del: 36, // <el-icon><Delete/></el-icon> link button: icon 14 + padding 4 + margin 6*2
+                edit: _bw('编辑'),
+                delOrder: _bw('删除'),
+                copyDraft: _bw('复制草稿'),
+                returnOrder: _bw('发起退车'),
+                genPlan: _bw('生成客户计划'),
+                confirm: _bw('确认报单'),
+                uploadContract: _bw('上传合同'),
+                invoice: _bw('开票'),
+                voidInv: _bw('作废'),
+                redInv: _bw('红冲'),
+            };
+
+            const calcOpWidth = (rows, role, getter) => {
                 const arr = rows.value || rows;
                 if (!arr || !arr.length) return 80;
-                let max = 0;
+                let maxW = 0;
                 for (const row of arr) {
-                    const n = counter(row, role);
-                    if (n > max) max = n;
+                    const ws = getter(row, role);
+                    const total = _sumBtnW(ws);
+                    if (total > maxW) maxW = total;
                 }
-                return Math.min(Math.max(max, 1) * BTN_W + 20, 520);
+                return Math.min(_round100(maxW), 520);
             };
-            // 销售报单按钮计数
-            const _salesBtnCount = (row, role) => {
-                let n = 0;
-                if (role === '销售' && row.order_status === '草稿') n += 2;
-                if (role === '销售' && row.order_status === '已作废') n += 1;
-                if (canReturnFromOrder(row)) n += 1;
-                if (role === '财务' && row.order_status === '待财务确认' && isInstallmentSalesOrder(row)) n += 1;
-                if (role === '财务' && row.order_status === '待财务确认' && canActivateSalesOrder(row)) n += 1;
-                if (role === '运营' && row.order_status === '已激活') n += 1;
-                return n;
+            const _salesBtns = (row, role) => {
+                const b = [];
+                if (role === '销售' && row.order_status === '草稿') { b.push(BTN.edit, BTN.delOrder); }
+                if (role === '销售' && row.order_status === '已作废') b.push(BTN.copyDraft);
+                if (canReturnFromOrder(row)) b.push(BTN.returnOrder);
+                if (role === '财务' && row.order_status === '待财务确认' && isInstallmentSalesOrder(row)) b.push(BTN.genPlan);
+                if (role === '财务' && row.order_status === '待财务确认' && canActivateSalesOrder(row)) b.push(BTN.confirm);
+                if (role === '运营' && row.order_status === '已激活') b.push(BTN.uploadContract);
+                return b;
             };
-            const opWidthSales = computed(() => calcOpWidth(salesOrders, currentUser.value?.role, _salesBtnCount));
-            // 车辆全景按钮计数
-            const _vehicleBtnCount = (row, role) => {
-                let n = 1; // 详情始终可见
-                if (!row.is_deleted && row.validation_status === 'invalid') n += 1;
-                if (!row.is_deleted && canInitiateVehicleOrder(row)) n += 1;
-                if (!row.is_deleted && role === '运营' && row.contract_type === '以租代售') n += 1;
-                if (!row.is_deleted && canInitiateVehicleReturn(row)) n += 1;
-                if (row.is_deleted && role === '老板') n += 1;
-                if (!row.is_deleted && role === '老板') n += 1; // 删除按钮
-                return n;
+            const opWidthSales = computed(() => calcOpWidth(salesOrders, currentUser.value?.role, _salesBtns));
+            const _vehicleBtns = (row, role) => {
+                const b = [BTN.detail];
+                if (!row.is_deleted && row.validation_status === 'invalid') b.push(BTN.fix);
+                if (!row.is_deleted && canInitiateVehicleOrder(row)) b.push(BTN.order);
+                if (!row.is_deleted && role === '运营' && row.contract_type === '以租代售') b.push(BTN.transfer);
+                if (!row.is_deleted && canInitiateVehicleReturn(row)) b.push(BTN.returnCar);
+                if (row.is_deleted && role === '老板') b.push(BTN.restore);
+                if (!row.is_deleted && role === '老板') b.push(BTN.del);
+                return b;
             };
-            const opWidthVehicles = computed(() => calcOpWidth(filteredAssetRows, currentUser.value?.role, _vehicleBtnCount));
-            // 发票管理按钮计数
-            const _invoiceBtnCount = (row, role) => {
-                if (role !== '财务') return 0;
-                let n = 0;
-                if (row.status === '待开票') n += 1;
-                if (['待开票','已开票'].includes(row.status)) n += 1;
-                if (row.status === '已开票') n += 1;
-                return n;
+            const opWidthVehicles = computed(() => calcOpWidth(filteredAssetRows, currentUser.value?.role, _vehicleBtns));
+            const _invoiceBtns = (row, role) => {
+                if (role !== '财务') return [];
+                const b = [];
+                if (row.status === '待开票') b.push(BTN.invoice);
+                if (['待开票','已开票'].includes(row.status)) b.push(BTN.voidInv);
+                if (row.status === '已开票') b.push(BTN.redInv);
+                return b;
             };
-            const opWidthInvoices = computed(() => calcOpWidth(invoiceRequests, currentUser.value?.role, _invoiceBtnCount));
+            const opWidthInvoices = computed(() => calcOpWidth(invoiceRequests, currentUser.value?.role, _invoiceBtns));
             const stats = ref({});
             const salesOrders = ref([]);
             const overdueList = ref([]);
