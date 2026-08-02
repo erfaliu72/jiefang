@@ -389,10 +389,6 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); -web
 .empty-state p { font-size: 13px; color: var(--text-muted); }
 
 /* ===== SETTINGS ===== */
-.settings-grid { display: flex; flex-wrap: wrap; gap: 24px; }
-.setting-item { display: flex; flex-direction: column; gap: 8px; }
-.setting-item label { font-size: 13px; font-weight: 500; color: var(--text-secondary); }
-
 .role-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 .role-item { display: flex; align-items: center; gap: 12px; padding: 12px; background: #f9fafb; border-radius: var(--radius-sm); border: 1px solid var(--border-light); }
 .role-badge { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; flex-shrink: 0; }

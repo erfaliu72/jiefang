@@ -58,6 +58,9 @@ if USE_MYSQL:
         else:
             # 无参数时 pymysql 不做格式化，% 原样保留
             sql = sql.replace('?', '%s')
+        # SQLite 标量 MIN(a,b) -> MySQL LEAST(a,b)。匹配两参数模式避免误伤聚合 MIN(col)。
+        if has_params:
+            sql = re.sub(r'\bMIN\s*\(([^,)]+)\s*,\s*([^,)]+)\s*\)', r'LEAST(\1, \2)', sql, flags=re.IGNORECASE)
         return sql
 
     class _Cursor:
@@ -246,12 +249,14 @@ def init_db():
         payment_date TEXT,
         customer_name TEXT NOT NULL,
         customer_phone TEXT,
+        customer_id_card TEXT,
         sales_mode TEXT NOT NULL,
         vehicle_id INTEGER,
         vin TEXT NOT NULL,
         car_type TEXT,
         vehicle_color TEXT,
         plate_number TEXT,
+        tail_plate TEXT,
         lease_term TEXT,
         cargo_length TEXT,
         sale_total_price REAL DEFAULT 0,
@@ -1164,6 +1169,10 @@ def init_db():
         ("vehicles", "frame_main", "TEXT"),
         ("vehicles", "fuel_tank", "TEXT"),
         ("vehicles", "suspension_model", "TEXT"),
+        # === 销售报单：尾板（有/无）===
+        ("sales_orders", "tail_plate", "TEXT"),
+        # === 销售报单：客户身份证号 ===
+        ("sales_orders", "customer_id_card", "TEXT"),
         ("vehicles", "electrical_interface", "TEXT"),
         # === 车辆字典校验状态（车型等字段 vs 数据字典）===
         ("vehicles", "validation_status", "TEXT DEFAULT 'valid'"),   # valid / invalid / warning
@@ -1186,15 +1195,6 @@ def init_db():
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
         except Exception:
             pass
-
-    c.execute("""
-        UPDATE model_guidance_prices
-        SET lease_deposit_ratio=CASE WHEN COALESCE(lease_deposit_ratio,0)<=0 THEN 0.10 ELSE lease_deposit_ratio END,
-            lease_repayment_ratio=CASE WHEN COALESCE(lease_repayment_ratio,0)<=0 THEN 0.025 ELSE lease_repayment_ratio END,
-            sale_down_payment_ratio=CASE WHEN COALESCE(sale_down_payment_ratio,0)<=0 THEN 0.15 ELSE sale_down_payment_ratio END,
-            sale_repayment_ratio=CASE WHEN COALESCE(sale_repayment_ratio,0)<=0 THEN 0.025 ELSE sale_repayment_ratio END
-        WHERE COALESCE(lease_installment_price,0)>0 OR COALESCE(sale_total_price,0)>0 OR COALESCE(guidance_price,0)>0
-    """)
 
     if USE_MYSQL:
         _raw_c.execute("SET FOREIGN_KEY_CHECKS=1")

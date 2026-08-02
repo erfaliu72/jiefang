@@ -120,6 +120,9 @@ APPROVAL_CONFIGS = {
     'return_stock': [
         {'step': 1, 'role': '老板', 'label': '领导审批'},
     ],
+    'invoice': [
+        {'step': 1, 'role': '老板', 'label': '发票审批'},
+    ],
 }
 
 
@@ -207,13 +210,6 @@ def is_price_below_guidance(price, guidance_price):
     return float(guidance_price or 0) > 0 and float(price or 0) < float(guidance_price or 0)
 
 
-def normalize_ratio(value):
-    ratio = parse_money(value)
-    if ratio > 1:
-        ratio = ratio / 100
-    return max(0.0, ratio)
-
-
 def current_guidance_price(conn, vehicle_id):
     row = conn.execute("SELECT guidance_price FROM vehicles WHERE id=?", (vehicle_id,)).fetchone()
     return float(row['guidance_price'] or 0) if row else 0.0
@@ -233,24 +229,18 @@ def contract_type_from_sales_mode(value):
 
 
 def resolve_guidance_prices_for_vehicle(conn, vehicle):
-    """返回车型指导口径；旧指导价仅保留兼容展示。"""
+    """返回车型指导价；兼容旧字段仅作展示。"""
     car_type = (vehicle['car_type'] if vehicle and 'car_type' in vehicle.keys() else '') or ''
     legacy_price = parse_money(vehicle['guidance_price'] if vehicle and 'guidance_price' in vehicle.keys() else 0)
     result = {
-        'lease_installment_price': 0.0,
         'sale_total_price': 0.0,
-        'lease_deposit_ratio': 0.0,
-        'lease_repayment_ratio': 0.0,
-        'sale_down_payment_ratio': 0.0,
-        'sale_repayment_ratio': 0.0,
+        'lease_installment_price': 0.0,
         'legacy_guidance_price': legacy_price,
         'source': '单车指导价' if legacy_price > 0 else '',
     }
     if car_type:
         row = conn.execute("""
-            SELECT guidance_price, lease_installment_price, sale_total_price,
-                   lease_deposit_ratio, lease_repayment_ratio,
-                   sale_down_payment_ratio, sale_repayment_ratio
+            SELECT guidance_price, lease_installment_price, sale_total_price
             FROM model_guidance_prices
             WHERE car_type=?
         """, (car_type,)).fetchone()
@@ -261,12 +251,8 @@ def resolve_guidance_prices_for_vehicle(conn, vehicle):
             result.update({
                 'lease_installment_price': lease_price,
                 'sale_total_price': sale_price,
-                'lease_deposit_ratio': normalize_ratio(row['lease_deposit_ratio']),
-                'lease_repayment_ratio': normalize_ratio(row['lease_repayment_ratio']),
-                'sale_down_payment_ratio': normalize_ratio(row['sale_down_payment_ratio']),
-                'sale_repayment_ratio': normalize_ratio(row['sale_repayment_ratio']),
                 'legacy_guidance_price': legacy_model_price or legacy_price,
-                'source': '车型指导口径' if (lease_price or sale_price) else '车型指导价',
+                'source': '车型指导价',
             })
     return result
 
@@ -275,16 +261,14 @@ def has_model_dual_guidance(conn, car_type):
     if not car_type:
         return False
     row = conn.execute("""
-        SELECT lease_installment_price, sale_total_price,
-               lease_deposit_ratio, lease_repayment_ratio,
-               sale_down_payment_ratio, sale_repayment_ratio
+        SELECT lease_installment_price, sale_total_price
         FROM model_guidance_prices
         WHERE car_type=?
     """, (car_type,)).fetchone()
     return bool(row and (
-        (normalize_ratio(row['lease_deposit_ratio']) > 0 and normalize_ratio(row['lease_repayment_ratio']) > 0)
-        or (normalize_ratio(row['sale_down_payment_ratio']) > 0 and normalize_ratio(row['sale_repayment_ratio']) > 0)
-        or (parse_money(row['lease_installment_price']) > 0 and parse_money(row['sale_total_price']) > 0)
+        (parse_money(row['lease_installment_price']) > 0 and parse_money(row['sale_total_price']) > 0)
+        or parse_money(row['sale_total_price']) > 0
+        or parse_money(row['lease_installment_price']) > 0
     ))
 
 
@@ -292,71 +276,30 @@ def calculate_guidance_check(conn, vehicle, sales_mode, sale_total_price, lease_
     guidance = resolve_guidance_prices_for_vehicle(conn, vehicle)
     mode = contract_type_from_sales_mode(sales_mode)
     total_price = parse_money(sale_total_price)
-    upfront = parse_money(upfront_amount)
     installment = parse_money(lease_quote)
     if mode == '租赁':
-        base_price = total_price or guidance['sale_total_price'] or guidance['legacy_guidance_price']
-        deposit_ratio = round(upfront / base_price, 6) if base_price > 0 else 0
-        repayment_ratio = round(installment / base_price, 6) if base_price > 0 else 0
-        checks = [
-            {
-                'key': 'lease_deposit_ratio',
-                'label': '押金比例',
-                'actual': deposit_ratio,
-                'required': guidance['lease_deposit_ratio'],
-            },
-            {
-                'key': 'lease_repayment_ratio',
-                'label': '每期还款比例',
-                'actual': repayment_ratio,
-                'required': guidance['lease_repayment_ratio'],
-            },
-        ]
         display_price = installment
         display_guidance = guidance['lease_installment_price']
     elif mode == '以租代售':
-        base_price = total_price or guidance['sale_total_price'] or guidance['legacy_guidance_price']
-        down_ratio = round(upfront / base_price, 6) if base_price > 0 else 0
-        repayment_ratio = round(installment / base_price, 6) if base_price > 0 else 0
-        checks = [
-            {
-                'key': 'sale_down_payment_ratio',
-                'label': '首付款比例',
-                'actual': down_ratio,
-                'required': guidance['sale_down_payment_ratio'],
-            },
-            {
-                'key': 'sale_repayment_ratio',
-                'label': '每期还款比例',
-                'actual': repayment_ratio,
-                'required': guidance['sale_repayment_ratio'],
-            },
-        ]
         display_price = installment
         display_guidance = guidance['sale_total_price']
     else:
-        base_price = total_price
-        checks = []
         display_price = total_price
         display_guidance = guidance['sale_total_price']
 
-    missing = [c for c in checks if c['required'] <= 0]
-    below = [c for c in checks if c['required'] > 0 and c['actual'] < c['required']]
+    missing = []
+    below = []
     return {
         'mode': mode,
-        'base_price': base_price,
+        'base_price': total_price or guidance['sale_total_price'] or guidance['legacy_guidance_price'],
         'quote_price': display_price,
         'guidance_price': display_guidance,
         'guidance': guidance,
-        'checks': checks,
+        'checks': [],
         'missing': missing,
         'below': below,
-        'needs_approval': bool(below),
+        'needs_approval': False,
     }
-
-
-def format_ratio(value):
-    return f"{round(normalize_ratio(value) * 100, 2)}%"
 
 
 def validate_vehicle_dict(conn, car_type):
@@ -378,18 +321,9 @@ def validate_vehicle_dict(conn, car_type):
 
 def guidance_exception_reason(result):
     parts = []
-    if result['below']:
-        parts.extend([
-            f"{item['label']} {format_ratio(item['actual'])} 低于指导 {format_ratio(item['required'])}"
-            for item in result['below']
-        ])
-    if result['missing']:
-        parts.extend([
-            f"{item['label']} 未维护指导值" for item in result['missing']
-        ])
-    if not parts and result.get('guidance_price', 0) <= 0:
+    if result.get('guidance_price', 0) <= 0:
         parts.append('缺少指导价')
-    if not parts and result.get('mode') == '销售' and result.get('quote_price', 0) > 0 and result.get('guidance_price', 0) > 0:
+    elif result.get('quote_price', 0) > 0 and result.get('guidance_price', 0) > 0 and result['quote_price'] < result['guidance_price']:
         parts.append(f"报价低于指导价 ¥{result['quote_price']} < ¥{result['guidance_price']}")
     return '；'.join(parts)
 
@@ -529,10 +463,8 @@ def unresolved_guidance_vehicle_count(conn):
         LEFT JOIN model_guidance_prices mgp ON mgp.car_type = v.car_type
         WHERE (v.is_deleted IS NULL OR v.is_deleted = 0)
           AND (
-              COALESCE(mgp.lease_deposit_ratio, 0) <= 0
-              OR COALESCE(mgp.lease_repayment_ratio, 0) <= 0
-              OR COALESCE(mgp.sale_down_payment_ratio, 0) <= 0
-              OR COALESCE(mgp.sale_repayment_ratio, 0) <= 0
+              COALESCE(mgp.sale_total_price, 0) <= 0
+              AND COALESCE(mgp.guidance_price, 0) <= 0
           )
           AND COALESCE(v.status, '') IN ('在库', '报单锁定中')
     """).fetchone()
@@ -700,10 +632,11 @@ def finalize_initial_payment(conn, payment_id, operator_name, now, allow_shortag
                 waterfall_summary=COALESCE(waterfall_summary, ?),
                 remark=COALESCE(remark, '首次付款审核自动核销首期租金')
             WHERE id=(
-                SELECT id FROM repayments
-                WHERE contract_id=? AND period>=1 AND status!='已还款'
-                ORDER BY period ASC
-                LIMIT 1
+                SELECT id FROM (
+                    SELECT id FROM repayments
+                    WHERE contract_id=? AND period>=1 AND status!='已还款'
+                    ORDER BY period ASC LIMIT 1
+                ) _sub
             )
         """, (
             shortage_amount,
@@ -2488,7 +2421,6 @@ def get_model_guidance_prices():
     c = conn.cursor()
     c.execute("""
         SELECT car_type, guidance_price, lease_installment_price, sale_total_price,
-               lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
                remark, updated_by, updated_at
         FROM model_guidance_prices
         ORDER BY car_type ASC
@@ -2517,10 +2449,6 @@ def get_model_guidance_prices():
             'guidance_price': 0,
             'lease_installment_price': 0,
             'sale_total_price': 0,
-            'lease_deposit_ratio': 0,
-            'lease_repayment_ratio': 0,
-            'sale_down_payment_ratio': 0,
-            'sale_repayment_ratio': 0,
             'remark': '',
             'updated_by': '',
             'updated_at': '',
@@ -2528,10 +2456,6 @@ def get_model_guidance_prices():
         item['guidance_price'] = item.get('guidance_price') or 0
         item['lease_installment_price'] = item.get('lease_installment_price') or 0
         item['sale_total_price'] = item.get('sale_total_price') or 0
-        item['lease_deposit_ratio'] = item.get('lease_deposit_ratio') or 0
-        item['lease_repayment_ratio'] = item.get('lease_repayment_ratio') or 0
-        item['sale_down_payment_ratio'] = item.get('sale_down_payment_ratio') or 0
-        item['sale_repayment_ratio'] = item.get('sale_repayment_ratio') or 0
         item['vehicle_count'] = row['vehicle_count']
         item['avg_vehicle_guidance_price'] = row['avg_vehicle_guidance_price'] or 0
         rows.append(item)
@@ -2542,10 +2466,6 @@ def get_model_guidance_prices():
             item['guidance_price'] = item.get('guidance_price') or 0
             item['lease_installment_price'] = item.get('lease_installment_price') or 0
             item['sale_total_price'] = item.get('sale_total_price') or 0
-            item['lease_deposit_ratio'] = item.get('lease_deposit_ratio') or 0
-            item['lease_repayment_ratio'] = item.get('lease_repayment_ratio') or 0
-            item['sale_down_payment_ratio'] = item.get('sale_down_payment_ratio') or 0
-            item['sale_repayment_ratio'] = item.get('sale_repayment_ratio') or 0
             item['vehicle_count'] = 0
             item['avg_vehicle_guidance_price'] = 0
             rows.append(item)
@@ -2564,19 +2484,13 @@ def get_guidance_price_alerts():
                v.invoice_price, v.purchase_price, v.guidance_price, v.status, v.created_at,
                COALESCE(mgp.guidance_price, 0) as model_guidance_price,
                COALESCE(mgp.lease_installment_price, 0) as lease_installment_price,
-               COALESCE(mgp.sale_total_price, 0) as sale_total_price,
-               COALESCE(mgp.lease_deposit_ratio, 0) as lease_deposit_ratio,
-               COALESCE(mgp.lease_repayment_ratio, 0) as lease_repayment_ratio,
-               COALESCE(mgp.sale_down_payment_ratio, 0) as sale_down_payment_ratio,
-               COALESCE(mgp.sale_repayment_ratio, 0) as sale_repayment_ratio
+               COALESCE(mgp.sale_total_price, 0) as sale_total_price
         FROM vehicles v
         LEFT JOIN model_guidance_prices mgp ON mgp.car_type = v.car_type
         WHERE (v.is_deleted IS NULL OR v.is_deleted = 0)
           AND (
-              COALESCE(mgp.lease_deposit_ratio, 0) <= 0
-              OR COALESCE(mgp.lease_repayment_ratio, 0) <= 0
-              OR COALESCE(mgp.sale_down_payment_ratio, 0) <= 0
-              OR COALESCE(mgp.sale_repayment_ratio, 0) <= 0
+              COALESCE(mgp.sale_total_price, 0) <= 0
+              AND COALESCE(mgp.guidance_price, 0) <= 0
           )
           AND COALESCE(v.status, '') IN ('在库', '报单锁定中')
         ORDER BY v.created_at DESC, v.id DESC
@@ -2617,10 +2531,6 @@ def upsert_model_guidance_price():
     legacy_input = data.get('guidance_price', data.get('price'))
     lease_price = parse_money(data.get('lease_installment_price'))
     sale_price = parse_money(data.get('sale_total_price'))
-    lease_deposit_ratio = normalize_ratio(data.get('lease_deposit_ratio'))
-    lease_repayment_ratio = normalize_ratio(data.get('lease_repayment_ratio'))
-    sale_down_payment_ratio = normalize_ratio(data.get('sale_down_payment_ratio'))
-    sale_repayment_ratio = normalize_ratio(data.get('sale_repayment_ratio'))
     new_price = sale_price or lease_price
     remark = (data.get('remark') or '').strip()
     # 新增Excel字段
@@ -2635,8 +2545,6 @@ def upsert_model_guidance_price():
     if landing_price: new_price = new_price or landing_price
     if not car_type:
         return jsonify({'success': False, 'message': '请选择或填写车型'}), 400
-    if lease_deposit_ratio <= 0 or lease_repayment_ratio <= 0 or sale_down_payment_ratio <= 0 or sale_repayment_ratio <= 0:
-        return jsonify({'success': False, 'message': '请填写大于0的租赁押金比例、租赁每期比例、以租代售首付比例和每期比例'}), 400
 
     user = request.current_user
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -2644,8 +2552,7 @@ def upsert_model_guidance_price():
     c = conn.cursor()
     try:
         c.execute("""
-            SELECT guidance_price, lease_installment_price, sale_total_price,
-                   lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio
+            SELECT guidance_price, lease_installment_price, sale_total_price
             FROM model_guidance_prices
             WHERE car_type=?
         """, (car_type,))
@@ -2661,19 +2568,14 @@ def upsert_model_guidance_price():
         c.execute("""
             INSERT INTO model_guidance_prices
                 (car_type, guidance_price, lease_installment_price, sale_total_price,
-                 lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
                  chassis_base_price, landing_price, interest_free_plan, rent_to_buy_plan,
                  min_loan_plan, lease_plan, product_code, fuel_type,
                  remark, updated_by, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(car_type) DO UPDATE SET
                 guidance_price=excluded.guidance_price,
                 lease_installment_price=excluded.lease_installment_price,
                 sale_total_price=excluded.sale_total_price,
-                lease_deposit_ratio=excluded.lease_deposit_ratio,
-                lease_repayment_ratio=excluded.lease_repayment_ratio,
-                sale_down_payment_ratio=excluded.sale_down_payment_ratio,
-                sale_repayment_ratio=excluded.sale_repayment_ratio,
                 chassis_base_price=excluded.chassis_base_price,
                 landing_price=excluded.landing_price,
                 interest_free_plan=excluded.interest_free_plan,
@@ -2687,7 +2589,6 @@ def upsert_model_guidance_price():
                 updated_at=excluded.updated_at
         """, (
             car_type, new_price, lease_price, sale_price,
-            lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
             chassis_base_price, landing_price, interest_free_plan, rent_to_buy_plan,
             min_loan_plan, lease_plan, product_code, fuel_type,
             remark, user['display_name'], now,
@@ -2695,10 +2596,6 @@ def upsert_model_guidance_price():
         history_rows = [
             ('lease_installment', old_lease_price or old_price or 0, lease_price),
             ('sale_total', old_sale_price or old_price or 0, sale_price),
-            ('lease_deposit_ratio', normalize_ratio(existing['lease_deposit_ratio']) if existing else 0, lease_deposit_ratio),
-            ('lease_repayment_ratio', normalize_ratio(existing['lease_repayment_ratio']) if existing else 0, lease_repayment_ratio),
-            ('sale_down_payment_ratio', normalize_ratio(existing['sale_down_payment_ratio']) if existing else 0, sale_down_payment_ratio),
-            ('sale_repayment_ratio', normalize_ratio(existing['sale_repayment_ratio']) if existing else 0, sale_repayment_ratio),
         ]
         for price_kind, old_value, new_value in history_rows:
             c.execute("""
@@ -2717,7 +2614,7 @@ def upsert_model_guidance_price():
         remaining_missing_count = unresolved_guidance_vehicle_count(conn)
 
         log_audit(conn, '更新车型指导价', 'model_guidance_price', None,
-                  f'{user["display_name"]} 将车型「{car_type}」指导口径调为租赁押金{format_ratio(lease_deposit_ratio)}、租赁每期{format_ratio(lease_repayment_ratio)}、以租代售首付{format_ratio(sale_down_payment_ratio)}、以租代售每期{format_ratio(sale_repayment_ratio)}，同步车辆 {affected_count} 台',
+                  f'{user["display_name"]} 将车型「{car_type}」指导价调为整车价{new_price}，同步车辆 {affected_count} 台',
                   user['display_name'])
         conn.commit()
         return jsonify({
@@ -2727,10 +2624,6 @@ def upsert_model_guidance_price():
             'remaining_missing_guidance_count': remaining_missing_count,
             'lease_installment_price': lease_price,
             'sale_total_price': sale_price,
-            'lease_deposit_ratio': lease_deposit_ratio,
-            'lease_repayment_ratio': lease_repayment_ratio,
-            'sale_down_payment_ratio': sale_down_payment_ratio,
-            'sale_repayment_ratio': sale_repayment_ratio,
         })
     except Exception as e:
         conn.rollback()
@@ -2836,9 +2729,8 @@ def import_guidance_prices():
                         (car_type, product_code, fuel_type, chassis_base_price, sale_total_price,
                          landing_price, guidance_price, interest_free_plan, rent_to_buy_plan,
                          min_loan_plan, lease_plan, lease_installment_price,
-                         lease_deposit_ratio, lease_repayment_ratio, sale_down_payment_ratio, sale_repayment_ratio,
                          updated_by, updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0.1,0.025,0.15,0.025,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (car_type, product_code, fuel_type, chassis, sale_total,
                       landing, guidance, interest_free, rent_buy, min_loan,
                       lease_plan, monthly or 0, user['display_name'], now))
@@ -3663,7 +3555,7 @@ def create_invoice_request(cid):
         INSERT INTO invoice_requests
             (contract_id, period, amount, receiving_company, title_type,
              invoice_entity_name, invoice_entity_tax_no, status, applied_by, applied_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, '待开票', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, '待审批', ?, ?)
     """, (
         cid,
         data.get('period'),
@@ -3676,11 +3568,136 @@ def create_invoice_request(cid):
         now,
     ))
     invoice_id = c.lastrowid
+    # 老板审批环节：创建审批流（老板通过后进入待开票，财务开票）
+    create_approval_flow(conn, 'invoice', invoice_id)
     log_audit(conn, '发起发票申请', 'invoice_request', invoice_id,
               f'合同{cid} 金额{amount} 抬头:{invoice_entity_name}', request.current_user['display_name'])
     conn.commit()
     conn.close()
-    return jsonify({'success': True, 'id': invoice_id, 'message': '发票申请已提交'})
+    return jsonify({'success': True, 'id': invoice_id, 'message': '发票申请已提交，等待老板审批'})
+
+
+@app.route('/api/invoice-requests/<int:iid>/approve', methods=['POST'])
+@require_role('老板')
+def boss_approve_invoice_request(iid):
+    """老板通过发票申请，进入待开票，财务可开票。"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM invoice_requests WHERE id=?", (iid,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '发票申请不存在'}), 404
+    if row['status'] != '待审批':
+        conn.close()
+        return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能审批'}), 400
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    user = request.current_user['display_name']
+    # 审批流置通过
+    c.execute("""
+        UPDATE approval_flows SET status='已通过', operator_name=?, comment='老板通过发票审批', acted_at=?
+        WHERE ref_type='invoice' AND ref_id=? AND status='待审批'
+    """, (user, now, iid))
+    # 发票进入待开票
+    c.execute("""
+        UPDATE invoice_requests
+        SET status='待开票',
+            boss_approved_by=?,
+            boss_approved_at=?
+        WHERE id=?
+    """, (user, now, iid))
+    log_audit(conn, '发票审批通过', 'invoice_request', iid,
+              f'老板通过，进入待开票', user)
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '发票审批通过，等待财务开票'})
+
+
+@app.route('/api/invoice-requests/<int:iid>/reject', methods=['POST'])
+@require_role('老板')
+def boss_reject_invoice_request(iid):
+    """老板驳回发票申请（与各端取消同一终止态：已驳回）。"""
+    data = request.json or {}
+    reason = (data.get('reason') or '').strip()
+    if not reason:
+        conn.close()
+        return jsonify({'success': False, 'message': '驳回原因不能为空'}), 400
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM invoice_requests WHERE id=?", (iid,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '发票申请不存在'}), 404
+    if row['status'] not in ('待审批', '待开票'):
+        conn.close()
+        return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能驳回'}), 400
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    user = request.current_user['display_name']
+    # 审批流置取消（含待审批/待开票阶段的老板驳回）
+    c.execute("""
+        UPDATE approval_flows SET status='已取消', operator_name=?, comment=?, acted_at=?
+        WHERE ref_type='invoice' AND ref_id=? AND status='待审批'
+    """, (user, f'老板驳回：{reason}', now, iid))
+    # 发票置已驳回（终止态）
+    c.execute("""
+        UPDATE invoice_requests
+        SET status='已驳回',
+            voided_by=?,
+            voided_at=?,
+            void_reason=?
+        WHERE id=?
+    """, (user, now, reason, iid))
+    log_audit(conn, '发票审批驳回', 'invoice_request', iid, reason, user)
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '发票申请已驳回'})
+
+
+@app.route('/api/invoice-requests/<int:iid>/cancel', methods=['POST'])
+@require_role('运营', '老板', '财务')
+def cancel_invoice_request(iid):
+    """各端（运营/老板/财务）取消发票申请，统一终止态：已驳回。"""
+    data = request.json or {}
+    reason = (data.get('reason') or '').strip()
+    if not reason:
+        conn.close()
+        return jsonify({'success': False, 'message': '取消原因不能为空'}), 400
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM invoice_requests WHERE id=?", (iid,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '发票申请不存在'}), 404
+    if row['status'] not in ('待审批', '待开票'):
+        conn.close()
+        return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能取消（已开票请走红冲）'}), 400
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    user = request.current_user['display_name']
+    # 审批流置取消
+    c.execute("""
+        UPDATE approval_flows SET status='已取消', operator_name=?, comment=?, acted_at=?
+        WHERE ref_type='invoice' AND ref_id=? AND status='待审批'
+    """, (user, f'取消：{reason}', now, iid))
+    # 发票置已驳回（统一终止态）
+    c.execute("""
+        UPDATE invoice_requests
+        SET status='已驳回',
+            voided_by=?,
+            voided_at=?,
+            void_reason=?
+        WHERE id=?
+    """, (user, now, reason, iid))
+    log_audit(conn, '取消发票申请', 'invoice_request', iid, f'{user} 取消：{reason}', user)
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '发票申请已取消'})
 
 
 @app.route('/api/invoice-requests/<int:iid>/issue', methods=['POST'])
@@ -3734,9 +3751,9 @@ def void_invoice_request(iid):
     if not row:
         conn.close()
         return jsonify({'success': False, 'message': '发票申请不存在'}), 404
-    if row['status'] not in ('待开票', '已开票'):
+    if row['status'] != '已开票':
         conn.close()
-        return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能作废'}), 400
+        return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能作废（待审批/待开票请用取消）'}), 400
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     c.execute("""
@@ -3927,7 +3944,7 @@ def create_sales_order():
 
     quote_price = guidance_check['quote_price']
     guidance_price = guidance_check['guidance_price']
-    guidance_label = '指导口径'
+    guidance_label = '指导价'
     needs_boss_price_approval = (
         not is_draft
         and (
@@ -3949,22 +3966,23 @@ def create_sales_order():
 
     c.execute("""
         INSERT INTO sales_orders
-            (payment_date, customer_name, customer_phone, sales_mode, vehicle_id, vin,
+            (payment_date, customer_name, customer_phone, customer_id_card, sales_mode, vehicle_id, vin,
              is_new, vehicle_brand, lease_start_date,
              vehicle_category, vehicle_cab, vehicle_engine_battery, vehicle_power_battery,
              vehicle_gearbox, vehicle_box_type,
-             car_type, vehicle_color, plate_number, lease_term, cargo_length, sale_total_price,
+             car_type, vehicle_color, plate_number, tail_plate, lease_term, cargo_length, sale_total_price,
              payment_category, car_purchase_amount, vehicle_rent_amount, receiving_company,
              wechat_interest, wechat_registration_fee, wechat_purchase_tax,
              full_package, wechat_private_fee, gifted_items, deposit_amount, order_status,
              snapshot_guidance_price, snapshot_lease_installment_price, snapshot_sale_total_price,
              price_check_status, price_exception_reason, customer_plan_match_status, factory_plan_match_status,
              saved_at, expires_at, sales_advisor, remark, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         data.get('payment_date') or datetime.now().strftime('%Y-%m-%d'),
         data.get('customer_name', '').strip() or ('草稿客户' if is_draft else ''),
         data.get('customer_phone', '').strip(),
+        (data.get('customer_id_card') or '').strip(),
         sales_mode,
         vehicle['id'] if vehicle else None,
         vin,
@@ -3980,6 +3998,7 @@ def create_sales_order():
         data.get('car_type', '').strip() or (vehicle['car_type'] if vehicle else ''),
         data.get('vehicle_color', '').strip(),
         data.get('plate_number', '').strip() or (vehicle['plate_number'] if vehicle else ''),
+        data.get('tail_plate', '').strip(),
         data.get('lease_term', '').strip(),
         data.get('cargo_length', '').strip(),
         sale_total_price,
@@ -4125,11 +4144,11 @@ def update_sales_order_draft(order_id):
 
     c.execute("""
         UPDATE sales_orders
-        SET payment_date=?, customer_name=?, customer_phone=?, sales_mode=?, vehicle_id=?, vin=?,
+        SET payment_date=?, customer_name=?, customer_phone=?, customer_id_card=?, sales_mode=?, vehicle_id=?, vin=?,
             is_new=?, vehicle_brand=?, lease_start_date=?,
             vehicle_category=?, vehicle_cab=?, vehicle_engine_battery=?, vehicle_power_battery=?,
             vehicle_gearbox=?, vehicle_box_type=?,
-            car_type=?, vehicle_color=?, plate_number=?, lease_term=?, cargo_length=?, sale_total_price=?,
+            car_type=?, vehicle_color=?, plate_number=?, tail_plate=?, lease_term=?, cargo_length=?, sale_total_price=?,
             payment_category=?, car_purchase_amount=?, vehicle_rent_amount=?, receiving_company=?,
             wechat_interest=?, wechat_registration_fee=?, wechat_purchase_tax=?,
             full_package=?, wechat_private_fee=?, gifted_items=?, deposit_amount=?, order_status=?,
@@ -4141,6 +4160,7 @@ def update_sales_order_draft(order_id):
         data.get('payment_date') or order['payment_date'] or datetime.now().strftime('%Y-%m-%d'),
         (data.get('customer_name') or order['customer_name'] or '').strip(),
         (data.get('customer_phone') or order['customer_phone'] or '').strip(),
+        (data.get('customer_id_card') or order['customer_id_card'] or '').strip(),
         sales_mode,
         vehicle['id'] if vehicle else None,
         vin,
@@ -4156,6 +4176,7 @@ def update_sales_order_draft(order_id):
         (data.get('car_type') or (vehicle['car_type'] if vehicle else '') or order['car_type'] or '').strip(),
         (data.get('vehicle_color') or order['vehicle_color'] or '').strip(),
         (data.get('plate_number') or (vehicle['plate_number'] if vehicle else '') or order['plate_number'] or '').strip(),
+        (data.get('tail_plate') or order['tail_plate'] or '').strip(),
         (data.get('lease_term') or order['lease_term'] or '').strip(),
         (data.get('cargo_length') or order['cargo_length'] or '').strip(),
         sale_total_price,
@@ -4235,21 +4256,21 @@ def copy_sales_order_to_draft(order_id):
     now = datetime.now()
     c.execute("""
         INSERT INTO sales_orders
-            (payment_date, customer_name, customer_phone, sales_mode, vehicle_id, vin,
+            (payment_date, customer_name, customer_phone, customer_id_card, sales_mode, vehicle_id, vin,
              is_new, vehicle_brand, lease_start_date,
              vehicle_category, vehicle_cab, vehicle_engine_battery, vehicle_power_battery,
              vehicle_gearbox, vehicle_box_type,
-             car_type, vehicle_color, plate_number, lease_term, cargo_length, sale_total_price,
+             car_type, vehicle_color, plate_number, tail_plate, lease_term, cargo_length, sale_total_price,
              payment_category, car_purchase_amount, vehicle_rent_amount, receiving_company,
              wechat_interest, wechat_registration_fee, wechat_purchase_tax,
              full_package, wechat_private_fee, gifted_items, deposit_amount, order_status,
              price_check_status, customer_plan_match_status, factory_plan_match_status,
              saved_at, expires_at, sales_advisor, remark, created_by)
-        SELECT payment_date, customer_name, customer_phone, sales_mode, vehicle_id, vin,
+        SELECT payment_date, customer_name, customer_phone, customer_id_card, sales_mode, vehicle_id, vin,
                is_new, vehicle_brand, lease_start_date,
                vehicle_category, vehicle_cab, vehicle_engine_battery, vehicle_power_battery,
                vehicle_gearbox, vehicle_box_type,
-               car_type, vehicle_color, plate_number, lease_term, cargo_length, sale_total_price,
+               car_type, vehicle_color, plate_number, tail_plate, lease_term, cargo_length, sale_total_price,
                payment_category, car_purchase_amount, vehicle_rent_amount, receiving_company,
                wechat_interest, wechat_registration_fee, wechat_purchase_tax,
                full_package, wechat_private_fee, gifted_items, deposit_amount, '草稿',
@@ -6889,6 +6910,34 @@ def get_approvals():
             })
             return item
 
+        if base_ref_type == 'invoice':
+            c.execute("""
+                SELECT ir.*, c.contract_type, cu.name as customer_name
+                FROM invoice_requests ir
+                JOIN contracts c ON c.id = ir.contract_id
+                LEFT JOIN customers cu ON cu.id = c.customer_id
+                WHERE ir.id = ?
+            """, (base_ref_id,))
+            row = c.fetchone()
+            if not row:
+                return item
+            row = dict(row)
+            item.update({
+                'contract_id': row.get('contract_id'),
+                'customer_name': row.get('customer_name', ''),
+                'contract_type': row.get('contract_type', ''),
+                'amount': row.get('amount', 0),
+                'invoice_entity_name': row.get('invoice_entity_name', ''),
+                'invoice_entity_tax_no': row.get('invoice_entity_tax_no', ''),
+                'invoice_no': row.get('invoice_no', ''),
+                'receiving_company': row.get('receiving_company', ''),
+                'applied_by': row.get('applied_by', ''),
+                'applied_at': row.get('applied_at', ''),
+                'delivery_status': row.get('status', ''),
+                'requested_by': row.get('applied_by', ''),
+            })
+            return item
+
         return item
 
     result = []
@@ -7068,6 +7117,16 @@ def approve_step(flow_id):
                     WHERE id=?
                 """, (user['display_name'], now, ref_id))
             message = '领导审批通过，等待财务退还押金'
+        elif ref_type == 'invoice':
+            # 发票审批通过 → 进入待开票，财务可开票
+            c.execute("""
+                UPDATE invoice_requests
+                SET status='待开票',
+                    boss_approved_by=?,
+                    boss_approved_at=?
+                WHERE id=?
+            """, (user['display_name'], now, ref_id))
+            message = '发票审批通过，等待财务开票'
     else:
         # 更新合同状态显示当前审批进度
         if ref_type == 'contract_delivery':
@@ -7189,6 +7248,15 @@ def reject_step(flow_id):
                 """, (now, comment or '首次付款不足老板驳回，退款终止', user['display_name'], payment['sales_order_id']))
     elif ref_type == 'return_stock':
         c.execute("UPDATE return_inspections SET boss_approved=0, status='待领导审批' WHERE id=?", (ref_id,))
+    elif ref_type == 'invoice':
+        c.execute("""
+            UPDATE invoice_requests
+            SET status='已驳回',
+                voided_by=?,
+                voided_at=?,
+                void_reason=?
+            WHERE id=?
+        """, (user['display_name'], now, comment or '发票审批驳回', ref_id))
 
     log_audit(conn, '审批驳回', ref_type, ref_id,
               f'{user["display_name"]}({user["role"]}) 驳回 {flow["step_label"]} 原因:{comment}')
@@ -7233,6 +7301,9 @@ def resubmit_approval(ref_id):
         """, (ref_id,))
     elif ref_type == 'return_stock':
         c.execute("UPDATE return_inspections SET status='待领导审批' WHERE id=?", (ref_id,))
+    elif ref_type == 'invoice':
+        # 发票驳回后可重提：状态回到待审批，重新走老板审批
+        c.execute("UPDATE invoice_requests SET status='待审批' WHERE id=?", (ref_id,))
 
     create_approval_flow(conn, ref_type, ref_id)
     log_audit(conn, '重新提交审批', ref_type, ref_id, '驳回后重新提交')

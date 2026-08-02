@@ -8,6 +8,7 @@
     <script src="https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js"></script>
     <link rel="stylesheet" href="https://unpkg.com/element-plus@2.9.7/dist/index.css" />
     <script src="https://unpkg.com/element-plus@2.9.7"></script>
+    <script src="https://unpkg.com/element-plus@2.9.7/dist/locale/zh-cn.min.js"></script>
     <script src="https://unpkg.com/@element-plus/icons-vue@2.3.1"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <link rel="stylesheet" href="/static/style.css">
@@ -253,14 +254,14 @@
                                 <el-table-column label="电话" width="120">
                                     <template #default="s"><span>{{ s.row.customer_phone || '-' }}</span></template>
                                 </el-table-column>
+                                <el-table-column label="身份证号" width="180" show-overflow-tooltip>
+                                    <template #default="s"><span>{{ s.row.customer_id_card || '-' }}</span></template>
+                                </el-table-column>
                                 <el-table-column label="销售方式" width="110">
                                     <template #default="s"><span>{{ s.row.sales_mode || '-' }}</span></template>
                                 </el-table-column>
                                 <el-table-column label="车型" min-width="180" show-overflow-tooltip>
                                     <template #default="s"><span>{{ s.row.car_type || '-' }}</span></template>
-                                </el-table-column>
-                                <el-table-column label="租赁指导价" width="120">
-                                    <template #default="s"><span class="num text-blue">¥{{ numberFormat(s.row.snapshot_lease_installment_price || guidancePriceForCarType(s.row.car_type).lease || 0) }}</span></template>
                                 </el-table-column>
                                 <el-table-column label="整车指导价" width="120">
                                     <template #default="s"><span class="num text-red">¥{{ numberFormat(s.row.snapshot_sale_total_price || guidancePriceForCarType(s.row.car_type).sale || s.row.snapshot_guidance_price || 0) }}</span></template>
@@ -270,6 +271,9 @@
                                 </el-table-column>
                                 <el-table-column label="车牌号" width="100">
                                     <template #default="s"><span>{{ s.row.plate_number || '-' }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="尾板" width="80">
+                                    <template #default="s"><span>{{ s.row.tail_plate || '-' }}</span></template>
                                 </el-table-column>
                                 <el-table-column label="款项类别" width="110">
                                     <template #default="s"><span class="status-badge" :class="paymentCategoryClass(s.row.payment_category || defaultPaymentCategory(s.row.sales_mode))">{{ s.row.payment_category || defaultPaymentCategory(s.row.sales_mode) }}</span></template>
@@ -770,6 +774,11 @@
                                 <el-table-column prop="invoice_entity_name" label="开票抬头" min-width="180"></el-table-column>
                                 <el-table-column prop="invoice_no" label="发票号" width="140"></el-table-column>
                                 <el-table-column prop="status" label="状态" width="100"><template #default="s"><span class="status-badge" :class="deliveryStatusClass(s.row.status)">{{ s.row.status }}</span></template></el-table-column>
+                                <el-table-column label="操作" width="120" fixed="right">
+                                    <template #default="s">
+                                        <el-button v-if="currentUser.role==='运营' && ['待审批','待开票'].includes(s.row.status)" size="small" type="danger" plain @click="cancelInvoice(s.row)">取消</el-button>
+                                    </template>
+                                </el-table-column>
                             </el-table>
                         </div>
                     </div>
@@ -897,8 +906,9 @@
                                 </el-table-column>
                                 <el-table-column label="操作" :width="opWidthInvoices" fixed="right">
                                     <template #default="s">
+                                        <el-button v-if="['运营','老板','财务'].includes(currentUser.role) && ['待审批','待开票'].includes(s.row.status)" size="small" type="info" plain @click="cancelInvoice(s.row)">取消</el-button>
                                         <el-button v-if="currentUser.role==='财务' && s.row.status==='待开票'" size="small" type="success" @click="issueInvoice(s.row)">开票</el-button>
-                                        <el-button v-if="currentUser.role==='财务' && ['待开票','已开票'].includes(s.row.status)" size="small" type="danger" plain @click="voidInvoice(s.row)">作废</el-button>
+                                        <el-button v-if="currentUser.role==='财务' && s.row.status==='已开票'" size="small" type="danger" plain @click="voidInvoice(s.row)">作废</el-button>
                                         <el-button v-if="currentUser.role==='财务' && s.row.status==='已开票'" size="small" type="warning" plain @click="redInvoice(s.row)">红冲</el-button>
                                     </template>
                                 </el-table-column>
@@ -1361,6 +1371,17 @@
                                         <div><span style="color:#9ca3af">退车原因：</span><b>{{ item.return_reason || '-' }}</b></div>
                                         <div><span style="color:#9ca3af">验收状态：</span>{{ item.delivery_status || '-' }}</div>
                                     </template>
+                                    <template v-else-if="item.ref_type==='invoice'">
+                                        <div><span style="color:#9ca3af">合同：</span>{{ item.contract_id }}</div>
+                                        <div><span style="color:#9ca3af">客户：</span><b>{{ item.customer_name || '-' }}</b></div>
+                                        <div><span style="color:#9ca3af">开票金额：</span><b style="color:#d97706">¥{{ numberFormat(item.amount) }}</b></div>
+                                        <div><span style="color:#9ca3af">开票抬头：</span>{{ item.invoice_entity_name || '-' }}</div>
+                                        <div v-if="item.invoice_entity_tax_no"><span style="color:#9ca3af">税号：</span>{{ item.invoice_entity_tax_no }}</div>
+                                        <div><span style="color:#9ca3af">收款公司：</span>{{ item.receiving_company || '-' }}</div>
+                                        <div><span style="color:#9ca3af">当前状态：</span>{{ item.delivery_status || '-' }}</div>
+                                        <div><span style="color:#9ca3af">申请人：</span>{{ item.applied_by || item.requested_by || '-' }}</div>
+                                        <div><span style="color:#9ca3af">申请时间：</span>{{ item.applied_at || item.created_at || '-' }}</div>
+                                    </template>
                                     <template v-else-if="['initial_payment','initial_payment_shortage'].includes(item.ref_type)">
                                         <div><span style="color:#9ca3af">付款类型：</span><b>{{ item.initial_payment_type || '首次付款' }}</b></div>
                                         <div><span style="color:#9ca3af">付款金额：</span><b style="color:#d97706">¥{{ numberFormat(item.initial_payment_amount) }}</b></div>
@@ -1380,10 +1401,10 @@
                                         <div><span style="color:#9ca3af">期数：</span>{{ item.loan_periods }}期</div>
                                         <div><span style="color:#9ca3af">合同期：</span>{{ item.start_date }} ~ {{ item.end_date }}</div>
                                     </template>
-                                    <div v-if="item.down_payment && item.ref_type!=='price_exception'"><span style="color:#9ca3af">首付：</span>¥{{ numberFormat(item.down_payment) }}</div>
-                                    <div v-if="item.deposit && item.ref_type!=='price_exception'"><span style="color:#9ca3af">押金：</span>¥{{ numberFormat(item.deposit) }}</div>
-                                    <div v-if="item.ref_type!=='price_exception'"><span style="color:#9ca3af">业务模式：</span>{{ item.business_mode || '-' }}</div>
-                                    <div v-if="item.created_at"><span style="color:#9ca3af">提交时间：</span>{{ item.created_at }}</div>
+                                    <div v-if="item.down_payment && !['price_exception','invoice'].includes(item.ref_type)"><span style="color:#9ca3af">首付：</span>¥{{ numberFormat(item.down_payment) }}</div>
+                                    <div v-if="item.deposit && !['price_exception','invoice'].includes(item.ref_type)"><span style="color:#9ca3af">押金：</span>¥{{ numberFormat(item.deposit) }}</div>
+                                    <div v-if="!['price_exception','invoice'].includes(item.ref_type)"><span style="color:#9ca3af">业务模式：</span>{{ item.business_mode || '-' }}</div>
+                                    <div v-if="item.created_at && item.ref_type!=='invoice'"><span style="color:#9ca3af">提交时间：</span>{{ item.created_at }}</div>
                                 </div>
                                 <!-- 首次付款附件 -->
                                 <div v-if="['initial_payment','initial_payment_shortage'].includes(item.ref_type)" style="margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0">
@@ -1490,7 +1511,7 @@
                                     <el-icon><Van/></el-icon> 确认出库
                                 </el-button>
                                 <!-- 驳回后重新提交 -->
-                                <el-button v-if="item.overall_status==='已驳回' && ((['initial_payment','contract_delivery'].includes(item.ref_type) && currentUser.role==='运营') || (!['initial_payment','contract_delivery'].includes(item.ref_type) && currentUser.role==='销售'))"
+                                <el-button v-if="item.overall_status==='已驳回' && ((['initial_payment','contract_delivery','invoice'].includes(item.ref_type) && currentUser.role==='运营') || (!['initial_payment','contract_delivery','invoice'].includes(item.ref_type) && currentUser.role==='销售'))"
                                     type="warning" size="small" plain @click="doResubmit(item.ref_id, item.ref_type)">
                                     <el-icon><RefreshRight/></el-icon> 重新提交
                                 </el-button>
@@ -1848,26 +1869,6 @@
                                 <el-table-column prop="reason" label="原因" min-width="180"></el-table-column>
                                 <el-table-column prop="created_by" label="维护人" width="100"></el-table-column>
                             </el-table>
-                        </div>
-                        <div class="card" style="margin-top:16px">
-                            <div class="card-title">折旧参数配置</div>
-                            <div class="settings-grid">
-                                <div class="setting-item">
-                                    <label>折旧月数</label>
-                                    <el-input-number :model-value="60" :min="12" :max="120" />
-                                </div>
-                                <div class="setting-item">
-                                    <label>残值率 (%)</label>
-                                    <el-input-number :model-value="30" :min="5" :max="80" />
-                                </div>
-                                <div class="setting-item">
-                                    <label>折旧方式</label>
-                                    <el-select model-value="直线法" style="width:200px">
-                                        <el-option label="直线法" value="直线法"></el-option>
-                                        <el-option label="双倍余额递减法" value="双倍余额递减法"></el-option>
-                                    </el-select>
-                                </div>
-                            </div>
                         </div>
                         <div class="card" style="margin-top: 16px">
                             <div class="card-title">角色与权限</div>
@@ -2463,14 +2464,19 @@
 
                 <el-divider content-position="left">客户信息</el-divider>
                 <el-row :gutter="16">
-                    <el-col :span="12">
+                    <el-col :span="8">
                         <el-form-item label="客户姓名" required>
                             <el-input v-model="newOrder.customer_name"></el-input>
                         </el-form-item>
                     </el-col>
-                    <el-col :span="12">
+                    <el-col :span="8">
                         <el-form-item label="客户电话" required>
                             <el-input v-model="newOrder.customer_phone"></el-input>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="8">
+                        <el-form-item label="身份证号">
+                            <el-input v-model="newOrder.customer_id_card" placeholder="选填，用于过户/合同" maxlength="18" show-word-limit></el-input>
                         </el-form-item>
                     </el-col>
                 </el-row>
@@ -2545,6 +2551,16 @@
                         <el-form-item label="厢型">
                             <el-select v-model="newOrder.vehicle_box_type" style="width:100%" placeholder="选择厢型" clearable>
                                 <el-option v-for="item in availableBoxOptions" :key="item" :label="item" :value="item"></el-option>
+                            </el-select>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
+                <el-row :gutter="16">
+                    <el-col :span="8">
+                        <el-form-item label="尾板">
+                            <el-select v-model="newOrder.tail_plate" style="width:100%" placeholder="选择尾板" clearable>
+                                <el-option label="有" value="有"></el-option>
+                                <el-option label="无" value="无"></el-option>
                             </el-select>
                         </el-form-item>
                     </el-col>
@@ -2763,16 +2779,8 @@
                     <el-col :span="12"><el-form-item label="最低贷款方案优惠"><el-input v-model="modelGuidanceForm.min_loan_plan" placeholder="如：5万12期免息，3000"></el-input></el-form-item></el-col>
                     <el-col :span="12"><el-form-item label="租赁方案"><el-input v-model="modelGuidanceForm.lease_plan" placeholder="如：押金1万，租金4500"></el-input></el-form-item></el-col>
                 </el-row>
-                <el-divider content-position="left">租赁/代售计算参数</el-divider>
                 <el-row :gutter="16">
-                    <el-col :span="6"><el-form-item label="租赁月供（元）"><el-input-number v-model="modelGuidanceForm.lease_installment_price" :min="0" :step="100" style="width:100%"></el-input-number></el-form-item></el-col>
-                    <el-col :span="6"><el-form-item label="租赁押金比例%"><el-input-number v-model="modelGuidanceForm.lease_deposit_ratio" :min="0" :max="100" :step="1" style="width:100%"></el-input-number></el-form-item></el-col>
-                    <el-col :span="6"><el-form-item label="租赁每期比例%"><el-input-number v-model="modelGuidanceForm.lease_repayment_ratio" :min="0" :max="100" :step="0.5" style="width:100%"></el-input-number></el-form-item></el-col>
-                    <el-col :span="6"><el-form-item label="代售首付比例%"><el-input-number v-model="modelGuidanceForm.sale_down_payment_ratio" :min="0" :max="100" :step="1" style="width:100%"></el-input-number></el-form-item></el-col>
-                </el-row>
-                <el-row :gutter="16">
-                    <el-col :span="6"><el-form-item label="代售每期比例%"><el-input-number v-model="modelGuidanceForm.sale_repayment_ratio" :min="0" :max="100" :step="0.5" style="width:100%"></el-input-number></el-form-item></el-col>
-                    <el-col :span="18"><el-form-item label="备注"><el-input v-model="modelGuidanceForm.remark" placeholder="如：2026年5月调价"></el-input></el-form-item></el-col>
+                    <el-col :span="24"><el-form-item label="备注"><el-input v-model="modelGuidanceForm.remark" placeholder="如：2026年5月调价"></el-input></el-form-item></el-col>
                 </el-row>
             </el-form>
             <template #footer>
@@ -3259,6 +3267,7 @@
                 invoice: _bw('开票'),
                 voidInv: _bw('作废'),
                 redInv: _bw('红冲'),
+                cancelInv: _bw('取消'),
             };
 
             const calcOpWidth = (rows, role, getter) => {
@@ -3295,11 +3304,11 @@
             };
             const opWidthVehicles = computed(() => calcOpWidth(filteredAssetRows, currentUser.value?.role, _vehicleBtns));
             const _invoiceBtns = (row, role) => {
-                if (role !== '财务') return [];
                 const b = [];
-                if (row.status === '待开票') b.push(BTN.invoice);
-                if (['待开票','已开票'].includes(row.status)) b.push(BTN.voidInv);
-                if (row.status === '已开票') b.push(BTN.redInv);
+                if (['运营','老板','财务'].includes(role) && ['待审批','待开票'].includes(row.status)) b.push(BTN.cancelInv);
+                if (role === '财务' && row.status === '待开票') b.push(BTN.invoice);
+                if (role === '财务' && row.status === '已开票') b.push(BTN.voidInv);
+                if (role === '财务' && row.status === '已开票') b.push(BTN.redInv);
                 return b;
             };
             const opWidthInvoices = computed(() => calcOpWidth(invoiceRequests, currentUser.value?.role, _invoiceBtns));
@@ -3406,7 +3415,7 @@
             const modelGuidancePrices = ref([]);
             const modelGuidanceSearch = ref('');
             const guidanceHistoryCache = ref({});
-            const PRICE_KIND_LABELS = { sale_total:'整车价', lease_installment:'租赁月供', lease_deposit_ratio:'押金比例', lease_repayment_ratio:'每期比例', sale_down_payment_ratio:'代售首付', sale_repayment_ratio:'代售每期' };
+            const PRICE_KIND_LABELS = { sale_total:'整车价', legacy:'指导价' };
             async function loadGuidanceHistory(carType) {
                 if (guidanceHistoryCache.value[carType]) return;
                 guidanceHistoryCache.value[carType] = [];
@@ -3420,9 +3429,7 @@
             );
             const modelGuidanceForm = reactive({
                 car_type: '', guidance_price: 0,
-                lease_deposit_ratio: 10, lease_repayment_ratio: 2.5,
-                sale_down_payment_ratio: 15, sale_repayment_ratio: 2.5,
-                lease_installment_price: 0, sale_total_price: 0, remark: '',
+                sale_total_price: 0, remark: '',
                 // Excel 字段
                 chassis_base_price_wan: 0, sale_total_price_wan: 0, landing_price_wan: 0,
                 interest_free_plan: '', rent_to_buy_plan: '', min_loan_plan: '', lease_plan: '',
@@ -3460,6 +3467,7 @@
                 payment_date: '',
                 customer_name: '',
                 customer_phone: '',
+                customer_id_card: '',
                 sales_mode: '经营租赁',
                 is_new: '新车',
                 vehicle_brand: '',
@@ -3475,6 +3483,7 @@
                 vehicle_box_type: '',
                 box_type_remark: '',
                 plate_number: '',
+                tail_plate: '',
                 lease_term: '',
                 cargo_length: '',
                 sale_total_price: 0,
@@ -3616,12 +3625,12 @@
                 risk: { title: '锁车管理', desc: '逾期预警与锁车审批管理', action: '' },
                 return: { title: '退车验工', desc: '退还车辆的验收检查与损伤评估（已并入审批中心）', action: '' },
                 profit: { title: '利润核算', desc: '车辆全生命周期盈亏分析', action: '' },
-                settings: { title: '系统设置', desc: '折旧参数、角色权限等系统配置', action: '' },
+                settings: { title: '系统设置', desc: '指导价、收款公司、角色权限等系统配置', action: '' },
             };
 
             const roles = [
                 { name: '老板', desc: '资产全局看板、动态指导价终审、锁车终审', bg: '#dbeafe', color: '#2563eb' },
-                { name: '财务', desc: '银行入账流水上传、报单激活、账单核销审核、折旧参数', bg: '#d1fae5', color: '#059669' },
+                { name: '财务', desc: '银行入账流水上传、报单激活、账单核销审核', bg: '#d1fae5', color: '#059669' },
                 { name: '运营/内勤', desc: '租期监控、还款提醒、厂家 Excel 导入、锁车执行', bg: '#fef3c7', color: '#d97706' },
                 { name: '销售', desc: '销售报单、客户跟进、退车发起、逾期催收', bg: '#ede9fe', color: '#7c3aed' },
                 { name: '车管', desc: 'Excel 上传入库、现场校验、退车验收', bg: '#fee2e2', color: '#ef4444' },
@@ -3905,20 +3914,14 @@
                 const map = {};
                 modelGuidancePrices.value.forEach(item => {
                     if (item.car_type) {
-                        map[item.car_type] = {
-                            lease: Number(item.lease_installment_price || 0),
-                            sale: Number(item.sale_total_price || 0),
-                            leaseDepositRatio: Number(item.lease_deposit_ratio || 0),
-                            leaseRepaymentRatio: Number(item.lease_repayment_ratio || 0),
-                            saleDownPaymentRatio: Number(item.sale_down_payment_ratio || 0),
-                            saleRepaymentRatio: Number(item.sale_repayment_ratio || 0),
-                        };
+                        const sale = Number(item.sale_total_price || 0);
+                        map[item.car_type] = { lease: sale, sale };
                     }
                 });
                 return map;
             });
             function guidancePriceForCarType(carType) {
-                return carType ? (guidancePriceMap.value[carType] || { lease: 0, sale: 0, leaseDepositRatio: 0, leaseRepaymentRatio: 0, saleDownPaymentRatio: 0, saleRepaymentRatio: 0 }) : { lease: 0, sale: 0, leaseDepositRatio: 0, leaseRepaymentRatio: 0, saleDownPaymentRatio: 0, saleRepaymentRatio: 0 };
+                return carType ? (guidancePriceMap.value[carType] || { lease: 0, sale: 0 }) : { lease: 0, sale: 0 };
             }
             const currentOrderGuidancePrice = computed(() => {
                 const byType = guidancePriceForCarType(newOrder.car_type);
@@ -3926,44 +3929,11 @@
                 if (byType[mode]) return byType[mode];
                 return 0;
             });
-            const currentOrderRatios = computed(() => {
-                const byType = guidancePriceForCarType(newOrder.car_type);
-                const base = Number(newOrder.sale_total_price || byType.sale || 0);
-                const upfront = Number(newOrder.deposit_amount || 0);
-                const installment = Number(newOrder.vehicle_rent_amount || 0);
-                const actualUpfront = base > 0 ? upfront / base : 0;
-                const actualInstallment = base > 0 ? installment / base : 0;
-                return { byType, base, actualUpfront, actualInstallment };
-            });
-            function ratioPercent(value) {
-                const n = Number(value || 0);
-                const ratio = n > 1 ? n / 100 : n;
-                return `${(ratio * 100).toFixed(2).replace(/\.00$/, '')}%`;
-            }
-            const currentOrderGuidanceLabel = computed(() => {
-                const r = currentOrderRatios.value;
-                if (newOrder.sales_mode === '经营租赁') {
-                    if (!r.byType.leaseDepositRatio && !r.byType.leaseRepaymentRatio) return '';
-                    return `租赁押金${ratioPercent(r.byType.leaseDepositRatio)} / 每期${ratioPercent(r.byType.leaseRepaymentRatio)}`;
-                }
-                if (['以租代购', '以租代售'].includes(newOrder.sales_mode)) {
-                    if (!r.byType.saleDownPaymentRatio && !r.byType.saleRepaymentRatio) return '';
-                    return `以租代售首付${ratioPercent(r.byType.saleDownPaymentRatio)} / 每期${ratioPercent(r.byType.saleRepaymentRatio)}`;
-                }
-                return '';
-            });
             const currentOrderQuotePrice = computed(() => newOrder.sales_mode === '经营租赁' ? Number(newOrder.vehicle_rent_amount || 0) : Number(newOrder.sale_total_price || 0));
             const currentOrderNeedsApproval = computed(() => {
-                const r = currentOrderRatios.value;
-                if (newOrder.sales_mode === '经营租赁') {
-                    return (r.byType.leaseDepositRatio && r.actualUpfront < r.byType.leaseDepositRatio)
-                        || (r.byType.leaseRepaymentRatio && r.actualInstallment < r.byType.leaseRepaymentRatio);
-                }
-                if (['以租代购', '以租代售'].includes(newOrder.sales_mode)) {
-                    return (r.byType.saleDownPaymentRatio && r.actualUpfront < r.byType.saleDownPaymentRatio)
-                        || (r.byType.saleRepaymentRatio && r.actualInstallment < r.byType.saleRepaymentRatio);
-                }
-                return false;
+                const quote = currentOrderQuotePrice.value;
+                const guidance = currentOrderGuidancePrice.value;
+                return guidance > 0 && quote > 0 && quote < guidance;
             });
 
             const currentSalesOrderCarConfig = computed(() =>
@@ -4171,7 +4141,21 @@
                 row.asset_status = assetLifecycleStatus(row);
                 return row;
             }));
-                        const filteredAssetRows = computed(() => assetRows.value);
+                        const filteredAssetRows = computed(() => {
+                            let list = assetRows.value;
+                            const q = (search.value || '').trim().toLowerCase();
+                            if (q) {
+                                list = list.filter(row =>
+                                    (row.vin && row.vin.toLowerCase().includes(q)) ||
+                                    (row.plate_number && row.plate_number.toLowerCase().includes(q)) ||
+                                    (row.car_type && row.car_type.toLowerCase().includes(q))
+                                );
+                            }
+                            if (assetFilter.value) list = list.filter(row => row.asset_status === assetFilter.value);
+                            if (carTypeFilter.value) list = list.filter(row => row.car_type === carTypeFilter.value);
+                            if (isNewFilter.value) list = list.filter(row => (row.is_new ? '新车' : '二手车') === isNewFilter.value);
+                            return list;
+                        });
             const assetTotalPages = computed(() => Math.max(1, Math.ceil(vehiclePageTotal.value / assetPageSize)));
             watch(assetPage, (p) => { if (p > 0) fetchVehiclePage(p); });
             watch(showDeleted, () => { if (currentPage.value === 'assets') fetchAll(); });
@@ -4336,6 +4320,7 @@
                 { value: 'initial_payment', label: '首次付款', roles: ['运营', '财务', '老板'] },
                 { value: 'lock_request', label: '锁车审批', roles: ['财务'] },
                 { value: 'return_stock', label: '退车入库', roles: ['销售', '车管', '运营', '财务', '老板'] },
+                { value: 'invoice', label: '发票审批', roles: ['运营', '财务', '老板'] },
             ];
             const visibleApprovalFilters = computed(() => {
                 if (!currentUser.value) return [];
@@ -4493,6 +4478,7 @@
                     sale_payment: '财务确认报单',
                     lock_request: '锁车审批',
                     return_stock: '退车入库',
+                    invoice: '发票审批',
                 }[type] || type;
             }
             function approvalTypeClass(type) {
@@ -4504,6 +4490,7 @@
                     sale_payment: 'badge-purple',
                     lock_request: 'badge-red',
                     return_stock: 'badge-orange',
+                    invoice: 'badge-blue',
                 }[type] || 'badge-gray';
             }
             function approvalVehicleLabel(item) {
@@ -4529,6 +4516,9 @@
                     '首付已驳回': 'badge-red',
                     '待出库': 'badge-purple',
                     '已出库': 'badge-green',
+                    '待开票': 'badge-orange',
+                    '已开票': 'badge-green',
+                    '已红冲': 'badge-gray',
                 }[status] || 'badge-gray';
             }
             function paymentCategoryClass(category) {
@@ -4617,7 +4607,7 @@
                 return `approval-card-${item.ref_type}-${item.ref_id}`;
             }
             async function focusApprovalItem(item) {
-                approvalFilter.value = '';  // 切到「全部」，确保首付不足等不在标签里的审批项也展示
+                approvalFilter.value = item.ref_type;  // 切到对应标签，确保该项可见
                 currentPage.value = 'approvals';
                 await Promise.all([fetchApprovals(), fetchApprovalReminders()]);
                 nextTick(() => {
@@ -4645,10 +4635,10 @@
                 const latest = missingGuidanceAlerts.value[0];
                 const latestKey = `${latest.id}_${missingGuidanceAlerts.value.length}`;
                 if (localStorage.getItem('jgy_last_missing_guidance_notice_key') === latestKey) return;
-                const content = `${missingGuidanceAlerts.value.length} 台新入库车辆未设置比例指导口径，请及时维护`;
+                const content = `${missingGuidanceAlerts.value.length} 台新入库车辆未设置指导价，请及时维护`;
                 if (ElementPlus.ElNotification) {
                     ElementPlus.ElNotification({
-                        title: '指导口径缺失提醒',
+                        title: '指导价缺失提醒',
                         message: content,
                         type: 'error',
                         duration: 10000,
@@ -4664,10 +4654,10 @@
                     .filter(item => item.updated_at)
                     .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))[0];
                 if (!latest || !latest.updated_at || latest.updated_at <= lastModelGuidanceNoticeAt.value) return;
-                const content = `${latest.car_type} 指导口径已更新：租赁押金${ratioPercent(latest.lease_deposit_ratio)}、租赁每期${ratioPercent(latest.lease_repayment_ratio)}、代售首付${ratioPercent(latest.sale_down_payment_ratio)}、代售每期${ratioPercent(latest.sale_repayment_ratio)}${latest.updated_by ? '，修改人：' + latest.updated_by : ''}`;
+                const content = `${latest.car_type} 指导价已更新：整车价${numberFormat(latest.sale_total_price || latest.guidance_price || 0)}${latest.updated_by ? '，修改人：' + latest.updated_by : ''}`;
                 if (ElementPlus.ElNotification) {
                     ElementPlus.ElNotification({
-                        title: '指导口径更新提示',
+                        title: '指导价更新提示',
                         message: content,
                         type: 'warning',
                         duration: 8000,
@@ -4682,11 +4672,6 @@
                 const existing = modelGuidancePrices.value.find(item => item.car_type === carType);
                 if (existing) {
                     modelGuidanceForm.guidance_price = Number(existing.guidance_price || 0);
-                    modelGuidanceForm.lease_deposit_ratio = Number(existing.lease_deposit_ratio || 0) * 100;
-                    modelGuidanceForm.lease_repayment_ratio = Number(existing.lease_repayment_ratio || 0) * 100;
-                    modelGuidanceForm.sale_down_payment_ratio = Number(existing.sale_down_payment_ratio || 0) * 100;
-                    modelGuidanceForm.sale_repayment_ratio = Number(existing.sale_repayment_ratio || 0) * 100;
-                    modelGuidanceForm.lease_installment_price = Number(existing.lease_installment_price || 0);
                     modelGuidanceForm.sale_total_price = Number(existing.sale_total_price || 0);
                     modelGuidanceForm.remark = existing.remark || '';
                 }
@@ -4695,11 +4680,6 @@
                 Object.assign(modelGuidanceForm, {
                     car_type: row.car_type,
                     guidance_price: Number(row.guidance_price || row.avg_vehicle_guidance_price || 0),
-                    lease_deposit_ratio: Number(row.lease_deposit_ratio || 0) * 100,
-                    lease_repayment_ratio: Number(row.lease_repayment_ratio || 0) * 100,
-                    sale_down_payment_ratio: Number(row.sale_down_payment_ratio || 0) * 100,
-                    sale_repayment_ratio: Number(row.sale_repayment_ratio || 0) * 100,
-                    lease_installment_price: Number(row.lease_installment_price || 0),
                     sale_total_price: Number(row.sale_total_price || 0),
                     remark: row.remark || '',
                     chassis_base_price_wan: row.chassis_base_price ? +(row.chassis_base_price / 10000).toFixed(2) : 0,
@@ -4719,31 +4699,22 @@
                 Object.assign(modelGuidanceForm, {
                     car_type: row.car_type || '',
                     guidance_price: Number(row.invoice_price || row.purchase_price || 0),
-                    lease_deposit_ratio: Number(row.lease_deposit_ratio || 0.10) * 100,
-                    lease_repayment_ratio: Number(row.lease_repayment_ratio || 0.025) * 100,
-                    sale_down_payment_ratio: Number(row.sale_down_payment_ratio || 0.15) * 100,
-                    sale_repayment_ratio: Number(row.sale_repayment_ratio || 0.025) * 100,
-                    lease_installment_price: 0,
                     sale_total_price: Number(row.invoice_price || row.purchase_price || 0),
-                    remark: `补充新入库车辆指导口径：${row.plate_number || row.vin || ''}`
+                    remark: `补充新入库车辆指导价：${row.plate_number || row.vin || ''}`
                 });
                 fetchModelGuidancePrices();
                 fetchMissingGuidanceAlerts();
+                showGuidanceEditDialog.value = true;
                 window.scrollTo({ top: 0, behavior: 'smooth' });
             }
             async function submitModelGuidancePrice() {
                 if (!modelGuidanceForm.car_type) return ElementPlus.ElMessage.warning('请选择或填写车型');
-                if (!modelGuidanceForm.lease_deposit_ratio || !modelGuidanceForm.lease_repayment_ratio || !modelGuidanceForm.sale_down_payment_ratio || !modelGuidanceForm.sale_repayment_ratio) return ElementPlus.ElMessage.warning('请填写大于0的四项比例口径');
                 const payload = {
                     ...modelGuidanceForm,
                     guidance_price: Number(modelGuidanceForm.sale_total_price || modelGuidanceForm.guidance_price || 0),
                     sale_total_price: modelGuidanceForm.sale_total_price_wan * 10000 || modelGuidanceForm.sale_total_price,
                     chassis_base_price: (modelGuidanceForm.chassis_base_price_wan || 0) * 10000,
                     landing_price: (modelGuidanceForm.landing_price_wan || 0) * 10000,
-                    lease_deposit_ratio: Number(modelGuidanceForm.lease_deposit_ratio || 0) / 100,
-                    lease_repayment_ratio: Number(modelGuidanceForm.lease_repayment_ratio || 0) / 100,
-                    sale_down_payment_ratio: Number(modelGuidanceForm.sale_down_payment_ratio || 0) / 100,
-                    sale_repayment_ratio: Number(modelGuidanceForm.sale_repayment_ratio || 0) / 100,
                 };
                 const res = await fetch('/api/model-guidance-prices', {
                     method: 'POST',
@@ -4754,7 +4725,7 @@
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '车型指导口径保存失败');
                 ElementPlus.ElMessage.success(data.message || '车型指导口径已保存');
                 showGuidanceEditDialog.value = false;
-                Object.assign(modelGuidanceForm, { car_type: '', guidance_price: 0, lease_deposit_ratio: 10, lease_repayment_ratio: 2.5, sale_down_payment_ratio: 15, sale_repayment_ratio: 2.5, lease_installment_price: 0, sale_total_price: 0, remark: '' });
+                Object.assign(modelGuidanceForm, { car_type: '', guidance_price: 0, sale_total_price: 0, remark: '' });
                 fetchModelGuidancePrices();
                 fetchMissingGuidanceAlerts();
                 fetchAll();
@@ -4841,6 +4812,19 @@
                     issueInvoiceForm.invoice_file_path = res.url;
                     ElementPlus.ElMessage.success('发票文件上传成功');
                 }
+            }
+            async function cancelInvoice(row) {
+                const { value } = await ElementPlus.ElMessageBox.prompt('请输入取消原因', '取消发票申请', { confirmButtonText: '确认取消', cancelButtonText: '再想想' }).catch(() => ({ value: null }));
+                if (!value) return;
+                const res = await fetch(`/api/invoice-requests/${row.id}/cancel`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: value })
+                });
+                const data = await res.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '取消失败');
+                ElementPlus.ElMessage.success(data.message || '发票申请已取消');
+                fetchInvoices();
+                fetchApprovals();
             }
             async function voidInvoice(row) {
                 const { value } = await ElementPlus.ElMessageBox.prompt('请输入作废原因', '发票作废', { confirmButtonText: '作废', cancelButtonText: '取消' }).catch(() => ({ value: null }));
@@ -5207,11 +5191,11 @@
             }
             function resetOrderForm() {
                 Object.assign(newOrder, {
-                    payment_date: '', customer_name: '', customer_phone: '', sales_mode: '经营租赁',
+                    payment_date: '', customer_name: '', customer_phone: '', customer_id_card: '', sales_mode: '经营租赁',
                     is_new: '新车', vehicle_brand: '', lease_start_date: '',
                     vin: '', car_type: '', vehicle_category: '', vehicle_cab: '', vehicle_engine_battery: '',
                     vehicle_power_battery: '', vehicle_gearbox: '', vehicle_color: '', vehicle_box_type: '',
-                    box_type_remark: '', plate_number: '', lease_term: '', cargo_length: '',
+                    box_type_remark: '', plate_number: '', tail_plate: '', lease_term: '', cargo_length: '',
                     sale_total_price: 0, payment_category: '', car_purchase_amount: 0, vehicle_rent_amount: 0,
                     receiving_company: '陕西金聚源汽车服务有限公司', wechat_interest: 0, wechat_registration_fee: 0,
                     wechat_purchase_tax: 0, sales_advisor: '', full_package: false, wechat_private_fee: 0,
@@ -5224,6 +5208,7 @@
                     payment_date: row.payment_date || '',
                     customer_name: row.customer_name || '',
                     customer_phone: row.customer_phone || '',
+                    customer_id_card: row.customer_id_card || '',
                     sales_mode: row.sales_mode || '经营租赁',
                     is_new: row.is_new || '新车',
                     vehicle_brand: row.vehicle_brand || '',
@@ -5239,6 +5224,7 @@
                     vehicle_box_type: row.vehicle_box_type || '',
                     box_type_remark: row.box_type_remark || '',
                     plate_number: row.plate_number || '',
+                    tail_plate: row.tail_plate || '',
                     lease_term: normalizeLeaseTerm(row.lease_term),
                     cargo_length: row.cargo_length || '',
                     sale_total_price: Number(row.sale_total_price || 0),
@@ -6325,7 +6311,7 @@
                 approvalList, approvalReminders, approvalFilter, visibleApprovalFilters, lockRequests,
                 missingGuidanceAlerts,
                 modelGuidancePrices, modelGuidanceSearch, filteredModelGuidancePrices, modelGuidanceForm, modelGuidanceCarTypeOptions, guidanceHistoryCache, PRICE_KIND_LABELS, loadGuidanceHistory,
-                currentOrderGuidancePrice, currentOrderGuidanceLabel, currentOrderQuotePrice, currentOrderNeedsApproval, guidancePriceForCarType, ratioPercent,
+                currentOrderGuidancePrice, currentOrderQuotePrice, currentOrderNeedsApproval, guidancePriceForCarType,
                 fetchApprovals, fetchApprovalReminders, fetchLockRequests, fetchFeeItems,
                 doApprove, doReject, doResubmit, doDeliver,
                 // UI
@@ -6350,7 +6336,7 @@
                 onInvoiceUploadSuccess, beforeInvoiceUpload, onContractFileSuccess, beforeContractFileUpload,
                 toggleReconGroup, onReconExpandChange, reconGroupStatusClass, reconGroupStatusText, openVerifyDialog, submitVerify,
                 submitReceivingCompany, editReceivingCompany, submitBlacklist,
-                openInvoiceDialog, submitInvoiceRequest, issueInvoice, voidInvoice, redInvoice,
+                openInvoiceDialog, submitInvoiceRequest, issueInvoice, voidInvoice, redInvoice, cancelInvoice,
                 showIssueInvoiceDialog, issueInvoiceForm, submitIssueInvoice, onInvoiceFileUpload,
                 openTransferDialog, submitOwnershipTransfer,
                 openRebateDialog, submitVehicleRebate, startRepair, completeRepair,
@@ -6359,7 +6345,12 @@
         }
     });
     for (const [k, c] of Object.entries(ElementPlusIconsVue)) { app.component(k, c); }
-    app.use(ElementPlus);
+    // Element Plus 全局中文：日期选择器、分页等组件显示中文
+    if (window.ElementPlusLocaleZhCn) {
+        app.use(ElementPlus, { locale: window.ElementPlusLocaleZhCn });
+    } else {
+        app.use(ElementPlus);
+    }
     app.mount('#app');
     </script>
 </body>
