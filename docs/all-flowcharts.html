@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>金聚源车辆管理系统 - 全部流程图</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f7fa; padding: 24px; color: #1f2937;
+  }
+  .header {
+    text-align: center; padding: 24px 0 16px;
+    border-bottom: 2px solid #2563eb; margin-bottom: 32px;
+  }
+  .header h1 { font-size: 26px; color: #111; }
+  .header p { font-size: 14px; color: #6b7280; margin-top: 6px; }
+  .toc { max-width: 600px; margin: 0 auto 32px; background: #fff; border-radius: 12px; padding: 20px 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  .toc h2 { font-size: 16px; color: #374151; margin-bottom: 12px; }
+  .toc a { display: block; padding: 6px 0; color: #2563eb; text-decoration: none; font-size: 14px; }
+  .toc a:hover { color: #1d4ed8; text-decoration: underline; }
+  .toc a::before { content: "▸ "; }
+  .flowchart-section {
+    background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    margin-bottom: 32px; overflow: hidden;
+  }
+  .flowchart-section .title {
+    font-size: 18px; font-weight: 600; padding: 20px 24px 4px;
+    border-bottom: 1px solid #e5e7eb;
+  }
+  .flowchart-section .desc { font-size: 13px; color: #6b7280; padding: 4px 24px 16px; }
+  .flowchart-section .mermaid-container {
+    padding: 20px; overflow-x: auto;
+  }
+  .flowchart-section .mermaid-container svg { max-width: 100%; height: auto; }
+  .toolbar {
+    position: fixed; top: 16px; right: 24px; z-index: 100;
+    display: flex; gap: 8px;
+  }
+  .toolbar button {
+    padding: 8px 16px; border: none; border-radius: 8px;
+    background: #2563eb; color: #fff; font-size: 13px;
+    cursor: pointer; box-shadow: 0 2px 8px rgba(37,99,235,0.3);
+    transition: all .15s;
+  }
+  .toolbar button:hover { background: #1d4ed8; transform: translateY(-1px); }
+  .toolbar button.secondary { background: #6b7280; box-shadow: 0 2px 8px rgba(107,114,128,0.3); }
+  .toolbar button.secondary:hover { background: #4b5563; }
+  @media print {
+    body { background: #fff; padding: 0; }
+    .toolbar { display: none; }
+    .flowchart-section { box-shadow: none; border: 1px solid #e5e7eb; break-inside: avoid; }
+    .header { border-bottom-color: #000; }
+  }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <button onclick="window.print()">🖨️ 打印 / 导出 PDF</button>
+  <button class="secondary" onclick="expandAll()">展开全部</button>
+</div>
+
+<div class="header">
+  <h1>🚛 金聚源车辆管理系统 · 全部业务流程</h1>
+  <p>流程图基于 Mermaid 绘制 — 可直接打印/导出 PDF / 截图</p>
+</div>
+
+<div class="toc">
+  <h2>📋 目录</h2>
+  <a href="#flow-main">1. 全流程总图（6.2 主线流程）</a>
+  <a href="#flow-global">2. 全局视角流程（老板端全景）</a>
+  <a href="#flow-lease-to-sale">3. 以租代售流程</a>
+  <a href="#flow-rental">4. 经营租赁流程</a>
+  <a href="#flow-sale">5. 整车销售流程</a>
+</div>
+
+<div class="flowchart-section" id="flow-main">
+  <div class="title">1. 全流程总图（6.2 主线流程）</div>
+  <div class="desc">从入库→报单→合同→出库→还款→退车/过户的完整业务链路</div>
+  <div class="mermaid-container">
+    <pre class="mermaid">
+flowchart TD
+    A["运营：上传新车 Excel"] --> B["系统读取 Excel 车辆数据"]
+    B --> C{"按车架号与后台所有车辆比对"}
+    C -- "车架号已存在" --> D["跳过重复车辆<br/>不重复入库，记录导入结果"]
+    C -- "车架号不存在" --> E["写入车辆资产<br/>vehicles.status=在库"]
+    D --> F["导入完成：展示新增/重复/失败明细"]
+    E --> F
+
+    F --> G["销售：保存草稿或提交报单"]
+    G --> H{"提交报单？"}
+    H -- "草稿" --> I["sales_orders.order_status=草稿<br/>不锁车，7天有效"]
+    H -- "提交" --> J["校验车辆在库、无进行中报单、客户黑名单"]
+    J --> K{"业务模式是否为整车销售？"}
+    K -- "是：整车销售不做指导价确认" --> N
+    K -- "否：租赁 / 以租代售" --> K1{"首付/押金比例和每期还款比例<br/>是否均不低于老板指导口径？"}
+    K1 -- "否：有一项低于" --> L["老板：价格特批"]
+    L -- "驳回" --> M["报单已作废<br/>车辆保持/恢复在库"]
+    L -- "通过" --> N["财务确认报单"]
+    K1 -- "是：均不低于" --> N
+
+    N --> O["财务直接确认租赁/以租代售/销售报单<br/>不再上传车场/厂家分期表<br/>不再做价格比对"]
+    O --> P["车辆锁定<br/>vehicles.status=报单锁定中<br/>sales_orders.order_status=已激活"]
+    P --> Q["运营上传线下签署合同"]
+    Q --> R["运营端：上传客户付款截图"]
+    R --> S["财务上传公司收款清单<br/>核对实际到账金额"]
+    S --> T{"首次付款是否足额？"}
+
+    T -- "足额" --> U["财务确认首次付款无误"]
+    U --> V["合同进入待出库"]
+
+    T -- "不足额" --> W["销售在首期对账单上报实收金额<br/>填写不足原因和剩余金额承诺归还时间"]
+    W --> X["不足部分挂账为应收<br/>承诺期内不按万5计滞纳金"]
+    X --> Y["老板审批首次付款不足出库"]
+    Y -- "同意" --> Z["车辆继续锁定<br/>不足金额保留为应收<br/>允许出库"]
+    Y -- "不同意" --> AA["老板发起退款"]
+    AA --> AB["财务执行退款流程"]
+    AB --> AC["本单结束<br/>报单/合同终止，车辆释放回在库"]
+    Z --> V
+
+    V --> AD["车管上传出库资料"]
+    AD --> AE["车管确认出库"]
+    AE --> AF{"合同类型"}
+    AF -- "租赁" --> AG["车辆=租赁中<br/>进入每期还款/催收/退车"]
+    AF -- "以租代售" --> AH["车辆=以租代售<br/>进入每期还款/过户"]
+    AF -- "销售" --> AI["车辆=已售<br/>合同=已结清"]
+
+    AG --> AJ["H1：每日批处理<br/>临近还款/还款日/逾期N日"]
+    AH --> AJ
+    AJ --> AK["每期付款：销售/运营登记客户实付<br/>财务上传收款清单并核销"]
+    AK --> AL{"本期实付与应还金额关系"}
+    AL -- "等额" --> AM["本期已还款"]
+    AL -- "多还" --> AN["沿用原多还款规则<br/>按确认期数预抵/冲抵后续账单"]
+    AL -- "少还" --> AO["实付金额记为本期已收<br/>差额挂账为本期应收"]
+    AO --> AP["差额自逾期日起按万5/日统计滞纳金"]
+    AP --> AQ["滞纳金仅累计记录<br/>本车流程结束后由销售发起是否收取/减免"]
+    AM --> AR{"是否结清？"}
+    AN --> AR
+    AQ --> AR
+
+    AR -- "租赁末期结清" --> AS["销售发起退车<br/>同时处理累计滞纳金是否收取"]
+    AR -- "以租代售全部结清" --> AT["生成或发起过户单<br/>同时处理累计滞纳金是否收取"]
+    AR -- "未结清" --> AJ
+
+    AS --> AU["车管验车"]
+    AU --> AV["运营查数据"]
+    AV --> AW["财务复核"]
+    AW --> AX["老板领导审批"]
+    AX --> AY["财务出款"]
+    AY --> AZ["车辆回库或待维修<br/>合同已退车/已结清"]
+
+    AT --> BA["运营登记过户"]
+    BA --> BB["车辆=已售/已过户<br/>合同=已结清"]
+    </pre>
+  </div>
+</div>
+
+<div class="flowchart-section" id="flow-global">
+  <div class="title">2. 全局视角流程（老板端全景）</div>
+  <div class="desc">老板端查看全过程，维护指导比例口径，审批关键例外</div>
+  <div class="mermaid-container">
+    <pre class="mermaid">
+flowchart TD
+    A["运营端：上传新车 Excel"] --> B["系统解析车辆清单"]
+    B --> C{"逐行按车架号 VIN<br/>与后台全部车辆比对"}
+    C -- "VIN 已存在" --> D["判定为重复车辆<br/>不重复入库"]
+    C -- "VIN 不存在" --> E["新增车辆资产<br/>状态=在库"]
+    D --> F["导入结果汇总<br/>新增/重复/失败明细"]
+    E --> F
+
+    G["老板端：维护指导比例口径"] --> H["系统记录旧口径/新口径/修改人/生效时间"]
+    H --> I["新报单按最新比例口径判断"]
+    H --> J["历史报单和合同口径快照不变"]
+
+    K["销售端：新建报单"] --> L{"业务模式是否为整车销售？"}
+    L -- "是：整车销售不做指导价确认" --> N["财务端：直接确认报单"]
+    L -- "否：租赁 / 以租代售" --> M["系统读取当前老板指导比例口径"]
+    M --> M1{"首付/押金比例和每期还款比例<br/>是否均不低于指导口径？"}
+    M1 -- "是：均不低于" --> N
+    M1 -- "否：有一项低于" --> O["老板端：价格特批审批"]
+    O --> P{"老板是否通过？"}
+    P -- "驳回" --> Q["报单终止/作废<br/>车辆保持或恢复在库"]
+    P -- "通过" --> N
+    N --> R["车辆锁定<br/>报单激活"]
+    R --> S["运营上传线下合同"]
+    S --> T["运营发起首次付款"]
+    T --> U["财务对账公司收款清单"]
+    U --> V{"首次付款是否足额？"}
+    V -- "足额" --> W["允许进入出库"]
+    V -- "不足额" --> X["销售说明不足原因和承诺归还时间"]
+    X --> Y["老板审批是否同意不足额出库"]
+    Y -- "同意" --> W
+    Y -- "不同意" --> Z["老板发起退款<br/>财务退款，本单结束"]
+
+    AA["老板端：全过程查看"] --> AB["可查看入库导入、报单、比例口径、审批、合同、首付、出库、对账、退车、过户、利润"]
+    AA --> AC["只审批比例低于指导口径、首次付款不足出库、退车领导审批等关键例外"]
+    </pre>
+  </div>
+</div>
+
+<div class="flowchart-section" id="flow-lease-to-sale">
+  <div class="title">3. 以租代售流程</div>
+  <div class="desc">以租代售/以租代购模式下从入库到过户的全生命周期</div>
+  <div class="mermaid-container">
+    <pre class="mermaid">
+flowchart TD
+    A["运营端：上传新车 Excel"] --> B["系统按车架号 VIN 去重入库"]
+    B --> C["车辆进入车库 / 状态：在库"]
+    C --> D["销售端：销售报单 / 新建报单"]
+    D --> E["选择在库车辆"]
+    E --> F["销售方式：以租代售 / 以租代购"]
+    F --> G["填写客户、首付款、每期还款、期数、起租日"]
+    G --> H{"首付款比例和每期还款比例<br/>是否均不低于老板以租代售指导口径？"}
+    H -- "否：有一项低于" --> I["老板端：价格特批"]
+    I --> J{"老板审批结果"}
+    J -- "驳回" --> K["流程结束：报单作废<br/>车辆保持/恢复在库"]
+    J -- "通过" --> L["财务端：确认以租代售报单"]
+    H -- "是：均不低于" --> L
+    L --> M["财务直接确认<br/>不上传车场/厂家分期表<br/>不做分期表价格比对"]
+    M --> N["车辆锁定<br/>报单状态：已激活"]
+    N --> O["运营端：上传线下以租代售合同"]
+    O --> P["合同状态：待首付款"]
+    P --> Q["运营端：发起首次付款<br/>以租代售口径：首付款"]
+    Q --> R["运营端：上传客户付款截图"]
+    R --> S["财务端：上传公司收款清单<br/>核对实际到账"]
+    S --> T{"首次付款是否足额？"}
+    T -- "足额" --> U["财务确认无误"]
+    U --> V["合同状态：待出库"]
+    T -- "不足额" --> W["销售在首期对账单上报实收金额<br/>备注不足原因和剩余金额承诺归还时间"]
+    W --> X["不足部分挂账为应收<br/>承诺期内不记录万5滞纳金"]
+    X --> Y["老板审批不足额出库"]
+    Y -- "同意" --> Z["车辆继续锁定<br/>允许出库"]
+    Z --> V
+    Y -- "不同意" --> AA["老板发起退款"]
+    AA --> AB["财务执行退款流程"]
+    AB --> AC["本单结束<br/>报单/合同终止，车辆释放回在库"]
+    V --> AD["车管端：上传出库照片/出库单"]
+    AD --> AE["车管点击：确认出库"]
+    AE --> AF["车辆状态：以租代售"]
+
+    AF --> AG["运营/销售：每期发起还款对账"]
+    AG --> AH["财务端：核对公司收款清单、流水号"]
+    AH --> AI{"本期实付与应还金额关系"}
+    AI -- "等额" --> AJ["本期账单：已还款"]
+    AI -- "多还" --> AK["沿用原多还款规则<br/>按确认期数预抵/冲抵后续账单"]
+    AI -- "少还" --> AL["实付金额记录为本期还款<br/>差额挂账为本期应收"]
+    AL --> AM["差额按万5/日统计滞纳金"]
+    AM --> AN["滞纳金仅累计记录<br/>本车流程结束后由销售发起是否收取/减免"]
+    AJ --> AO{"是否全部期数还清？"}
+    AK --> AO
+    AN --> AO
+    AO -- "否" --> AG
+    AO -- "是" --> AP["系统标记合同结清 / 待过户<br/>同步处理累计滞纳金是否收取"]
+    AP --> AQ["运营端：确认尾款和费用全部结清"]
+    AQ --> AR["财务端：复核全部回款"]
+    AR --> AS["运营端：登记过户资料"]
+    AS --> AT["合同状态：已结清"]
+    AT --> AU["车辆状态：已售/已过户"]
+    AU --> AV["以租代售流程结束"]
+    AW["老板端"] --> AX["查看全过程：入库、报单、审批、合同、首付、出库、对账、过户、利润"]
+    </pre>
+  </div>
+</div>
+
+<div class="flowchart-section" id="flow-rental">
+  <div class="title">4. 经营租赁流程</div>
+  <div class="desc">经营租赁模式下从入库到还款到退车验收的全生命周期</div>
+  <div class="mermaid-container">
+    <pre class="mermaid">
+flowchart TD
+    A["运营端：上传新车 Excel"] --> B["系统按车架号 VIN 去重入库"]
+    B --> C["车辆进入车库 / 状态：在库"]
+    C --> D["销售端：销售报单 / 新建报单"]
+    D --> E["选择在库车辆"]
+    E --> F["销售方式：经营租赁"]
+    F --> G["填写客户、租期、每期还款、押金、起租日、收款方案"]
+    G --> H{"押金比例和每期还款比例<br/>是否均不低于老板租赁指导口径？"}
+    H -- "否：有一项低于" --> I["老板端：价格特批"]
+    I --> J{"老板审批结果"}
+    J -- "驳回" --> K["流程结束：报单作废<br/>车辆保持/恢复在库"]
+    J -- "通过" --> L["财务端：确认租赁报单"]
+    H -- "是：均不低于" --> L
+    L --> M["财务直接确认<br/>不上传车场/厂家分期表<br/>不做分期表价格比对"]
+    M --> N["车辆锁定<br/>报单状态：已激活"]
+    N --> O["运营端：上传线下租赁合同"]
+    O --> P["合同状态：待首付款"]
+    P --> Q["运营端：发起首次付款<br/>租赁口径：押金 + 首期租金"]
+    Q --> R["运营端：上传客户付款截图"]
+    R --> S["财务端：上传公司收款清单<br/>核对实际到账"]
+    S --> T{"首次付款是否足额？"}
+    T -- "足额" --> U["财务确认无误"]
+    U --> V["合同状态：待出库"]
+    T -- "不足额" --> W["销售在首期对账单上报实收金额<br/>备注不足原因和剩余金额承诺归还时间"]
+    W --> X["不足部分挂账为应收<br/>承诺期内不记录万5滞纳金"]
+    X --> Y["老板审批不足额出库"]
+    Y -- "同意" --> Z["车辆继续锁定<br/>允许出库"]
+    Z --> V
+    Y -- "不同意" --> AA["老板发起退款"]
+    AA --> AB["财务执行退款流程"]
+    AB --> AC["本单结束<br/>报单/合同终止，车辆释放回在库"]
+    V --> AD["车管端：上传出库照片/出库单"]
+    AD --> AE["车管点击：确认出库"]
+    AE --> AF["车辆状态：租赁中"]
+
+    AF --> AG["运营/销售：每期发起还款对账"]
+    AG --> AH["财务端：核对公司收款清单、流水号"]
+    AH --> AI{"本期实付与应还金额关系"}
+    AI -- "等额" --> AJ["本期账单：已还款"]
+    AI -- "多还" --> AK["沿用原多还款规则<br/>按确认期数预抵/冲抵后续账单"]
+    AI -- "少还" --> AL["实付金额记录为本期还款<br/>差额挂账为本期应收"]
+    AL --> AM["差额按万5/日统计滞纳金"]
+    AM --> AN["滞纳金仅累计记录<br/>本车流程结束后由销售发起是否收取/减免"]
+    AJ --> AO{"是否还有未还期数？"}
+    AK --> AO
+    AN --> AO
+    AO -- "有" --> AG
+    AO -- "无/租期结束" --> AP["销售端：发起退车<br/>同步处理累计滞纳金是否收取"]
+    AP --> AQ["系统自动带出车辆、客户、合同、银行卡信息"]
+    AQ --> AR["退车状态：待车管验车"]
+    AR --> AS["车管填写验车信息、工具、损伤、照片"]
+    AS --> AT["退车状态：待运营填写"]
+    AT --> AU["运营填写租金、违章、ETC、保养、事故等数据"]
+    AU --> AV["退车状态：待财务复核"]
+    AV --> AW["财务复核扣款、押金、退款金额、退款账户"]
+    AW --> AX["老板端：领导审批"]
+    AX --> AY["财务端：执行出款"]
+    AY --> AZ["车管/系统：车辆回库或待维修"]
+    AZ --> BA["租赁流程结束"]
+    BB["老板端"] --> BC["查看全过程：入库、报单、审批、合同、首付、出库、还款、退车、利润"]
+    </pre>
+  </div>
+</div>
+
+<div class="flowchart-section" id="flow-sale">
+  <div class="title">5. 整车销售流程</div>
+  <div class="desc">整车销售模式下从入库到出库的完整流程（不做指导价确认）</div>
+  <div class="mermaid-container">
+    <pre class="mermaid">
+flowchart TD
+    A["运营端：上传新车 Excel"] --> B["系统按车架号 VIN 去重入库"]
+    B --> C["车辆进入车库 / 状态：在库"]
+    C --> D["销售端：销售报单 / 新建报单"]
+    D --> E["选择在库车辆"]
+    E --> F["销售方式：整车销售"]
+    F --> G["填写客户、成交价、定金/首付款、收款信息"]
+    G --> H["整车销售不做指导价确认"]
+    H --> L["财务端：确认销售报单"]
+    L --> M["财务直接确认<br/>不上传车场/厂家分期表<br/>不做分期表价格比对"]
+    M --> N["车辆锁定<br/>报单状态：已激活"]
+    N --> O["运营端：上传线下卖车合同"]
+    O --> P["合同状态：待首付款/待收款"]
+    P --> Q["运营端：发起首次付款或整车收款"]
+    Q --> R["运营端：上传客户付款截图"]
+    R --> S["财务端：上传公司收款清单<br/>核对实际到账"]
+    S --> T{"首次付款/约定收款是否足额？"}
+    T -- "足额" --> U["财务确认无误"]
+    U --> V["合同状态：待出库"]
+    T -- "不足额" --> W["销售在首期对账单上报实收金额<br/>备注不足原因和剩余金额承诺归还时间"]
+    W --> X["不足部分挂账为应收<br/>承诺期内不记录万5滞纳金"]
+    X --> Y["老板审批不足额出库"]
+    Y -- "同意" --> Z["车辆继续锁定<br/>允许出库"]
+    Z --> V
+    Y -- "不同意" --> AA["老板发起退款"]
+    AA --> AB["财务执行退款流程"]
+    AB --> AC["本单结束<br/>报单/合同终止，车辆释放回在库"]
+    V --> AD["车管端：上传出库照片/出库单"]
+    AD --> AE["车管点击：确认出库"]
+    AE --> AF["车辆状态：已售"]
+    AF --> AG["卖车流程结束"]
+    AH["老板端"] --> AI["查看全过程：入库、报单、审批、合同、收款、出库、利润"]
+    </pre>
+  </div>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'default',
+    flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' },
+    securityLevel: 'loose',
+  });
+
+  function expandAll() {
+    document.querySelectorAll('.mermaid-container svg').forEach(svg => {
+      svg.style.maxWidth = 'none';
+    });
+  }
+</script>
+</body>
+</html>
