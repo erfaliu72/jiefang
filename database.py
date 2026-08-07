@@ -201,24 +201,17 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         vin TEXT UNIQUE NOT NULL,
         plate_number TEXT,
-        engine_number TEXT,
         company TEXT,
         car_type TEXT,
         vehicle_category TEXT,
-        vehicle_cab TEXT,
         vehicle_engine_battery TEXT,
         vehicle_power_battery TEXT,
-        vehicle_gearbox TEXT,
         vehicle_color TEXT,
         vehicle_box_type TEXT,
         box_type_remark TEXT,
-        is_new TEXT DEFAULT '新车',
-        invoice_date TEXT,
-        invoice_price REAL DEFAULT 0,
         purchase_price REAL DEFAULT 0,
         tax_rate REAL DEFAULT 0.13,
         estimated_residual_value REAL DEFAULT 0,
-        guidance_price REAL DEFAULT 0,
         depreciation_months INTEGER DEFAULT 60,
         insurance_expiry_date TEXT,
         annual_review_date TEXT,
@@ -317,7 +310,8 @@ def init_db():
     c.execute('''
     CREATE TABLE IF NOT EXISTS model_guidance_prices (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        car_type TEXT UNIQUE NOT NULL,
+        car_type TEXT NOT NULL,
+        is_new TEXT DEFAULT '新车',
         guidance_price REAL DEFAULT 0,
         lease_installment_price REAL DEFAULT 0,
         sale_total_price REAL DEFAULT 0,
@@ -923,6 +917,52 @@ def init_db():
     c.execute('CREATE INDEX IF NOT EXISTS idx_receivables_status ON receivables(status)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_receivables_repayment ON receivables(repayment_id)')
 
+    # ====== 以租代售金融方案（老板按车型维护 n 种：首付 + 每期价格 + 期数）======
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS finance_plans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        car_type TEXT NOT NULL,
+        plan_name TEXT,
+        down_payment REAL DEFAULT 0,
+        period_price REAL DEFAULT 0,
+        periods INTEGER DEFAULT 0,
+        tail_plate_price REAL DEFAULT 0,
+        status TEXT DEFAULT '启用',
+        sort_order INTEGER DEFAULT 0,
+        remark TEXT,
+        created_by TEXT,
+        updated_by TEXT,
+        updated_at TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_finance_plans_car_type ON finance_plans(car_type, status)')
+
+    # ====== 报单驳回退款（老板驳回后发起，财务执行打款）======
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS order_refunds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sales_order_id INTEGER NOT NULL,
+        vehicle_id INTEGER,
+        contract_id INTEGER,
+        refund_amount REAL DEFAULT 0,
+        refund_serial TEXT,
+        refund_paid_amount REAL DEFAULT 0,
+        status TEXT DEFAULT '待退款',
+        initiated_by TEXT,
+        initiated_at TEXT,
+        executed_by TEXT,
+        executed_at TEXT,
+        customer_name TEXT,
+        customer_phone TEXT,
+        bank_name TEXT,
+        bank_card_no TEXT,
+        remark TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_order_refunds_order ON order_refunds(sales_order_id, status)')
+
     # === 安全添加新列（如果表已存在但缺少新字段）===
     safe_alter_columns = [
         ("contracts", "snapshot_guidance_price", "REAL DEFAULT 0"),
@@ -954,12 +994,9 @@ def init_db():
         ("contracts", "early_settled_at", "TEXT"),
         ("contracts", "early_settled_by", "TEXT"),
         ("vehicles", "customer_name", "TEXT"),
-        ("vehicles", "engine_number", "TEXT"),
         ("vehicles", "vehicle_category", "TEXT"),
-        ("vehicles", "vehicle_cab", "TEXT"),
         ("vehicles", "vehicle_engine_battery", "TEXT"),
         ("vehicles", "vehicle_power_battery", "TEXT"),
-        ("vehicles", "vehicle_gearbox", "TEXT"),
         ("vehicles", "vehicle_color", "TEXT"),
         ("vehicles", "vehicle_box_type", "TEXT"),
         ("vehicles", "box_type_remark", "TEXT"),
@@ -967,7 +1004,6 @@ def init_db():
         ("vehicles", "purchase_price", "REAL DEFAULT 0"),
         ("vehicles", "tax_rate", "REAL DEFAULT 0.13"),
         ("vehicles", "estimated_residual_value", "REAL DEFAULT 0"),
-        ("vehicles", "guidance_price", "REAL DEFAULT 0"),
         ("vehicles", "depreciation_months", "INTEGER DEFAULT 60"),
         ("vehicles", "insurance_expiry_date", "TEXT"),
         ("vehicles", "annual_review_date", "TEXT"),
@@ -1050,6 +1086,7 @@ def init_db():
         ("model_guidance_prices", "rent_to_buy_plan", "TEXT"),
         ("model_guidance_prices", "min_loan_plan", "TEXT"),
         ("model_guidance_prices", "lease_plan", "TEXT"),
+        ("model_guidance_prices", "is_new", "TEXT DEFAULT '新车'"),
         ("model_guidance_price_history", "price_kind", "TEXT DEFAULT 'legacy'"),
         ("contract_initial_payments", "received_amount", "REAL DEFAULT 0"),
         ("contract_initial_payments", "shortage_amount", "REAL DEFAULT 0"),
@@ -1088,92 +1125,36 @@ def init_db():
         ("return_inspections", "needs_repair", "INTEGER DEFAULT 0"),
         ("return_inspections", "repair_reason", "TEXT"),
         # === 新车 Excel 批量上传入库：经销商买断库存表的扩展维度列 ===
-        ("vehicles", "settlement_price", "REAL DEFAULT 0"),      # 结算价格
-        ("vehicles", "stock_in_date", "TEXT"),                   # 入库日期
-        ("vehicles", "certificate_no", "TEXT"),                  # 合格证号
-        ("vehicles", "product_code", "TEXT"),                    # 产品代码
-        ("vehicles", "product_name", "TEXT"),                    # 产品名称
-        ("vehicles", "announce_model", "TEXT"),                  # 公告车型
         ("vehicles", "tech_route", "TEXT"),                      # 技术路线
-        ("vehicles", "energy_type", "TEXT"),                     # 能源类型
-        ("vehicles", "product_category", "TEXT"),                # 产品大类
-        ("vehicles", "drive_form", "TEXT"),                      # 驱动形式
-        ("vehicles", "engine_factory", "TEXT"),                  # 发动机厂家
-        ("vehicles", "engine_power", "TEXT"),                    # 发动机功率
-        ("vehicles", "rear_axle", "TEXT"),                       # 后桥
-        ("vehicles", "wheelbase", "TEXT"),                       # 轴距
-        ("vehicles", "tire", "TEXT"),                            # 轮胎
-        ("vehicles", "axle_ratio", "TEXT"),                      # 后桥速比
         ("vehicles", "dealer_code", "TEXT"),                     # 经销商代码
-        ("vehicles", "dealer_name", "TEXT"),                     # 经销商名称
-        ("vehicles", "pickup_warehouse", "TEXT"),                # 提车仓库
-        ("vehicles", "fund_source", "TEXT"),                     # 资金来源
         ("vehicles", "import_raw", "TEXT"),                      # 原始Excel全部52列(JSON)
+        # === 20260804 最新模板（最终定稿）：车辆入库导入-月份发票 25列维度 ===
+        ("vehicles", "condition", "TEXT"),                       # 成色
+        ("vehicles", "brand", "TEXT"),                           # 品牌
+        ("vehicles", "product_series", "TEXT"),                  # 品系
+        ("vehicles", "battery_capacity", "TEXT"),                # 电池度数
+        ("vehicles", "horsepower", "TEXT"),                      # 马力
+        ("vehicles", "box_type", "TEXT"),                        # 厢型
+        ("vehicles", "box_dimension", "TEXT"),                   # 厢尺寸
+        ("vehicles", "gear_position", "TEXT"),                   # 档位
+        ("vehicles", "tailgate", "TEXT"),                        # 尾板
+        ("vehicles", "battery_brand", "TEXT"),                   # 电池品牌
+        ("vehicles", "product_code", "TEXT"),                    # 产品代码
+        ("vehicles", "dealer_price", "REAL DEFAULT 0"),          # 网员价
+        ("vehicles", "cab_type", "TEXT"),                        # 驾驶室
+        ("vehicles", "other_config", "TEXT"),                    # 其他
+        ("vehicles", "fuel_form", "TEXT"),                       # 燃料形式
+        ("vehicles", "cab_style", "TEXT"),                       # 驾驶室类型
+        ("vehicles", "engine_spec", "TEXT"),                     # 发动机厂家及功率
+        ("vehicles", "gearbox_spec", "TEXT"),                    # 变速箱厂家及型号
+        ("vehicles", "drive_motor_model", "TEXT"),               # 驱动电机型号
+        ("vehicles", "battery_model", "TEXT"),                   # 新能源动力电池型号
+        ("vehicles", "suspension_model", "TEXT"),                # 悬架型号
         # === 新车管入库信息.xlsx 维度的扩展列（79列模板）===
-        ("vehicles", "product_series", "TEXT"),
-        ("vehicles", "production_month", "TEXT"),
-        ("vehicles", "sales_level", "TEXT"),
-        ("vehicles", "modification_type", "TEXT"),
-        ("vehicles", "invoice_no", "TEXT"),
-        ("vehicles", "invoice_type", "TEXT"),
-        ("vehicles", "invoice_unit_name", "TEXT"),
-        ("vehicles", "pickup_order_no", "TEXT"),
-        ("vehicles", "company_remark", "TEXT"),
-        ("vehicles", "confirm_date", "TEXT"),
-        ("vehicles", "production_date", "TEXT"),
-        ("vehicles", "warehouse_date", "TEXT"),
-        ("vehicles", "sales_cycle", "TEXT"),
-        ("vehicles", "pickup_warehouse_code", "TEXT"),
-        ("vehicles", "dest_code", "TEXT"),
-        ("vehicles", "dest_name", "TEXT"),
-        ("vehicles", "outbound_date", "TEXT"),
-        ("vehicles", "storage_days", "INTEGER DEFAULT 0"),
-        ("vehicles", "dealer_price", "REAL DEFAULT 0"),
-        ("vehicles", "sale_total", "REAL DEFAULT 0"),
-        ("vehicles", "sale_tax", "REAL DEFAULT 0"),
-        ("vehicles", "body_amount", "REAL DEFAULT 0"),
-        ("vehicles", "battery_invoice_no", "TEXT"),
-        ("vehicles", "battery_sale_amount", "REAL DEFAULT 0"),
-        ("vehicles", "battery_sale_tax", "REAL DEFAULT 0"),
-        ("vehicles", "battery_settle_code", "TEXT"),
-        ("vehicles", "battery_settle_name", "TEXT"),
-        ("vehicles", "battery_fund_source", "TEXT"),
-        ("vehicles", "price_file_no", "TEXT"),
-        ("vehicles", "fixed_rebate", "REAL DEFAULT 0"),
-        ("vehicles", "fixed_rebate_tax", "REAL DEFAULT 0"),
-        ("vehicles", "base_rebate", "REAL DEFAULT 0"),
-        ("vehicles", "base_rebate_tax", "REAL DEFAULT 0"),
-        ("vehicles", "base_rebate_standard", "REAL DEFAULT 0"),
-        ("vehicles", "quantity", "INTEGER DEFAULT 0"),
-        ("vehicles", "front_axle", "TEXT"),
-        ("vehicles", "others", "TEXT"),
-        ("vehicles", "fuel_category", "TEXT"),
-        ("vehicles", "fuel_form", "TEXT"),
-        ("vehicles", "vehicle_physical_status", "TEXT"),
-        ("vehicles", "vehicle_type", "TEXT"),
-        ("vehicles", "cab_type", "TEXT"),
-        ("vehicles", "engine_factory_power", "TEXT"),
-        ("vehicles", "gearbox_factory_model", "TEXT"),
-        ("vehicles", "rear_axle_type", "TEXT"),
-        ("vehicles", "market_segment", "TEXT"),
-        ("vehicles", "wheelbase_spec", "TEXT"),
-        ("vehicles", "saddle_spec", "TEXT"),
-        ("vehicles", "engine_manufacturer", "TEXT"),
-        ("vehicles", "emission_standard", "TEXT"),
-        ("vehicles", "engine_model", "TEXT"),
-        ("vehicles", "transmission_manufacturer", "TEXT"),
-        ("vehicles", "transmission_model", "TEXT"),
-        ("vehicles", "drive_motor_model", "TEXT"),
-        ("vehicles", "battery_model", "TEXT"),
-        ("vehicles", "battery_layout", "TEXT"),
-        ("vehicles", "frame_main", "TEXT"),
-        ("vehicles", "fuel_tank", "TEXT"),
-        ("vehicles", "suspension_model", "TEXT"),
         # === 销售报单：尾板（有/无）===
         ("sales_orders", "tail_plate", "TEXT"),
         # === 销售报单：客户身份证号 ===
         ("sales_orders", "customer_id_card", "TEXT"),
-        ("vehicles", "electrical_interface", "TEXT"),
         # === 车辆字典校验状态（车型等字段 vs 数据字典）===
         ("vehicles", "validation_status", "TEXT DEFAULT 'valid'"),   # valid / invalid / warning
         ("vehicles", "validation_message", "TEXT DEFAULT ''"),
@@ -1189,6 +1170,30 @@ def init_db():
         ("receivables", "bank_serial", "TEXT"),
         ("receivables", "verified_by", "TEXT"),
         ("receivables", "verified_at", "TEXT"),
+        # === 20260804 大改版：首付前移 / 合并审批 / 金融方案 / 驳回退款 ===
+        ("sales_orders", "customer_screenshot_path", "TEXT"),
+        ("sales_orders", "first_payment_received_amount", "REAL DEFAULT 0"),
+        ("sales_orders", "first_payment_shortage_amount", "REAL DEFAULT 0"),
+        ("sales_orders", "first_payment_shortage_reason", "TEXT"),
+        ("sales_orders", "first_payment_promised_date", "TEXT"),
+        ("sales_orders", "first_payment_check_status", "TEXT DEFAULT '未校验'"),
+        ("sales_orders", "order_exception_reason", "TEXT"),
+        ("sales_orders", "finance_plan_id", "INTEGER"),
+        ("sales_orders", "snapshot_finance_plan", "TEXT"),
+        ("sales_orders", "snapshot_lease_deposit_guidance", "REAL DEFAULT 0"),
+        ("sales_orders", "snapshot_box_monthly_guidance", "REAL DEFAULT 0"),
+        ("sales_orders", "refund_id", "INTEGER"),
+        ("model_guidance_prices", "lease_deposit_guidance", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "box_standard_price", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "box_wide_price", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "box_high_rail_price", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "box_refrigerated_price", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "box_flatbed_price", "REAL DEFAULT 0"),
+        ("model_guidance_prices", "tail_plate_price", "REAL DEFAULT 0"),
+        ("contracts", "snapshot_finance_plan", "TEXT"),
+        ("contracts", "snapshot_lease_deposit_guidance", "REAL DEFAULT 0"),
+        ("contracts", "snapshot_box_monthly_guidance", "REAL DEFAULT 0"),
+        ("receivables", "sales_order_id", "INTEGER"),
     ]
     for table, col, col_type in safe_alter_columns:
         try:
@@ -1246,12 +1251,7 @@ def seed_data():
         '销售': {
             'vehicles': [
                 'purchase_price', 'tax_rate', 'estimated_residual_value', 'guidance_price',
-                # AA-AR 列（仅财务/老板可见）
-                'fund_source', 'dealer_price', 'invoice_price', 'sale_total', 'sale_tax',
-                'body_amount', 'battery_invoice_no', 'battery_sale_amount', 'battery_sale_tax',
-                'battery_settle_code', 'battery_settle_name', 'battery_fund_source',
-                'price_file_no', 'fixed_rebate', 'fixed_rebate_tax', 'base_rebate',
-                'base_rebate_tax', 'base_rebate_standard',
+
             ],
             'contracts': [
                 'loan_amount', 'monthly_payment', 'factory_guarantee_deposit', 'paid_principal',
@@ -1267,12 +1267,7 @@ def seed_data():
         '运营': {
             'vehicles': [
                 'purchase_price', 'tax_rate', 'guidance_price',
-                # AA-AR 列（仅财务/老板可见）
-                'fund_source', 'dealer_price', 'invoice_price', 'sale_total', 'sale_tax',
-                'body_amount', 'battery_invoice_no', 'battery_sale_amount', 'battery_sale_tax',
-                'battery_settle_code', 'battery_settle_name', 'battery_fund_source',
-                'price_file_no', 'fixed_rebate', 'fixed_rebate_tax', 'base_rebate',
-                'base_rebate_tax', 'base_rebate_standard',
+
             ],
             'contracts': ['snapshot_guidance_price', 'snapshot_invoice_price'],
             'factory_repayments': ['amount'],
@@ -1284,12 +1279,7 @@ def seed_data():
             'vehicles': [
                 'purchase_price', 'tax_rate', 'estimated_residual_value', 'paid_principal',
                 'loan_balance', 'collected_deposit', 'collected_rent',
-                # AA-AR 列（仅财务/老板可见）
-                'fund_source', 'dealer_price', 'invoice_price', 'sale_total', 'sale_tax',
-                'body_amount', 'battery_invoice_no', 'battery_sale_amount', 'battery_sale_tax',
-                'battery_settle_code', 'battery_settle_name', 'battery_fund_source',
-                'price_file_no', 'fixed_rebate', 'fixed_rebate_tax', 'base_rebate',
-                'base_rebate_tax', 'base_rebate_standard',
+
             ],
             'contracts': [
                 'loan_amount', 'monthly_payment', 'factory_guarantee_deposit', 'paid_principal',

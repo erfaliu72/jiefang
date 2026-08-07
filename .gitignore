@@ -163,6 +163,7 @@ cython_debug/
 *.db
 *.db.bak.*
 *.sqlite3
+merge_backup.json
 uploads/
 output.log
 cookies.txt
