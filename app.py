@@ -334,11 +334,10 @@ def current_guidance_price(conn, vehicle_id):
 
 
 def normalize_sales_mode(value):
+    """仅支持 租赁 / 以租代售 两种模式（整车销售已下线）。"""
     mode = (value or '').strip()
     if mode in ('以租代购', '以租代售'):
         return '以租代售'
-    if mode in ('整车销售', '卖车', '销售'):
-        return '销售'
     return '租赁'
 
 
@@ -459,15 +458,12 @@ def calculate_guidance_check(conn, vehicle, sales_mode, sale_total_price, lease_
             'below': below,
             'needs_approval': False,
         }
-
-    # 整车销售已下线：防御性保留，报价 vs 整车指导价
-    display_price = total_price
-    display_guidance = guidance['sale_total_price']
+    # 兜底：未知模式按租赁处理（normalize_sales_mode 已保证仅 租赁/以租代售）
     return {
         'mode': mode,
         'base_price': total_price or guidance['sale_total_price'] or guidance['legacy_guidance_price'],
-        'quote_price': display_price,
-        'guidance_price': display_guidance,
+        'quote_price': installment,
+        'guidance_price': 0,
         'guidance': guidance,
         'checks': [],
         'missing': missing,
@@ -722,8 +718,6 @@ def get_initial_payment_amount(contract):
     contract_type = contract['contract_type'] if contract else ''
     def value(key):
         return contract[key] if contract and key in contract.keys() else 0
-    if contract_type == '销售':
-        return float(value('total_price') or value('down_payment') or 0)
     if contract_type == '以租代售':
         return float(value('down_payment') or 0)
     return float(value('deposit') or 0) + float(value('rent') or 0)
@@ -732,8 +726,6 @@ def get_initial_payment_amount(contract):
 def initial_payment_label(contract):
     if not contract:
         return '首付款审核'
-    if contract['contract_type'] == '销售':
-        return '卖车付款审核'
     if contract['contract_type'] == '以租代售':
         return '首付款审核'
     return '押金及首次支付审核'
@@ -766,7 +758,7 @@ def finalize_initial_payment(conn, payment_id, operator_name, now, allow_shortag
 
     remaining_received = received_amount
     deposit_due = parse_money(payment['deposit']) if payment['contract_type'] == '租赁' else 0
-    down_due = parse_money(payment['down_payment']) if payment['contract_type'] in ('以租代售', '销售') else 0
+    down_due = parse_money(payment['down_payment']) if payment['contract_type'] == '以租代售' else 0
     rent_due = parse_money(payment['rent']) if payment['contract_type'] == '租赁' else 0
     deposit_paid = min(remaining_received, deposit_due) if deposit_due > 0 else 0
     remaining_received = round(max(0, remaining_received - deposit_paid), 2)
@@ -781,7 +773,7 @@ def finalize_initial_payment(conn, payment_id, operator_name, now, allow_shortag
         params.append('已收' if shortage_amount <= 0 or deposit_paid >= deposit_due else '部分已收')
         updates.append("collected_deposit=?")
         params.append(deposit_paid if shortage_amount > 0 else deposit_due)
-    if down_due > 0 or payment['contract_type'] == '销售':
+    if down_due > 0:
         updates.append("down_payment_status=?")
         params.append('已收' if shortage_amount <= 0 or down_paid >= down_due else '部分已收')
     if payment['contract_type'] == '租赁' and rent_due > 0:
@@ -790,8 +782,7 @@ def finalize_initial_payment(conn, payment_id, operator_name, now, allow_shortag
     params.append(contract_id)
     c.execute(f"UPDATE contracts SET {', '.join(updates)} WHERE id=?", params)
 
-    if payment['contract_type'] != '销售':
-        c.execute("""
+    c.execute("""
             UPDATE repayments
             SET status='已还款',
                 paid_amount=CASE WHEN ? > 0 THEN MIN(amount, ?) ELSE amount END,
@@ -878,12 +869,11 @@ def finalize_initial_payment(conn, payment_id, operator_name, now, allow_shortag
         c.execute("UPDATE contract_initial_payments SET status='已通过', shortage_amount=0, shortage_status='无欠款', approved_by=?, approved_at=? WHERE id=?",
                   (operator_name, now, payment_id))
 
-    if payment['contract_type'] != '销售':
-        c.execute("""
-            UPDATE repayments
-            SET status='待还款'
-            WHERE contract_id=? AND status='未激活'
-        """, (contract_id,))
+    c.execute("""
+        UPDATE repayments
+        SET status='待还款'
+        WHERE contract_id=? AND status='未激活'
+    """, (contract_id,))
 
     extra_amount = round(received_amount - expected_amount, 2)
     if extra_amount > 0:
@@ -1650,9 +1640,6 @@ def sales_order_plan_activation_blocker(conn, order_id):
     if not order:
         return '报单不存在'
 
-    if contract_type_from_sales_mode(order['sales_mode']) == '销售':
-        return None
-
     linked_contract_id = order['contract_id'] or -1
     c.execute("""
         SELECT id, contract_type, customer_plan_match_status
@@ -1677,8 +1664,6 @@ def sales_order_plan_activation_blocker(conn, order_id):
         contract = c.fetchone()
         if not contract:
             return '客户还款计划未生成，不能财务确认报单'
-    if contract_type_from_sales_mode(contract['contract_type']) == '销售':
-        return None
 
     c.execute("SELECT COUNT(*) AS cnt FROM repayments WHERE contract_id=? AND period>=1", (contract['id'],))
     customer_count = c.fetchone()['cnt']
@@ -1757,8 +1742,6 @@ def ensure_sales_order_planning_contract(conn, order_id, overrides=None, reset_f
         return None
 
     contract_type = contract_type_from_sales_mode(order['sales_mode'])
-    if contract_type == '销售':
-        return None
 
     data = overrides or {}
     vehicle_id = order['vehicle_id']
@@ -1788,7 +1771,7 @@ def ensure_sales_order_planning_contract(conn, order_id, overrides=None, reset_f
         repayment_day_default = 1
     repayment_day = int(parse_money(data.get('repayment_day'), repayment_day_default) or repayment_day_default)
     repayment_day = min(max(repayment_day, 1), 28)
-    rent = parse_money(data.get('rent'), parse_money(order['vehicle_rent_amount']) or parse_money(order['sale_total_price']))
+    rent = parse_money(data.get('rent'), parse_money(order['vehicle_rent_amount']))  # sale_total_price 已废弃
     order_payment_amount = parse_money(order['deposit_amount'])
     deposit = parse_money(data.get('deposit'), order_payment_amount if contract_type == '租赁' else 0)
     down_payment = parse_money(data.get('down_payment'), (order_payment_amount or parse_money(order['car_purchase_amount'])) if contract_type == '以租代售' else 0)
@@ -1797,7 +1780,7 @@ def ensure_sales_order_planning_contract(conn, order_id, overrides=None, reset_f
     factory_repayment_months = int(data.get('factory_repayment_months') or factory_periods)
     customer_loan_amount = parse_money(data.get('customer_loan_amount'), 0)
     loan_amount = parse_money(data.get('loan_amount'), 0)
-    total_price = parse_money(data.get('total_price'), parse_money(order['sale_total_price']))
+    total_price = parse_money(data.get('total_price'), 0)  # sale_total_price 已废弃
     company = data.get('company') or order['receiving_company'] or ''
     yard = data.get('yard') or ''
     business_mode = data.get('business_mode') or order['sales_mode'] or contract_type
@@ -1882,8 +1865,6 @@ def ensure_default_sales_order_planning_if_needed(conn, order_id):
     if not order:
         return None
     if order['order_status'] in ('草稿', '已作废', '待价格特批'):
-        return None
-    if contract_type_from_sales_mode(order['sales_mode']) == '销售':
         return None
     return ensure_sales_order_planning_contract(conn, order_id, {}, reset_factory=False)
 
@@ -2303,7 +2284,7 @@ def build_dashboard_metrics(conn):
     total_vehicles = _fetch_scalar(c, "SELECT COUNT(*) FROM vehicles WHERE (is_deleted IS NULL OR is_deleted = 0)")
     active_vehicles = _fetch_scalar(
         c,
-        "SELECT COUNT(*) FROM vehicles WHERE COALESCE(status,'') NOT IN ('已售/已过户') AND (is_deleted IS NULL OR is_deleted = 0)"
+        "SELECT COUNT(*) FROM vehicles WHERE COALESCE(status,'') NOT IN ('已过户') AND (is_deleted IS NULL OR is_deleted = 0)"
     )
     active_contract_count = _fetch_scalar(
         c,
@@ -2380,7 +2361,7 @@ def build_dashboard_metrics(conn):
         WHERE insurance_expiry_date IS NOT NULL
           AND insurance_expiry_date != ''
           AND date(insurance_expiry_date) <= date(?, '+30 day')
-          AND COALESCE(status,'') NOT IN ('已售/已过户')
+          AND COALESCE(status,'') NOT IN ('已过户')
           AND (is_deleted IS NULL OR is_deleted = 0)
     """, (today_str,))
 
@@ -4485,9 +4466,6 @@ def create_sales_order():
 
     sale_total_price = parse_money(data.get('sale_total_price'))
     sales_mode = normalize_sales_mode(data.get('sales_mode', '经营租赁'))
-    if not is_draft and sales_mode == '销售':
-        conn.close()
-        return jsonify({'success': False, 'message': '整车销售已下线，仅支持租赁与以租代售'}), 400
     lease_quote = parse_money(data.get('vehicle_rent_amount', data.get('rent')))
     upfront_amount = parse_money(data.get('deposit_amount'))
     vehicle_box_type = (data.get('vehicle_box_type') or '').strip()
@@ -4701,9 +4679,6 @@ def update_sales_order_draft(order_id):
             return jsonify({'success': False, 'message': f'车辆字典校验不通过：{v_msg}，请先修正车辆信息'}), 400
 
     sales_mode = normalize_sales_mode(data.get('sales_mode', order['sales_mode']))
-    if submit_now and sales_mode == '销售':
-        conn.close()
-        return jsonify({'success': False, 'message': '整车销售已下线，仅支持租赁与以租代售'}), 400
     sale_total_price = parse_money(data.get('sale_total_price'), order['sale_total_price'])
     lease_quote = parse_money(data.get('vehicle_rent_amount', data.get('rent')), order['vehicle_rent_amount'])
     upfront_amount = parse_money(data.get('deposit_amount'), order['deposit_amount'])
@@ -4798,7 +4773,7 @@ def update_sales_order_draft(order_id):
         expires_at = None
         snapshot_guidance_price = guidance_price
         snapshot_lease_price = guidance_check['guidance'].get('lease_installment_price', 0) if isinstance(guidance_check['guidance'], dict) else 0
-        snapshot_sale_price = guidance_check['guidance'].get('sale_total_price', 0) if isinstance(guidance_check['guidance'], dict) else 0
+        snapshot_sale_price = 0  # sale_total_price 已废弃（以租代售仅走金融方案）
 
         if guidance_check['mode'] == '以租代售' and guidance_check['guidance'].get('plan'):
             p = guidance_check['guidance']['plan']
@@ -5060,9 +5035,6 @@ def sales_order_planning_contract(order_id):
     if not order:
         conn.close()
         return jsonify({'success': False, 'message': '报单不存在'}), 404
-    if contract_type_from_sales_mode(order['sales_mode']) == '销售':
-        conn.close()
-        return jsonify({'success': False, 'message': '销售报单不需要分期计划'}), 400
     if request.method == 'PUT' and request.current_user['role'] == '财务':
         conn.close()
         return jsonify({'success': False, 'message': '客户还款计划由运营维护，财务确认报单不再上传厂家分期表'}), 403
@@ -5319,26 +5291,19 @@ def add_contract():
         loan_periods = int(parse_money(data.get('loan_periods'), 0) or 0)
         if loan_periods <= 0:
             loan_periods = parse_period_count(order['lease_term'] if order else None, factory_count or 12)
-        total_price = parse_money(data.get('total_price'), parse_money(order['sale_total_price']) if order else 0)
+        total_price = parse_money(data.get('total_price'), 0)  # sale_total_price 已废弃（以租代售走金融方案）
         rent = parse_money(data.get('rent'), parse_money(order['vehicle_rent_amount']) if order else 0)
-        if contract_type != '销售' and rent <= 0 and total_price > 0 and loan_periods > 0:
+        if rent <= 0 and total_price > 0 and loan_periods > 0:
             rent = round(total_price / loan_periods, 2)
         monthly_payment = parse_money(data.get('monthly_payment'), factory_avg)
         customer_loan_amount = parse_money(data.get('customer_loan_amount'), 0)
         factory_guarantee_deposit = parse_money(data.get('factory_guarantee_deposit'), 0)
-        default_factory_periods = factory_count or (loan_periods if contract_type != '销售' else 0)
+        default_factory_periods = factory_count or loan_periods
         factory_periods = int(parse_money(data.get('factory_periods'), default_factory_periods) or 0)
         factory_repayment_months = int(parse_money(data.get('factory_repayment_months'), factory_count or factory_periods) or 0)
         loan_amount = parse_money(data.get('loan_amount'), factory_total)
         order_payment_amount = parse_money(order['deposit_amount']) if order else 0
-        if contract_type == '销售':
-            loan_periods = 0
-            rent = 0
-            monthly_payment = 0
-            deposit = parse_money(data.get('deposit'), 0)
-            down_payment = parse_money(data.get('down_payment'), order_payment_amount)
-            business_mode = data.get('business_mode') or '卖车'
-        elif contract_type == '以租代售':
+        if contract_type == '以租代售':
             deposit = parse_money(data.get('deposit'), 0)
             down_payment = parse_money(data.get('down_payment'), order_payment_amount or parse_money(order['car_purchase_amount']) if order else 0)
             business_mode = data.get('business_mode') or '以租代售'
@@ -5351,14 +5316,14 @@ def add_contract():
         first_payment_shortage = 0
         first_payment_received = 0
         first_payment_screenshot = ''
-        if order and order['sales_mode'] != '销售':
+        if order:
             first_payment_status = order['first_payment_check_status'] or '未校验'
             first_payment_shortage = parse_money(order['first_payment_shortage_amount'])
             first_payment_received = parse_money(order['first_payment_received_amount'])
             first_payment_screenshot = order['customer_screenshot_path'] or ''
         deposit_paid = parse_money(data.get('collected_deposit'), 0)
         down_payment_paid = parse_money(data.get('collected_down_payment'), 0)
-        if order and order['sales_mode'] != '销售' and first_payment_received > 0:
+        if order and first_payment_received > 0:
             remaining = first_payment_received
             if contract_type == '租赁':
                 deposit_paid = min(remaining, deposit) if deposit > 0 else 0
@@ -5368,7 +5333,7 @@ def add_contract():
                 remaining = round(max(0, remaining - down_payment_paid), 2)
         # 租赁：collected_rent 记录首期租金已收部分
         collected_rent_init = 0
-        if contract_type == '租赁' and order and order['sales_mode'] != '销售' and first_payment_received > 0:
+        if contract_type == '租赁' and order and first_payment_received > 0:
             remaining = round(max(0, first_payment_received - deposit_paid), 2)
             collected_rent_init = min(remaining, rent) if rent > 0 else 0
         payment_ok = first_payment_status in ('足额', '特批通过')
@@ -5385,20 +5350,19 @@ def add_contract():
         start_dt = datetime.strptime(start_date, '%Y-%m-%d')
         end_dt = start_dt + timedelta(days=30 * loan_periods) if loan_periods > 0 else start_dt
 
-        if contract_type != '销售':
-            if loan_periods <= 0:
-                return jsonify({'success': False, 'message': '客户分期期数必须大于0'}), 400
-            if customer_loan_amount > 0:
-                min_customer_payment = customer_loan_amount / loan_periods
-                if float(rent or 0) < min_customer_payment:
-                    return jsonify({
-                        'success': False,
-                        'message': f'每期贷款额不能低于客户贷款额度/期数（至少 ¥{round(min_customer_payment, 2)}）'
-                    }), 400
-            if factory_periods <= 0:
-                factory_periods = loan_periods
-            if factory_repayment_months <= 0:
-                factory_repayment_months = factory_periods
+        if loan_periods <= 0:
+            return jsonify({'success': False, 'message': '客户分期期数必须大于0'}), 400
+        if customer_loan_amount > 0:
+            min_customer_payment = customer_loan_amount / loan_periods
+            if float(rent or 0) < min_customer_payment:
+                return jsonify({
+                    'success': False,
+                    'message': f'每期贷款额不能低于客户贷款额度/期数（至少 ¥{round(min_customer_payment, 2)}）'
+                }), 400
+        if factory_periods <= 0:
+            factory_periods = loan_periods
+        if factory_repayment_months <= 0:
+            factory_repayment_months = factory_periods
 
         # 如果提供了客户名但没有 customer_id，自动创建客户
         customer_id = data.get('customer_id')
@@ -5496,9 +5460,8 @@ def add_contract():
             contract_id = c.lastrowid
 
         comparison = None
-        if contract_type != '销售':
-            if planning_contract_id:
-                c.execute("DELETE FROM repayments WHERE contract_id=?", (contract_id,))
+        if planning_contract_id:
+            c.execute("DELETE FROM repayments WHERE contract_id=?", (contract_id,))
             c.execute("SELECT COUNT(*) AS cnt FROM repayments WHERE contract_id=?", (contract_id,))
             if c.fetchone()['cnt'] <= 0:
                 generate_customer_repayment_plan(
@@ -5528,32 +5491,24 @@ def add_contract():
               AND status='待审批'
         """, (contract_id,))
         if sales_order_id:
-            if contract_type != '销售':
-                c.execute("""
-                    UPDATE sales_orders
-                    SET order_status='已激活',
-                        contract_id=?,
-                        customer_plan_match_status=?,
-                        factory_plan_match_status=?,
-                        plan_compare_summary=CASE WHEN ? THEN plan_compare_summary ELSE NULL END
-                    WHERE id=?
-                """, (
-                    contract_id,
-                    (comparison or {}).get('status') or '已生成',
-                    '已上传' if factory_count else '未上传',
-                    1 if factory_count else 0,
-                    sales_order_id,
-                ))
-            else:
-                c.execute("""
-                    UPDATE sales_orders
-                    SET order_status='已激活',
-                        contract_id=?
-                    WHERE id=?
-                """, (contract_id, sales_order_id))
+            c.execute("""
+                UPDATE sales_orders
+                SET order_status='已激活',
+                    contract_id=?,
+                    customer_plan_match_status=?,
+                    factory_plan_match_status=?,
+                    plan_compare_summary=CASE WHEN ? THEN plan_compare_summary ELSE NULL END
+                WHERE id=?
+            """, (
+                contract_id,
+                (comparison or {}).get('status') or '已生成',
+                '已上传' if factory_count else '未上传',
+                1 if factory_count else 0,
+                sales_order_id,
+            ))
 
         # 20260804：首付核销（押金/首付款 period=0 行）+ 应收同步（按 sales_order_id 幂等）
-        if order and contract_type != '销售' and payment_ok and first_payment_received > 0:
+        if order and payment_ok and first_payment_received > 0:
             today = datetime.now().strftime('%Y-%m-%d')
             # 核销 period=0 行（押金/首付款）
             c.execute("""
@@ -6282,7 +6237,7 @@ def complete_ownership_transfer(tid):
     ))
     c.execute("UPDATE contracts SET contract_status='已结清' WHERE id=?", (transfer['contract_id'],))
     if transfer['vehicle_id']:
-        c.execute("UPDATE vehicles SET status='已售/已过户' WHERE id=?", (transfer['vehicle_id'],))
+        c.execute("UPDATE vehicles SET status='已过户' WHERE id=?", (transfer['vehicle_id'],))
     log_audit(conn, '完成过户', 'ownership_transfer', tid,
               f'过户日期:{transfer_date}', request.current_user['display_name'])
     conn.commit()
@@ -8599,15 +8554,11 @@ def deliver_vehicle(vid):
     c.execute("UPDATE contracts SET delivery_status='已出库', delivery_date=? WHERE id=?",
               (datetime.now().strftime('%Y-%m-%d'), ct['id']))
 
-    # 更新车辆状态
+    # 更新车辆状态：仅 租赁 / 以租代售 两种合同类型（整车销售已下线）
     contract_type = ct['contract_type']
-    status_map = {'销售': '已售', '以租代售': '以租代售', '租赁': '租赁中'}
+    status_map = {'以租代售': '以租代售', '租赁': '租赁中'}
     new_status = status_map.get(contract_type, '租赁中')
     c.execute("UPDATE vehicles SET status=? WHERE id=?", (new_status, vid))
-
-    # 卖车合同出库后直接标记已结清
-    if contract_type == '销售':
-        c.execute("UPDATE contracts SET contract_status='已结清' WHERE id=?", (ct['id'],))
 
     log_audit(conn, '车辆出库', 'vehicle', vid, f'{user["display_name"]}({user["role"]}) 确认出库 合同类型:{contract_type}')
     conn.commit()

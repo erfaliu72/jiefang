@@ -263,8 +263,16 @@
                                 <el-table-column label="车型" min-width="180" show-overflow-tooltip>
                                     <template #default="s"><span>{{ s.row.car_type || '-' }}</span></template>
                                 </el-table-column>
-                                <el-table-column label="整车指导价" width="120">
-                                    <template #default="s"><span class="num text-red">¥{{ numberFormat(s.row.snapshot_sale_total_price || guidancePriceForCarType(s.row.car_type).sale || s.row.snapshot_guidance_price || 0) }}</span></template>
+                                <el-table-column label="定价参考" width="150">
+                                    <template #default="s">
+                                        <template v-if="s.row.sales_mode==='经营租赁'">
+                                            <span class="num">月供 ¥{{ numberFormat(s.row.snapshot_box_monthly_guidance || 0) }}</span>
+                                        </template>
+                                        <template v-else-if="s.row.snapshot_finance_plan">
+                                            <span class="num">{{ planText(s.row.snapshot_finance_plan) }}</span>
+                                        </template>
+                                        <span v-else class="num text-red">¥{{ numberFormat(s.row.snapshot_guidance_price || 0) }}</span>
+                                    </template>
                                 </el-table-column>
                                 <el-table-column label="VIN" min-width="180">
                                     <template #default="s"><span class="mono-text">{{ s.row.vin || '-' }}</span></template>
@@ -330,9 +338,9 @@
                                     <el-option label="在库" value="在库"></el-option>
                                     <el-option label="待出库（合同流程中）" value="待出库（合同流程中）"></el-option>
                                     <el-option label="待出库（首付款支付中）" value="待出库（首付款支付中）"></el-option>
-                                    <el-option label="已经出库（已售）" value="已经出库（已售）"></el-option>
                                     <el-option label="已经出库（租赁）" value="已经出库（租赁）"></el-option>
                                     <el-option label="已经出库（以租代售）" value="已经出库（以租代售）"></el-option>
+                                    <el-option label="已经出库（已过户）" value="已经出库（已过户）"></el-option>
                                     <el-option label="已锁车" value="已锁车"></el-option>
                                     <el-option label="已结清" value="已结清"></el-option>
                                 </el-select>
@@ -487,7 +495,7 @@
                                 </el-table-column>
                                 <el-table-column prop="business_mode" label="模式" width="80" v-if="colVisible('business_mode')">
                                     <template #default="s">
-                                        <el-tag v-if="s.row.business_mode" size="small" :type="{'转租':'primary','以租代售':'warning','卖车':'success'}[s.row.business_mode]||'info'" round>{{ s.row.business_mode }}</el-tag>
+                                        <el-tag v-if="s.row.business_mode" size="small" :type="{'转租':'primary','以租代售':'warning','经营租赁':'success'}[s.row.business_mode]||'info'" round>{{ s.row.business_mode }}</el-tag>
                                         <span v-else style="color:#9ca3af">-</span>
                                     </template>
                                 </el-table-column>
@@ -1215,7 +1223,6 @@
                                     <span v-else-if="item.ref_type==='price_exception'" style="font-weight:700;color:#ef4444;font-size:18px">低于指导价 ¥{{ numberFormat(item.snapshot_guidance_price || 0) }}</span>
                                     <span v-else-if="item.ref_type==='return_stock'" style="font-weight:700;color:#d97706;font-size:18px">{{ item.return_reason || '退车入库' }}</span>
                                     <span v-else-if="item.ref_type==='initial_payment'" style="font-weight:700;color:#d97706;font-size:18px">首次付款 ¥{{ numberFormat(item.initial_payment_amount) }}</span>
-                                    <span v-else-if="item.contract_type==='销售'" style="font-weight:700;color:#2563eb;font-size:18px">售价 ¥{{ numberFormat(item.total_price) }}</span>
                                     <span v-else style="font-weight:700;color:#059669;font-size:18px">月租 ¥{{ numberFormat(item.rent) }}</span>
                                 </div>
                             </div>
@@ -1290,9 +1297,6 @@
                                         <div><span style="color:#9ca3af">发起人：</span>{{ item.requested_by || '-' }}</div>
                                         <div style="grid-column:1/-1" v-if="item.shortage_reason"><span style="color:#9ca3af">不足原因：</span>{{ item.shortage_reason }}</div>
                                         <div style="grid-column:1/-1" v-if="item.initial_payment_remark"><span style="color:#9ca3af">备注：</span>{{ item.initial_payment_remark }}</div>
-                                    </template>
-                                    <template v-else-if="item.contract_type==='销售'">
-                                        <div><span style="color:#9ca3af">售价：</span><b style="color:#2563eb">¥{{ numberFormat(item.total_price) }}</b></div>
                                     </template>
                                     <template v-else>
                                         <div><span style="color:#9ca3af">月租(客户→公司)：</span><b style="color:#059669">¥{{ numberFormat(item.rent) }}</b></div>
@@ -2208,7 +2212,7 @@
                         <div><span style="color:#6b7280">车辆：</span><b>{{ newContract.plate_number || newContract.vin }}</b></div>
                         <div><span style="color:#6b7280">客户：</span><b>{{ newContract.customer_name || '-' }}</b></div>
                         <div><span style="color:#6b7280">收款主体：</span><b>{{ newContract.company || '-' }}</b></div>
-                        <div v-if="newContract.contract_type==='销售'"><span style="color:#6b7280">销售总价：</span><b class="num">¥{{ numberFormat(newContract.total_price || 0) }}</b></div>
+                        <div v-if="newContract.contract_type==='以租代售'"><span style="color:#6b7280">首付款：</span><b class="num">¥{{ numberFormat(newContract.down_payment || 0) }}</b></div>
                         <template v-else>
                             <div><span style="color:#6b7280">客户分期：</span><b>{{ newContract.customer_plan_summary || '-' }}</b><div style="font-size:12px;color:#9ca3af;margin-top:2px">{{ newContract.customer_plan_detail || contractCustomerPlanSource() }}</div></div>
                             <div><span style="color:#6b7280">厂家分期：</span><b>{{ newContract.factory_plan_summary || '财务上传厂家分期 PDF 后展示' }}</b><div style="font-size:12px;color:#9ca3af;margin-top:2px">{{ newContract.factory_plan_detail || '运营不录入厂家月供' }}</div></div>
@@ -2235,7 +2239,6 @@
                     <el-col :span="24">
                         <el-form-item label="合同类型">
                             <el-radio-group v-model="newContract.contract_type" size="large">
-                                <el-radio-button label="销售">新车销售</el-radio-button>
                                 <el-radio-button label="以租代售">以租代售</el-radio-button>
                                 <el-radio-button label="租赁">租赁</el-radio-button>
                             </el-radio-group>
@@ -2283,47 +2286,6 @@
                         </el-form-item>
                     </el-col>
                 </el-row>
-                <!-- 销售类型只需要总价 -->
-                <template v-if="newContract.contract_type === '销售'">
-                    <el-divider content-position="left">销售金额</el-divider>
-                    <el-row :gutter="16">
-                        <el-col :span="8">
-                            <el-form-item label="售价（元）">
-                                <el-input-number v-model="newContract.total_price" :min="0" :step="1000" style="width:100%"></el-input-number>
-                            </el-form-item>
-                        </el-col>
-                    </el-row>
-                    <el-divider content-position="left">合同条款</el-divider>
-                    <el-row :gutter="16">
-                        <el-col :span="8">
-                            <el-form-item label="公司">
-                                <el-input v-model="newContract.company" placeholder="请输入公司名称"></el-input>
-                            </el-form-item>
-                        </el-col>
-                        <el-col :span="8">
-                            <el-form-item label="车场">
-                                <el-input v-model="newContract.yard" placeholder="请输入车场名称"></el-input>
-                            </el-form-item>
-                        </el-col>
-                        <el-col :span="8">
-                            <el-form-item label="贷款金额">
-                                <el-input-number v-model="newContract.loan_amount" :min="0" :step="1000" style="width:100%"></el-input-number>
-                            </el-form-item>
-                        </el-col>
-                    </el-row>
-                    <el-row :gutter="16">
-                        <el-col :span="8">
-                            <el-form-item label="首付款">
-                                <el-input-number v-model="newContract.down_payment" :min="0" :step="1000" style="width:100%"></el-input-number>
-                            </el-form-item>
-                        </el-col>
-                        <el-col :span="8">
-                            <el-form-item label="押金">
-                                <el-input-number v-model="newContract.deposit" :min="0" :step="500" style="width:100%"></el-input-number>
-                            </el-form-item>
-                        </el-col>
-                    </el-row>
-                </template>
                 <!-- 以租代售 和 租赁 都需要还款信息 -->
                 <template v-else>
                     <el-divider content-position="left">合同条款</el-divider>
@@ -3147,8 +3109,6 @@
                 currentPage.value = 'orders';
                 currentOrderDraftId.value = null;
                 orderPrefillLock.value = true;
-                const guidance = guidancePriceForCarType(row.car_type);
-                const guidancePrice = Number(guidance.sale || row.purchase_price || 0);
                 Object.assign(newOrder, {
                     payment_date: todayString(),
                     customer_name: '',
@@ -3167,7 +3127,6 @@
                     plate_number: row.plate_number || '',
                     lease_term: '',
                     cargo_length: '',
-                    sale_total_price: guidancePrice,
                     payment_category: '',
                     car_purchase_amount: Number(row.purchase_price || 0),
                     vehicle_rent_amount: 0,
@@ -3609,7 +3568,6 @@
                 tail_plate: '',
                 lease_term: '',
                 cargo_length: '',
-                sale_total_price: 0,
                 payment_category: '',
                 car_purchase_amount: 0,
                 vehicle_rent_amount: 0,
@@ -3785,7 +3743,7 @@
 	                    '退车中': '#ef4444',
 	                    '待维修': '#f97316',
 	                    '二手车': '#059669',
-	                    '已售/已过户': '#10b981',
+	                    '已过户': '#10b981',
 	                    '已结清': '#059669',
 	                    '未知': '#6b7280'
 	                };
@@ -4071,19 +4029,6 @@
                 const key = `${base}|${isNew || '新车'}`;
                 return guidancePriceMap.value[key] || guidancePriceMap.value[base] || { lease: 0, sale: 0 };
             }
-            const currentOrderGuidancePrice = computed(() => {
-                const byType = guidancePriceForCarType(newOrder.car_type);
-                const mode = newOrder.sales_mode === '经营租赁' ? 'lease' : 'sale';
-                if (byType[mode]) return byType[mode];
-                return 0;
-            });
-            const currentOrderQuotePrice = computed(() => newOrder.sales_mode === '经营租赁' ? Number(newOrder.vehicle_rent_amount || 0) : Number(newOrder.sale_total_price || 0));
-            const currentOrderNeedsApproval = computed(() => {
-                const quote = currentOrderQuotePrice.value;
-                const guidance = currentOrderGuidancePrice.value;
-                return guidance > 0 && quote > 0 && quote < guidance;
-            });
-
             // ===== 20260804 大改版：金融方案 + 租赁双指导价 + 首付判断 =====
             function stripConditionPrefix(carType) {
                 if (!carType) return carType || '';
@@ -4386,7 +4331,7 @@
                 if (row.vehicle_status === '已锁车') return '已锁车';
                 if (row.vehicle_status === '在库') return '在库';
                 if (row.contract_status === '已结清') return '已结清';
-                if (row.vehicle_status === '已售') return '已经出库（已售）';
+                if (row.vehicle_status === '已过户') return '已经出库（已过户）';
                 if (['租赁中', '经营租赁'].includes(row.vehicle_status)) return '已经出库（租赁）';
                 if (row.vehicle_status === '以租代售') return '已经出库（以租代售）';
                 if (['待审批', '审批中', '已驳回'].includes(row.delivery_status)) return '待出库（合同流程中）';
@@ -4738,7 +4683,7 @@
                 return parseFloat(n).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
             }
             function statusClass(s) {
-                return { '在库': 'badge-gray', '经营租赁': 'badge-blue', '租赁中': 'badge-blue', '以租代售': 'badge-purple', '已售': 'badge-green', '已结清': 'badge-green', '以租代购': 'badge-purple', '已锁车': 'badge-red', '转租': 'badge-blue' }[s] || 'badge-gray';
+                return { '在库': 'badge-gray', '经营租赁': 'badge-blue', '租赁中': 'badge-blue', '以租代售': 'badge-purple', '已过户': 'badge-green', '已结清': 'badge-green', '以租代购': 'badge-purple', '已锁车': 'badge-red', '转租': 'badge-blue' }[s] || 'badge-gray';
             }
             function repayClass(s) {
                 return { '已还款': 'badge-green', '待还款': 'badge-gray', '逾期': 'badge-red' }[s] || 'badge-gray';
@@ -4825,7 +4770,7 @@
                     '在库': 'badge-gray',
                     '待出库（合同流程中）': 'badge-orange',
                     '待出库（首付款支付中）': 'badge-purple',
-                    '已经出库（已售）': 'badge-green',
+                    '已经出库（已过户）': 'badge-green',
                     '已经出库（租赁）': 'badge-blue',
                     '已经出库（以租代售）': 'badge-purple',
                     '已锁车': 'badge-red',
@@ -4834,13 +4779,11 @@
             }
             function initialPaymentAmount(row) {
                 if (!row) return 0;
-                if (row.contract_type === '销售') return Number(row.total_price || row.down_payment || 0);
                 if (row.contract_type === '以租代售') return Number(row.down_payment || 0);
                 return Number(row.deposit || 0) + Number(row.rent || 0);
             }
             function initialPaymentType(row) {
                 if (!row) return '首付款审核';
-                if (row.contract_type === '销售') return '卖车付款审核';
                 if (row.contract_type === '以租代售') return '首付款审核';
                 return '押金及首次支付审核';
             }
@@ -5339,16 +5282,14 @@
             }
             function salesOrderContractType(row) {
                 const mode = String((row && (row.sales_mode || row.contract_type)) || '');
-                if (['销售', '整车销售', '卖车'].includes(mode)) return '销售';
                 if (['以租代售', '以租代购'].includes(mode)) return '以租代售';
                 return '租赁';
             }
             function isInstallmentSalesOrder(row) {
-                return salesOrderContractType(row) !== '销售';
+                return true;  // 仅租赁/以租代售，均需分期计划
             }
             function canActivateSalesOrder(row) {
                 if (!row || row.order_status !== '待财务确认') return false;
-                if (!isInstallmentSalesOrder(row)) return true;
                 return ['已生成', '已通过', '差异已确认'].includes(row.customer_plan_match_status);
             }
             function salesOrderPlanActionLabel(row) {
@@ -5637,24 +5578,24 @@
                 fetchSalesOrders();
             }
             function createContractFromOrder(row) {
-                const modeContractType = ['销售', '整车销售'].includes(row.sales_mode) ? '销售' : (['以租代售', '以租代购'].includes(row.sales_mode) ? '以租代售' : '租赁');
+                const modeContractType = ['以租代售', '以租代购'].includes(row.sales_mode) ? '以租代售' : '租赁';
                 const hasExistingContract = salesOrderHasContract(row);
                 const contractType = row.contract_type || modeContractType;
                 const summary = parsePlanSummary(row.plan_compare_summary);
                 const factoryPeriods = Number(summary.factory_periods || 0);
                 const factoryAvg = Number(summary.factory_avg || 0);
                 const factoryTotal = Number(summary.factory_total || 0);
-                const orderPeriods = contractType === '销售' ? 0 : parseOrderPeriods(row.lease_term, factoryPeriods || 12);
+                const orderPeriods = parseOrderPeriods(row.lease_term, factoryPeriods || 12);
                 const paymentAmount = Number(row.deposit_amount || 0);
                 const defaultDeposit = contractType === '租赁' ? paymentAmount : 0;
                 const defaultDownPayment = contractType !== '租赁' ? paymentAmount : 0;
-                const contractRent = contractType === '销售' ? 0 : (hasExistingContract ? positiveNumberOrDefault(row.contract_rent, row.vehicle_rent_amount) : Number(row.vehicle_rent_amount || 0));
-                const contractPeriods = contractType === '销售' ? 0 : (hasExistingContract ? positiveNumberOrDefault(row.contract_loan_periods, orderPeriods) : orderPeriods);
+                const contractRent = hasExistingContract ? positiveNumberOrDefault(row.contract_rent, row.vehicle_rent_amount) : Number(row.vehicle_rent_amount || 0);
+                const contractPeriods = hasExistingContract ? positiveNumberOrDefault(row.contract_loan_periods, orderPeriods) : orderPeriods;
                 const contractDeposit = hasExistingContract ? numberOrDefault(row.contract_deposit, defaultDeposit) : defaultDeposit;
                 const contractDownPayment = hasExistingContract ? numberOrDefault(row.contract_down_payment, defaultDownPayment) : defaultDownPayment;
                 const contractStartDate = hasExistingContract ? (row.contract_start_date || row.payment_date || todayString()) : (row.payment_date || todayString());
                 const contractCompany = hasExistingContract ? (row.contract_company || row.receiving_company || row.company || '') : (row.receiving_company || row.company || '');
-                const contractTotalPrice = hasExistingContract ? positiveNumberOrDefault(row.contract_total_price, row.sale_total_price) : Number(row.sale_total_price || 0);
+                const contractTotalPrice = hasExistingContract ? positiveNumberOrDefault(row.contract_total_price, 0) : 0;  // sale_total_price 已废弃
                 const customerPlan = customerPlanFromOrder(row, summary, contractPeriods, contractRent, hasExistingContract ? '来自已上传合同' : '来自销售报单');
                 Object.assign(newContract, {
                     vehicle_id: row.vehicle_id || '',
@@ -5666,7 +5607,7 @@
                     customer_name: row.customer_name || '',
                     customer_phone: row.customer_phone || '',
                     contract_type: contractType,
-                    business_mode: contractType === '销售' ? '卖车' : (contractType === '以租代售' ? '以租代售' : '转租'),
+                    business_mode: contractType === '以租代售' ? '以租代售' : '转租',
                     rental_method: '经营租赁',
                     repayment_day: repaymentDayFromDate(contractStartDate),
                     start_date: contractStartDate,
@@ -6015,8 +5956,8 @@
             async function submitContract() {
                 if (!newContract.vehicle_id) return ElementPlus.ElMessage.warning('请选择车辆');
                 if (!attachmentList(newContract.contract_file).length) return ElementPlus.ElMessage.warning(isSupplementContract() ? '请上传要补充的合同附件' : '请先上传线下签署的合同文档');
-                if (!newContract.sales_order_id && newContract.contract_type !== '销售' && !newContract.rent && !newContract.monthly_payment) return ElementPlus.ElMessage.warning('请填写月租或月供');
-                if (!newContract.sales_order_id && newContract.contract_type !== '销售') {
+                if (!newContract.sales_order_id && !newContract.rent && !newContract.monthly_payment) return ElementPlus.ElMessage.warning('请填写月租或月供');
+                if (!newContract.sales_order_id) {
                     if (!newContract.start_date) return ElementPlus.ElMessage.warning('请填写合同起始日');
                     if (!newContract.loan_periods || newContract.loan_periods <= 0) return ElementPlus.ElMessage.warning('请填写客户分期期数');
                     if (newContract.customer_loan_amount > 0) {
@@ -6033,9 +5974,7 @@
                     }
                 }
                 // 根据合同类型自动设置业务模式
-                if (newContract.contract_type === '销售') {
-                    newContract.business_mode = '卖车';
-                } else if (newContract.contract_type === '以租代售') {
+                if (newContract.contract_type === '以租代售') {
                     newContract.business_mode = '以租代售';
                 }
                 submitting.value = true;
@@ -6671,7 +6610,7 @@
                 approvalList, approvalReminders, approvalFilter, visibleApprovalFilters, lockRequests,
                 missingGuidanceAlerts,
                 modelGuidancePrices, modelGuidanceSearch, filteredModelGuidancePrices, modelGuidanceForm, modelGuidanceCarTypeOptions, guidanceHistoryCache, PRICE_KIND_LABELS, loadGuidanceHistory,
-                currentOrderGuidancePrice, currentOrderQuotePrice, currentOrderNeedsApproval, guidancePriceForCarType,
+                guidancePriceForCarType,
                 fetchApprovals, fetchApprovalReminders, fetchLockRequests, fetchFeeItems,
                 doApprove, doReject, doResubmit, doDeliver, planText, initiateOrderRefund, executeOrderRefund, cancelOrderRefund,
                 // UI
