@@ -79,7 +79,7 @@ ROLE_HIDDEN_FIELDS = {
             'expected_profit_floor', 'expected_profit_ceiling', 'snapshot_guidance_price',
             'snapshot_invoice_price',
         ],
-        'sales_orders': ['snapshot_guidance_price', 'snapshot_lease_installment_price', 'snapshot_sale_total_price'],
+        'sales_orders': ['snapshot_guidance_price', 'snapshot_lease_installment_price'],
         'factory_repayments': ['amount'],
         'vehicle_rebates': ['*'],
         'profit': ['*'],
@@ -133,6 +133,7 @@ BOX_TYPE_MONTHLY_PRICE_COLUMNS = {
     '冷藏': 'box_refrigerated_price',
     '平板': 'box_flatbed_price',
 }
+GUIDANCE_BOX_TYPES = tuple(BOX_TYPE_MONTHLY_PRICE_COLUMNS.keys())
 TAIL_PLATE_SURCHARGE = 300  # 尾板加价默认值（可用 model_guidance_prices.tail_plate_price 覆盖）
 
 
@@ -146,15 +147,20 @@ def strip_condition_prefix(car_type):
     return car_type
 
 
-# 厢型后缀词表（20260807 方案一：指导价按基准车型归纳）
-BOX_SUFFIX_WORDS = ('带尾板', '厢货', '宽体', '高栏', '冷藏', '平板', '底盘', '尾板')
+# 厢型后缀词表。尾板属于基准车型，不在这里剥离。
+BOX_SUFFIX_WORDS = ('厢货', '宽体', '高栏', '冷藏', '平板', '底盘')
+TAILGATE_SUFFIXES = (
+    ('有尾板', '有尾板'),
+    ('带尾板', '有尾板'),
+    ('无尾板', '无尾板'),
+    ('尾板', '有尾板'),
+)
 
 
 def strip_box_suffix(car_type):
-    """去掉车型名的厢型后缀（含带尾板），返回车头基准车型名。
-    支持多级（'冷藏带尾板' 先去 '带尾板' 再去 '冷藏'），兼容报单拼接格式
-    '纯电 / 虎六G中体 / 宁德时代 / 120度电 / 五档 / 厢货'（去末段）。
-    防误伤：厢型词必须出现在末尾才去掉。
+    """去掉车型名末尾厢型，保留并统一尾板标识。
+
+    基准车型的尾板是身份维度：'冷藏带尾板' 归一为 '有尾板'，而不是被删掉。
     """
     if not car_type:
         return car_type or ''
@@ -165,17 +171,209 @@ def strip_box_suffix(car_type):
         if len(parts) >= 2 and parts[-1] in BOX_SUFFIX_WORDS:
             return ' / '.join(parts[:-1])
         return s
-    # 2) 紧凑格式多级后缀：递归去掉末尾厢型词
+    # 2) 紧凑格式：先取尾板，再去除厢型，最后恢复尾板。
+    tailgate_suffix = ''
+    for suffix, normalized in TAILGATE_SUFFIXES:
+        if s.endswith(suffix) and len(s) > len(suffix):
+            s = s[:-len(suffix)]
+            tailgate_suffix = normalized
+            break
     for w in BOX_SUFFIX_WORDS:
         if s.endswith(w) and len(s) > len(w):
-            return strip_box_suffix(s[:-len(w)])
-    return s
+            s = s[:-len(w)]
+            break
+    return s + tailgate_suffix
 
 
 def normalize_base_car_type(car_type):
-    """组合归一化：去成色前缀 + 去厢型后缀。
-    所有查 model_guidance_prices 的匹配键统一走这里（20260807 方案一）。"""
-    return strip_box_suffix(strip_condition_prefix(car_type))
+    """组合归一化：去成色、去厢型，尾板统一为基准车型固定维度。
+
+    历史车型未显式保存尾板时按“无尾板”兼容，避免旧库存和指导价失配。
+    """
+    base = strip_box_suffix(strip_condition_prefix(car_type))
+    if not base:
+        return ''
+    if base.endswith('带尾板'):
+        return base[:-len('带尾板')] + '有尾板'
+    if base.endswith('有尾板') or base.endswith('无尾板'):
+        return base
+    return base + '无尾板'
+
+
+def normalize_vehicle_condition(value):
+    """将车辆成色统一为定价维度值。"""
+    return value if value in ('新车', '二手车') else '新车'
+
+
+def extract_guidance_box_type(car_type):
+    """从历史拼接车型中提取指导价厢型，供旧接口兼容和方案范围校验使用。"""
+    raw = strip_condition_prefix(car_type or '')
+    if ' / ' in raw:
+        parts = [part.strip() for part in raw.split(' / ') if part.strip()]
+        if parts and parts[-1] in GUIDANCE_BOX_TYPES:
+            return parts[-1]
+    raw = raw.strip()
+    for suffix in ('带尾板', '尾板'):
+        if raw.endswith(suffix) and len(raw) > len(suffix):
+            raw = raw[:-len(suffix)]
+            break
+    for box_type in GUIDANCE_BOX_TYPES:
+        if raw.endswith(box_type) and len(raw) > len(box_type):
+            return box_type
+    return ''
+
+
+def normalize_tailgate(value):
+    """将采购模板尾板值统一为 SKU/报价使用的“有/无”。"""
+    raw = str(value or '').strip()
+    if not raw:
+        return '无'
+    if raw in ('无', '不带尾板', '无尾板', '否'):
+        return '无'
+    return '有' if raw in ('有', '带尾板', '有尾板', '是') else '无'
+
+
+def energy_type_for_vehicle(vehicle):
+    """按燃料形式识别车型能源类型；旧数据缺燃料形式时用规格作保守推断。"""
+    vehicle = vehicle or {}
+    fuel = str(vehicle.get('fuel_form') or '').strip()
+    if '纯电' in fuel:
+        return '纯电'
+    if '混动' in fuel:
+        return '混动'
+    if fuel:
+        return '燃油车'
+    if (vehicle.get('battery_brand') or vehicle.get('battery_capacity') or vehicle.get('battery_model')):
+        return '纯电'
+    if (vehicle.get('horsepower') or vehicle.get('gear_position')):
+        return '燃油车'
+    return ''
+
+
+BASE_MODEL_FIELDS_BY_ENERGY = {
+    '纯电': ('brand', 'product_series', 'battery_brand', 'battery_capacity'),
+    '混动': ('brand', 'product_series', 'horsepower', 'gear_position'),
+    '燃油车': ('brand', 'product_series', 'horsepower', 'gear_position'),
+}
+ENERGY_EXCLUSIVE_FIELDS = {
+    '纯电': ('horsepower', 'gear_position'),
+    '混动': ('battery_brand', 'battery_capacity'),
+    '燃油车': ('battery_brand', 'battery_capacity'),
+}
+
+
+def base_model_validation_errors(vehicle, require_identity=False):
+    """校验基准车型能源口径；返回可直接给接口展示的错误信息。"""
+    vehicle = vehicle or {}
+    has_identity_input = any(
+        str(vehicle.get(field) or '').strip()
+        for field in (
+            'fuel_form', 'brand', 'product_series', 'battery_brand', 'battery_capacity',
+            'horsepower', 'gear_position', 'tailgate',
+        )
+    )
+    if not has_identity_input and not require_identity:
+        return []
+    energy_type = energy_type_for_vehicle(vehicle)
+    if not energy_type:
+        return ['请填写燃料形式，或补全可识别的车型规格']
+    missing = [
+        field for field in BASE_MODEL_FIELDS_BY_ENERGY[energy_type]
+        if not str(vehicle.get(field) or '').strip()
+    ]
+    if missing:
+        labels = {
+            'brand': '品牌', 'product_series': '品系', 'battery_brand': '电池品牌',
+            'battery_capacity': '电池度数', 'horsepower': '马力', 'gear_position': '档位',
+        }
+        return [f"{energy_type}基准车型缺少“{'、'.join(labels[field] for field in missing)}”"]
+    invalid_fields = [
+        field for field in ENERGY_EXCLUSIVE_FIELDS[energy_type]
+        if str(vehicle.get(field) or '').strip()
+    ]
+    if invalid_fields:
+        labels = {
+            'battery_brand': '电池品牌', 'battery_capacity': '电池度数',
+            'horsepower': '马力', 'gear_position': '档位',
+        }
+        return [f"{energy_type}车型不应填写“{'、'.join(labels[field] for field in invalid_fields)}”"]
+    return []
+
+
+def base_model_tailgate_label(value):
+    return '有尾板' if normalize_tailgate(value) == '有' else '无尾板'
+
+
+def has_base_model_input(vehicle):
+    """是否已开始填写基准车型字段，用于区分旧车型兼容数据与新建规格数据。"""
+    vehicle = vehicle or {}
+    return any(
+        str(vehicle.get(field) or '').strip()
+        for field in (
+            'fuel_form', 'brand', 'product_series', 'battery_brand',
+            'battery_capacity', 'horsepower', 'gear_position', 'tailgate',
+        )
+    )
+
+
+def normalize_base_model_tailgate(vehicle):
+    """新建或编辑的规格车统一落库尾板“有/无”；旧数据不做批量改写。"""
+    if has_base_model_input(vehicle):
+        vehicle['tailgate'] = normalize_tailgate(vehicle.get('tailgate'))
+    return vehicle
+
+
+def validate_manual_vehicle_base_model(vehicle):
+    """手工新增/编辑时阻止能源字段串用，导入保留为可追踪的校验状态。"""
+    if not has_base_model_input(vehicle):
+        return []
+    return base_model_validation_errors(vehicle, require_identity=True)
+
+
+def guidance_base_candidates(car_type):
+    """指导价查询兼容旧的未显式尾板基准车型。"""
+    base = normalize_base_car_type(car_type)
+    candidates = [base]
+    if base.endswith('无尾板'):
+        legacy = base[:-len('无尾板')]
+        if legacy:
+            candidates.append(legacy)
+    return candidates
+
+
+def sales_order_energy_category(fuel_form):
+    """把采购模板燃料形式映射为报单界面的能源分类。"""
+    return energy_type_for_vehicle({'fuel_form': fuel_form})
+
+
+def vehicle_order_snapshot(vehicle):
+    """从库存 VIN 生成报单车辆快照，报价相关字段不能由报单表单覆盖。"""
+    if not vehicle:
+        return {}
+    vehicle = dict(vehicle)
+    return {
+        'is_new': (vehicle.get('condition') or '新车').strip() or '新车',
+        'vehicle_brand': (vehicle.get('brand') or '').strip(),
+        'vehicle_category': sales_order_energy_category(vehicle.get('fuel_form')),
+        'vehicle_cab': (vehicle.get('cab_type') or vehicle.get('cab_style') or '').strip(),
+        'vehicle_engine_battery': (
+            vehicle.get('battery_brand') or vehicle.get('engine_spec') or ''
+        ).strip(),
+        'vehicle_power_battery': (
+            vehicle.get('battery_capacity') or vehicle.get('horsepower') or ''
+        ).strip(),
+        'vehicle_gearbox': (
+            vehicle.get('gear_position') or vehicle.get('gearbox_spec') or ''
+        ).strip(),
+        'vehicle_box_type': (
+            vehicle.get('box_type') or vehicle.get('vehicle_box_type') or ''
+        ).strip(),
+        'vehicle_color': (vehicle.get('vehicle_color') or '').strip(),
+        'tail_plate': normalize_tailgate(vehicle.get('tailgate')),
+        'car_type': (vehicle.get('car_type') or '').strip(),
+        'plate_number': (vehicle.get('plate_number') or '').strip(),
+        'car_purchase_amount': parse_money(vehicle.get('purchase_price')),
+    }
 
 
 def resolve_lease_guidance(conn, car_type, vehicle_box_type=None, tail_plate=None, is_new=None):
@@ -186,29 +384,26 @@ def resolve_lease_guidance(conn, car_type, vehicle_box_type=None, tail_plate=Non
     result = {'deposit_guidance': 0.0, 'monthly_guidance': 0.0, 'box_type': vehicle_box_type or '', 'tail_plate_surcharge': 0.0}
     if not car_type:
         return result
-    base = normalize_base_car_type(car_type)
+    candidates = guidance_base_candidates(car_type)
     sql = """SELECT lease_deposit_guidance,
                box_standard_price, box_wide_price, box_high_rail_price,
                box_refrigerated_price, box_flatbed_price, tail_plate_price
-        FROM model_guidance_prices WHERE car_type=?"""
-    params = [base]
+        FROM model_guidance_prices
+        WHERE car_type IN ({})""".format(', '.join('?' for _ in candidates))
+    params = list(candidates)
     if is_new:
         sql += " AND is_new=?"
         params.append(is_new)
+    sql += " ORDER BY CASE car_type WHEN ? THEN 0 ELSE 1 END LIMIT 1"
+    params.append(candidates[0])
     row = conn.execute(sql, params).fetchone()
-    if not row and is_new:
-        # 兜底：该成色未配置，取任意一行
-        row = conn.execute("""SELECT lease_deposit_guidance,
-               box_standard_price, box_wide_price, box_high_rail_price,
-               box_refrigerated_price, box_flatbed_price, tail_plate_price
-            FROM model_guidance_prices WHERE car_type=? LIMIT 1""", (base,)).fetchone()
     if not row:
         return result
     deposit_guidance = parse_money(row['lease_deposit_guidance'])
     box_col = BOX_TYPE_MONTHLY_PRICE_COLUMNS.get(vehicle_box_type or '')
     box_price = parse_money(row[box_col]) if box_col and box_col in row.keys() else 0.0
     tail_surcharge = parse_money(row['tail_plate_price']) if parse_money(row['tail_plate_price']) > 0 else TAIL_PLATE_SURCHARGE
-    tail_surcharge = tail_surcharge if tail_plate == '有' else 0.0
+    tail_surcharge = tail_surcharge if normalize_tailgate(tail_plate) == '有' else 0.0
     result.update({
         'deposit_guidance': deposit_guidance,
         'monthly_guidance': round(box_price + tail_surcharge, 2),
@@ -217,15 +412,27 @@ def resolve_lease_guidance(conn, car_type, vehicle_box_type=None, tail_plate=Non
     return result
 
 
-def resolve_finance_plan(conn, plan_id):
-    """读取以租代售金融方案；不存在或已停用返回 None。"""
+def resolve_finance_plan(conn, plan_id, car_type=None, condition=None, box_type=None):
+    """读取以租代售金融方案；可校验其是否属于指定新车子型号。
+    不存在、已停用或不在生效日期内返回 None。"""
     if not plan_id:
         return None
     row = conn.execute(
-        "SELECT * FROM finance_plans WHERE id=? AND status='启用'",
+        """SELECT * FROM finance_plans WHERE id=? AND status='启用'
+           AND (effective_date IS NULL OR effective_date = '' OR effective_date <= date('now'))
+           AND (expiry_date IS NULL OR expiry_date = '' OR expiry_date >= date('now'))""",
         (plan_id,)
     ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    plan = dict(row)
+    if car_type and normalize_base_car_type(plan['car_type']) != normalize_base_car_type(car_type):
+        return None
+    if condition and normalize_vehicle_condition(plan.get('condition')) != normalize_vehicle_condition(condition):
+        return None
+    if box_type and (plan.get('box_type') or '').strip() != box_type.strip():
+        return None
+    return plan
 
 
 def normalize_approval_step_label(ref_type, step_order, required_role, step_label):
@@ -314,25 +521,6 @@ def is_price_below_guidance(price, guidance_price):
     return float(guidance_price or 0) > 0 and float(price or 0) < float(guidance_price or 0)
 
 
-def current_guidance_price(conn, vehicle_id):
-    row = conn.execute("SELECT car_type, condition FROM vehicles WHERE id=?", (vehicle_id,)).fetchone()
-    if not row:
-        return 0.0
-    base = normalize_base_car_type(row['car_type'])
-    is_new = row['condition'] if row['condition'] in ('新车', '二手车') else None
-    sql = "SELECT sale_total_price, guidance_price FROM model_guidance_prices WHERE car_type=?"
-    params = [base]
-    if is_new:
-        sql += " AND is_new=?"
-        params.append(is_new)
-    m = conn.execute(sql, params).fetchone()
-    if not m and is_new:
-        m = conn.execute("SELECT sale_total_price, guidance_price FROM model_guidance_prices WHERE car_type=? LIMIT 1", (base,)).fetchone()
-    if not m:
-        return 0.0
-    return float(m['sale_total_price'] or m['guidance_price'] or 0)
-
-
 def normalize_sales_mode(value):
     """仅支持 租赁 / 以租代售 两种模式（整车销售已下线）。"""
     mode = (value or '').strip()
@@ -346,54 +534,35 @@ def contract_type_from_sales_mode(value):
 
 
 def resolve_guidance_prices_for_vehicle(conn, vehicle):
-    """返回车型指导价；兼容旧字段仅作展示。按车辆成色（新车/二手车）匹配对应行。"""
+    """返回车型租赁参考价；历史 guidance_price 仅作展示。按车辆成色（新车/二手车）匹配对应行。"""
     car_type = (vehicle['car_type'] if vehicle and 'car_type' in vehicle.keys() else '') or ''
     legacy_price = parse_money(vehicle['guidance_price'] if vehicle and 'guidance_price' in vehicle.keys() else 0)
     is_new = (vehicle['condition'] if vehicle and 'condition' in vehicle.keys() else '') or ''
     result = {
-        'sale_total_price': 0.0,
         'lease_installment_price': 0.0,
         'legacy_guidance_price': legacy_price,
         'source': '单车指导价' if legacy_price > 0 else '',
     }
     if car_type:
-        base = normalize_base_car_type(car_type)
-        sql = """SELECT guidance_price, lease_installment_price, sale_total_price
-            FROM model_guidance_prices WHERE car_type=?"""
-        params = [base]
+        candidates = guidance_base_candidates(car_type)
+        sql = """SELECT guidance_price, lease_installment_price
+            FROM model_guidance_prices WHERE car_type IN ({})""".format(
+                ','.join('?' for _ in candidates)
+            )
+        params = list(candidates)
         if is_new in ('新车', '二手车'):
             sql += " AND is_new=?"
             params.append(is_new)
         row = conn.execute(sql, params).fetchone()
-        if not row and is_new in ('新车', '二手车'):
-            row = conn.execute("""SELECT guidance_price, lease_installment_price, sale_total_price
-                FROM model_guidance_prices WHERE car_type=? LIMIT 1""", (base,)).fetchone()
         if row:
             lease_price = parse_money(row['lease_installment_price'])
-            sale_price = parse_money(row['sale_total_price'])
             legacy_model_price = parse_money(row['guidance_price'])
             result.update({
                 'lease_installment_price': lease_price,
-                'sale_total_price': sale_price,
                 'legacy_guidance_price': legacy_model_price or legacy_price,
                 'source': '车型指导价',
             })
     return result
-
-
-def has_model_dual_guidance(conn, car_type):
-    if not car_type:
-        return False
-    row = conn.execute("""
-        SELECT lease_installment_price, sale_total_price
-        FROM model_guidance_prices
-        WHERE car_type=? LIMIT 1
-    """, (normalize_base_car_type(car_type),)).fetchone()
-    return bool(row and (
-        (parse_money(row['lease_installment_price']) > 0 and parse_money(row['sale_total_price']) > 0)
-        or parse_money(row['sale_total_price']) > 0
-        or parse_money(row['lease_installment_price']) > 0
-    ))
 
 
 def calculate_guidance_check(conn, vehicle, sales_mode, sale_total_price, lease_quote, upfront_amount,
@@ -406,7 +575,6 @@ def calculate_guidance_check(conn, vehicle, sales_mode, sale_total_price, lease_
     """
     guidance = resolve_guidance_prices_for_vehicle(conn, vehicle)
     mode = contract_type_from_sales_mode(sales_mode)
-    total_price = parse_money(sale_total_price)
     installment = parse_money(lease_quote)
     deposit_quote = parse_money(upfront_amount)
     missing = []
@@ -426,7 +594,7 @@ def calculate_guidance_check(conn, vehicle, sales_mode, sale_total_price, lease_
         g = resolve_lease_guidance(conn, car_type, vehicle_box_type, tail_plate, is_new=is_new or None)
         result = {
             'mode': mode,
-            'base_price': total_price or guidance['sale_total_price'] or guidance['legacy_guidance_price'],
+            'base_price': guidance['lease_installment_price'] or guidance['legacy_guidance_price'],
             'quote_price': installment,
             'guidance_price': g['monthly_guidance'],
             'guidance': g,
@@ -444,12 +612,25 @@ def calculate_guidance_check(conn, vehicle, sales_mode, sale_total_price, lease_
         return result
 
     if mode == '以租代售':
-        plan = resolve_finance_plan(conn, finance_plan_id)
+        car_type = (vehicle or {}).get('car_type') if isinstance(vehicle, dict) else (vehicle['car_type'] if vehicle else '')
+        condition = ''
+        if vehicle:
+            if isinstance(vehicle, dict):
+                condition = vehicle.get('condition') or vehicle.get('is_new') or ''
+            else:
+                try:
+                    condition = vehicle['condition'] or ''
+                except (IndexError, KeyError):
+                    condition = ''
+        plan = resolve_finance_plan(
+            conn, finance_plan_id, car_type=car_type,
+            condition=condition or '新车', box_type=vehicle_box_type,
+        )
         if not plan:
-            missing.append('请选择以租代售金融方案')
+            missing.append('请选择与车辆新车厢型一致的以租代售金融方案')
         return {
             'mode': mode,
-            'base_price': total_price or guidance['sale_total_price'] or guidance['legacy_guidance_price'],
+            'base_price': guidance['lease_installment_price'] or guidance['legacy_guidance_price'],
             'quote_price': installment,
             'guidance_price': 0,
             'guidance': {'plan': plan},
@@ -461,7 +642,7 @@ def calculate_guidance_check(conn, vehicle, sales_mode, sale_total_price, lease_
     # 兜底：未知模式按租赁处理（normalize_sales_mode 已保证仅 租赁/以租代售）
     return {
         'mode': mode,
-        'base_price': total_price or guidance['sale_total_price'] or guidance['legacy_guidance_price'],
+        'base_price': guidance['lease_installment_price'] or guidance['legacy_guidance_price'],
         'quote_price': installment,
         'guidance_price': 0,
         'guidance': guidance,
@@ -472,21 +653,104 @@ def calculate_guidance_check(conn, vehicle, sales_mode, sale_total_price, lease_
     }
 
 
-def validate_vehicle_dict(conn, car_type):
+# 车辆维度字段 → 数据字典 category 映射（SKU 改造：字典动态化）
+VEHICLE_DIM_CATEGORY_MAP = {
+    'brand': 'brand',                # 品牌
+    'product_series': 'product_series',  # 品系
+    'box_type': 'box_type',          # 厢型
+    'battery_capacity': 'battery_capacity',  # 电池度数
+    'horsepower': 'horsepower',      # 马力
+    'gear_position': 'gear_position',  # 档位
+    'battery_brand': 'battery_brand',  # 电池品牌
+}
+
+# 数据字典只维护基准车型与 SKU 所需维度。颜色、驾驶室仅为车辆实例/
+# 报单快照字段；历史的 engine_battery / power_battery / gearbox / box_dimension
+# 也不再给操作人员维护。
+DICT_CATEGORY_ENERGY_LIMITS = {
+    'brand': (),
+    'product_series': (),
+    'box_type': (),
+    'battery_brand': ('纯电',),
+    'battery_capacity': ('纯电',),
+    'horsepower': ('混动', '燃油车'),
+    'gear_position': ('混动', '燃油车'),
+}
+RETIRED_DICT_CATEGORIES = {
+    'box_dimension', 'engine_battery', 'power_battery', 'gearbox',
+    'vehicle_color', 'cab_type',
+}
+
+# 可选维度（字典缺失时仅 warning 不阻塞）；基准车型不完整或未维护指导价才阻塞报单。
+WARNING_DIM_CATEGORIES = set(VEHICLE_DIM_CATEGORY_MAP.values())
+
+
+def dict_value_exists(conn, category, value, energy_type=''):
+    """字典中是否存在可用于指定能源类型的启用值。"""
+    if not category or not value:
+        return True
+    params = [category, value]
+    where = "category=? AND value=? AND status='启用'"
+    allowed_energies = DICT_CATEGORY_ENERGY_LIMITS.get(category, ())
+    if allowed_energies:
+        if energy_type not in allowed_energies:
+            return False
+        where += " AND energy_type=?"
+        params.append(energy_type)
+    else:
+        where += " AND COALESCE(energy_type, '')=''"
+    return bool(conn.execute(
+        f"SELECT 1 FROM data_dictionaries WHERE {where} LIMIT 1",
+        params
+    ).fetchone())
+
+
+def validate_vehicle_dict(conn, car_type, vehicle=None):
     """校验车辆数据字典字段，返回 (validation_status, validation_message)。
-    可扩展：后续追加 product_code、announce_model 等字典检查。
+
+    20260810 SKU 改造：
+    - car_type 不在指导价字典（normalize_base_car_type 归一化后查 model_guidance_prices）→ invalid（阻塞报单）
+    - 品牌/品系/厢型等维度值不在 data_dictionaries → warning（不阻塞，提示老板补充字典）
     """
     checks = []
     if car_type:
-        base = normalize_base_car_type(car_type)
+        candidates = guidance_base_candidates(car_type)
         row = conn.execute(
-            "SELECT 1 FROM model_guidance_prices WHERE car_type=? LIMIT 1",
-            (base,)
+            "SELECT 1 FROM model_guidance_prices WHERE car_type IN ({}) LIMIT 1".format(
+                ','.join('?' for _ in candidates)
+            ),
+            candidates
         ).fetchone()
         if not row:
             checks.append(f"车型「{car_type}」不在已维护的指导价字典中，请先维护车型指导价")
+
+    # 基准车型的能源维度完整性与互斥性（invalid）
+    if vehicle:
+        identity_errors = base_model_validation_errors(vehicle)
+        if identity_errors:
+            checks.extend(identity_errors)
+
+        # 维度值字典检查（warning 级），仅校验当前能源类型适用维度。
+        warnings = []
+        energy_type = energy_type_for_vehicle(vehicle)
+        for field, category in VEHICLE_DIM_CATEGORY_MAP.items():
+            val = (vehicle.get(field) or '').strip() if hasattr(vehicle, 'get') else ''
+            limits = DICT_CATEGORY_ENERGY_LIMITS.get(category, ())
+            if limits and energy_type not in limits:
+                continue
+            if val and not dict_value_exists(conn, category, val, energy_type):
+                warnings.append(f"「{val}」不在{category}字典中")
+        if warnings:
+            checks.append('数据字典待补充：' + '；'.join(warnings))
+
     if checks:
-        return ('invalid', '；'.join(checks))
+        # invalid 优先（基准车型/指导价缺失阻塞报单）；仅字典缺失时为 warning
+        status = 'invalid' if any(
+            item.startswith('车型「') or '基准车型缺少' in item
+            or '车型不应填写' in item or item.startswith('请填写燃料形式')
+            for item in checks
+        ) else 'warning'
+        return (status, '；'.join(checks))
     return ('valid', '')
 
 
@@ -595,6 +859,8 @@ def build_return_inspection_payload(conn, rid):
 def return_inspection_status_for_step(row):
     if not row:
         return '待登记'
+    if row.get('status') == '已驳回待销售修改':
+        return '已驳回待销售修改'
     if row.get('paid_out'):
         return '已完成'
     if row.get('boss_approved'):
@@ -621,9 +887,9 @@ def update_return_inspection_status(conn, rid):
 
 
 def resolve_guidance_price_for_vehicle(conn, vehicle):
-    """历史调用兼容：返回以租代售整车价优先的单值。"""
+    """历史调用兼容：返回租赁月供参考价优先的单值（sale_total_price 已废弃）。"""
     prices = resolve_guidance_prices_for_vehicle(conn, vehicle)
-    price = prices['sale_total_price'] or prices['lease_installment_price'] or prices['legacy_guidance_price']
+    price = prices['lease_installment_price'] or prices['legacy_guidance_price']
     return price, prices['source'] or '指导价'
 
 
@@ -644,7 +910,7 @@ def unresolved_guidance_vehicle_count(conn):
     vehicle_groups = [dict(r) for r in c.fetchall()]
     c.execute("""
         SELECT car_type, is_new,
-               sale_total_price, guidance_price, lease_deposit_guidance,
+               guidance_price, lease_deposit_guidance,
                box_standard_price, box_wide_price, box_high_rail_price,
                box_refrigerated_price, box_flatbed_price
         FROM model_guidance_prices
@@ -653,7 +919,7 @@ def unresolved_guidance_vehicle_count(conn):
 
     def _configured(r):
         return any(parse_money(r.get(k)) > 0 for k in (
-            'sale_total_price', 'guidance_price', 'lease_deposit_guidance',
+            'guidance_price', 'lease_deposit_guidance',
             'box_standard_price', 'box_wide_price', 'box_high_rail_price',
             'box_refrigerated_price', 'box_flatbed_price'))
 
@@ -1764,17 +2030,35 @@ def ensure_sales_order_planning_contract(conn, order_id, overrides=None, reset_f
             customer_id = c.lastrowid
 
     start_date = data.get('start_date') or order['payment_date'] or datetime.now().strftime('%Y-%m-%d')
-    loan_periods = parse_period_count(data.get('loan_periods') or order['lease_term'], 12)
+    plan_snapshot = {}
+    if contract_type == '以租代售' and order['snapshot_finance_plan']:
+        try:
+            plan_snapshot = json.loads(order['snapshot_finance_plan'])
+        except (TypeError, ValueError):
+            plan_snapshot = {}
+    loan_periods = parse_period_count(
+        data.get('loan_periods') or plan_snapshot.get('periods') or order['lease_term'],
+        12,
+    )
     try:
         repayment_day_default = min(datetime.strptime(normalize_date(start_date), '%Y-%m-%d').day, 28)
     except (TypeError, ValueError):
         repayment_day_default = 1
     repayment_day = int(parse_money(data.get('repayment_day'), repayment_day_default) or repayment_day_default)
     repayment_day = min(max(repayment_day, 1), 28)
-    rent = parse_money(data.get('rent'), parse_money(order['vehicle_rent_amount']))  # sale_total_price 已废弃
+    rent = parse_money(
+        data.get('rent'),
+        parse_money(plan_snapshot.get('period_price'), parse_money(order['vehicle_rent_amount'])),
+    )
     order_payment_amount = parse_money(order['deposit_amount'])
     deposit = parse_money(data.get('deposit'), order_payment_amount if contract_type == '租赁' else 0)
-    down_payment = parse_money(data.get('down_payment'), (order_payment_amount or parse_money(order['car_purchase_amount'])) if contract_type == '以租代售' else 0)
+    down_payment = parse_money(
+        data.get('down_payment'),
+        parse_money(
+            plan_snapshot.get('down_payment'),
+            order_payment_amount or parse_money(order['car_purchase_amount']),
+        ) if contract_type == '以租代售' else 0,
+    )
     monthly_payment = parse_money(data.get('monthly_payment'), 0)
     factory_periods = int(data.get('factory_periods') or loan_periods)
     factory_repayment_months = int(data.get('factory_repayment_months') or factory_periods)
@@ -2068,11 +2352,12 @@ def run_daily_collect(force=False):
             return {'skipped': True, 'run_date': today_str}
     today = datetime.strptime(today_str, '%Y-%m-%d').date()
     expire_sales_order_drafts(conn)
-    stats = {'near': 0, 'due': 0, 'overdue': 0, 'late_fee': 0, 'urge_op': 0, 'urge_sales': 0}
+    stats = {'near': 0, 'due': 0, 'overdue': 0, 'late_fee': 0, 'urge_op': 0, 'urge_sales': 0, 't3_reminder': 0}
     contract_late = {}  # contract_id -> 累计滞纳金
     c.execute("""
         SELECT r.id, r.contract_id, r.period, r.due_date, r.amount,
-               COALESCE(r.paid_amount,0) AS paid_amount, r.status
+               COALESCE(r.paid_amount,0) AS paid_amount, r.status,
+               c.vehicle_id
         FROM repayments r
         JOIN contracts c ON c.id = r.contract_id
         WHERE (r.status IN ('待还款','临近还款','还款日','部分核销','预抵','逾期')
@@ -2083,6 +2368,18 @@ def run_daily_collect(force=False):
     """)
     for r in c.fetchall():
         _process_repayment_row(c, r, today, today_str, stats, contract_late)
+    # 补生成提醒文案：状态已是「临近还款」但历史漏跑未写提醒的期（幂等）。
+    c.execute("""
+        SELECT r.id, r.contract_id, r.due_date
+        FROM repayments r
+        JOIN contracts c ON c.id = r.contract_id
+        WHERE r.status='临近还款'
+          AND r.period >= 1
+          AND c.delivery_status='已出库'
+    """)
+    for r in c.fetchall():
+        if ensure_t3_reminder(c, r, today_str):
+            stats['t3_reminder'] += 1
     c.execute("""
         SELECT id, contract_id, repayment_id, initial_payment_id, receivable_type,
                source_period, amount, paid_amount, due_date, promised_repay_date, status
@@ -2097,7 +2394,8 @@ def run_daily_collect(force=False):
     # 厂家还款仍按简单逾期标记
     c.execute("UPDATE factory_repayments SET status='逾期' WHERE status='待还款' AND due_date < ?", (today_str,))
     summary = (f"near={stats['near']} due={stats['due']} overdue={stats['overdue']} "
-               f"late_fee_rows={stats['late_fee']} urge_op={stats['urge_op']} urge_sales={stats['urge_sales']}")
+               f"late_fee_rows={stats['late_fee']} urge_op={stats['urge_op']} urge_sales={stats['urge_sales']} "
+               f"t3_reminder={stats['t3_reminder']}")
     c.execute("INSERT OR REPLACE INTO daily_job_runs (job, run_date, ran_at, summary) "
               "VALUES ('daily-collect', ?, datetime('now','localtime'), ?)", (today_str, summary))
     conn.commit()
@@ -2110,6 +2408,57 @@ def check_overdue():
     重算幂等（状态按 diff 重推；late_fee_ledger 按 (repayment_id,accrued_date) 唯一去重），
     故用 force=True 保证视图实时反映最新到期/逾期，不受当天调度幂等门控影响。"""
     run_daily_collect(force=True)
+
+
+def ensure_urge_task(c, repayment, urge_day):
+    """按还款期和节点幂等创建待执行催收任务。"""
+    urge_type = '运营催款' if urge_day == 3 else '销售催款'
+    c.execute("""
+        INSERT OR IGNORE INTO urge_records
+            (repayment_id, contract_id, vehicle_id, urge_type, urge_day, status, result, remark)
+        VALUES (?, ?, ?, ?, ?, '待执行', '待跟进', ?)
+    """, (
+        repayment['id'],
+        repayment['contract_id'],
+        repayment['vehicle_id'],
+        urge_type,
+        urge_day,
+        f'系统于逾期 T+{urge_day} 创建催收任务',
+    ))
+
+
+def _t3_reminder_text(customer_name, plate_number, vin, due_date):
+    """流程图 4.1 T-3 提醒文案：尊敬的xx，您的车架号为xx的车辆将于xx日进行还款，请您知悉。"""
+    return f"尊敬的{customer_name or '客户'}，您的车架号为{vin or '-'}的车辆将于{due_date}进行还款，请您知悉"
+
+
+def ensure_t3_reminder(c, repayment, today_str):
+    """T-3 临近还款提醒：按还款期幂等生成提醒文案（写审计日志，界面从还款单状态呈现黄色预警）。"""
+    rid = repayment['id']
+    exists = c.execute(
+        "SELECT 1 FROM audit_logs WHERE action='T-3还款提醒' AND target_type='repayment' AND target_id=? LIMIT 1",
+        (rid,),
+    ).fetchone()
+    if exists:
+        return False
+    row = c.execute("""
+        SELECT v.plate_number, v.vin, cu.name AS customer_name
+        FROM contracts ct
+        JOIN vehicles v ON v.id = ct.vehicle_id
+        LEFT JOIN customers cu ON cu.id = ct.customer_id
+        WHERE ct.id=?
+    """, (repayment['contract_id'],)).fetchone()
+    text = _t3_reminder_text(
+        row['customer_name'] if row else '',
+        row['plate_number'] if row else '',
+        row['vin'] if row else '',
+        repayment['due_date'],
+    )
+    c.execute(
+        "INSERT INTO audit_logs (action, target_type, target_id, detail, operator) VALUES (?, ?, ?, ?, ?)",
+        ('T-3还款提醒', 'repayment', rid, text, '系统'),
+    )
+    return True
 
 
 def _process_repayment_row(c, r, today, today_str, stats, contract_late):
@@ -2139,6 +2488,8 @@ def _process_repayment_row(c, r, today, today_str, stats, contract_late):
         if status in ('待还款',):
             new_status = '临近还款'
             stats['near'] += 1
+            if ensure_t3_reminder(c, r, today_str):
+                stats['t3_reminder'] += 1
     elif diff == 0:
         if status in ('待还款', '临近还款', '部分核销'):
             new_status = '还款日'
@@ -2151,9 +2502,12 @@ def _process_repayment_row(c, r, today, today_str, stats, contract_late):
             if cum is not None:
                 contract_late[cid] = contract_late.get(cid, 0) + cum
                 stats['late_fee'] += 1
-            if diff == 3:
+            # 日终任务可能首次就在 T+3/T+7 之后执行，需补齐所有已到期节点。
+            if diff >= 3:
+                ensure_urge_task(c, r, 3)
                 stats['urge_op'] += 1
-            elif diff == 7:
+            if diff >= 7:
+                ensure_urge_task(c, r, 7)
                 stats['urge_sales'] += 1
 
     if new_status != status:
@@ -2554,6 +2908,7 @@ CAR_TYPE_PRESETS = [
     {'label': '解放轻卡3米8-云内150排半',            'category': '油车'},
 ]
 
+# 报单端静态配置（20260810 SKU 改造：已入库 data_dictionaries，以下保留为种子数据来源与兜底）
 SALES_ORDER_CAR_OPTION_CONFIG = [
     {
         'category': '纯电',
@@ -2594,6 +2949,95 @@ SALES_ORDER_COMMON_OPTIONS = {
     'box_remark_placeholder': '填写厢尺寸、侧门、尾板等要求',
 }
 
+# 静态配置 → 字典 category 映射（种子数据灌入用）
+DICT_SEED_MAPPING = {
+    # 保留旧报单结构所需的映射；实际落库分类以当前基准车型维度为准。
+    'box_options': ('box_type', 'categories'),
+    'brand': ('brand', 'common'),
+    'product_series': ('product_series', 'common'),
+    'battery_capacity': ('battery_capacity', 'common'),
+    'horsepower': ('horsepower', 'common'),
+    'gear_position': ('gear_position', 'common'),
+    'battery_brand': ('battery_brand', 'common'),
+}
+
+# 所有字典 category 及其中文标签（设置页字典管理 Tab 用）
+DICT_CATEGORIES = [
+    ('brand', '品牌'), ('product_series', '品系'), ('box_type', '厢型'),
+    ('battery_capacity', '电池度数'), ('horsepower', '马力'),
+    ('gear_position', '档位'),
+    ('battery_brand', '电池品牌'),
+]
+
+
+def seed_data_dictionaries(conn):
+    """把静态配置 + 存量车辆维度值灌入 data_dictionaries（幂等）。"""
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    inserted = 0
+
+    def _add(category, value, energy_type='', sort_order=0):
+        nonlocal inserted
+        if not value:
+            return
+        cur = conn.execute("""
+            INSERT OR IGNORE INTO data_dictionaries (category, value, energy_type, sort_order, status, created_by, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, '启用', ?, ?, ?)
+        """, (category, str(value).strip(), energy_type, sort_order, '系统', '系统', now))
+        if cur.rowcount and cur.rowcount > 0:
+            inserted += 1
+
+    # 1) 静态配置 → 字典（仅保留基准车型与 SKU 主数据维度）
+    for cfg in SALES_ORDER_CAR_OPTION_CONFIG:
+        energy = cfg['category']
+        for v in (cfg.get('box_options') or []):
+            _add('box_type', v)
+        if energy == '纯电':
+            for v in (cfg.get('engine_battery_options') or []):
+                _add('battery_brand', v, energy_type='纯电')
+            for v in (cfg.get('power_battery_options') or []):
+                _add('battery_capacity', v, energy_type='纯电')
+        elif energy in ('混动', '燃油车'):
+            for v in (cfg.get('power_battery_options') or []):
+                _add('horsepower', v, energy_type=energy)
+            for v in (cfg.get('gearbox_options') or []):
+                _add('gear_position', v, energy_type=energy)
+    for key, values in SALES_ORDER_COMMON_OPTIONS.items():
+        if not isinstance(values, list):
+            continue
+        category = DICT_SEED_MAPPING.get(key, ('', ''))[0]
+        if category not in dict(DICT_CATEGORIES):
+            continue
+        for v in values:
+            _add(category, v)
+
+    # 2) 存量车辆维度值补录（防下拉无值）
+    vehicle_dim_cols = {
+        'brand': 'brand', 'product_series': 'product_series', 'box_type': 'box_type',
+        'battery_capacity': 'battery_capacity', 'horsepower': 'horsepower',
+        'gear_position': 'gear_position',
+        'battery_brand': 'battery_brand',
+    }
+    for category, col in vehicle_dim_cols.items():
+        try:
+            rows = conn.execute(
+                f"""SELECT DISTINCT {col} AS v, fuel_form, battery_model
+                    FROM vehicles
+                    WHERE {col} IS NOT NULL AND TRIM({col}) != ''"""
+            ).fetchall()
+        except Exception:
+            continue
+        for r in rows:
+            allowed_energies = DICT_CATEGORY_ENERGY_LIMITS.get(category, ())
+            energy_type = energy_type_for_vehicle(dict(r))
+            if allowed_energies and energy_type not in allowed_energies:
+                continue
+            _add(category, r['v'], energy_type=energy_type if allowed_energies else '')
+
+    conn.commit()
+    if inserted:
+        print(f"Data dictionaries seeded: {inserted} entries")
+
+
 @app.route('/api/car-types', methods=['GET'])
 def get_car_types():
     return jsonify(CAR_TYPE_PRESETS)
@@ -2602,10 +3046,192 @@ def get_car_types():
 @app.route('/api/sales-order-car-options', methods=['GET'])
 @login_required
 def get_sales_order_car_options():
+    """报单端规格配置。20260810 SKU 改造：从 data_dictionaries 组装，
+    保持原 {categories, common_options} 结构（前端 fetchSalesOrderCarOptions 无需改动）。
+    categories：能源专属值 + 通用值（去重）；common_options：全部启用值去重（兜底池）。"""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT category, value, energy_type, sort_order, status FROM data_dictionaries WHERE status='启用' ORDER BY sort_order ASC, id ASC"
+    ).fetchall()
+    conn.close()
+
+    def _dedup(vals):
+        seen = set()
+        out = []
+        for v in vals:
+            if v and v not in seen:
+                seen.add(v)
+                out.append(v)
+        return out
+
+    def _values(category, energy_type=''):
+        return _dedup([
+            r['value'] for r in rows
+            if r['category'] == category
+            and (
+                (not DICT_CATEGORY_ENERGY_LIMITS.get(category) and not r['energy_type'])
+                or r['energy_type'] == energy_type
+            )
+        ])
+
+    categories = []
+    for energy in ('纯电', '混动', '燃油车'):
+        cat = {'category': energy, 'box_remark_placeholder': ''}
+        static_cfg = next(
+            (item for item in SALES_ORDER_CAR_OPTION_CONFIG if item['category'] == energy),
+            {},
+        )
+        # 颜色、驾驶室属于车辆实例/报单快照，不属于可维护的数据字典。
+        cat['cab_options'] = list(static_cfg.get('cab_options') or [])
+        cat['color_options'] = list(static_cfg.get('color_options') or [])
+        cat['box_options'] = _values('box_type')
+        if energy == '纯电':
+            cat['engine_battery_options'] = _values('battery_brand', energy)
+            cat['power_battery_options'] = _values('battery_capacity', energy)
+            cat['gearbox_options'] = []
+        else:
+            cat['engine_battery_options'] = []
+            cat['power_battery_options'] = _values('horsepower', energy)
+            cat['gearbox_options'] = _values('gear_position', energy)
+        categories.append(cat)
+
+    common = {
+        'color_options': list(SALES_ORDER_COMMON_OPTIONS['color_options']),
+    }
+    box_values = _values('box_type')
+    if box_values:
+        common['box_options'] = box_values
+    common['box_remark_placeholder'] = SALES_ORDER_COMMON_OPTIONS['box_remark_placeholder']
+
     return jsonify({
-        'categories': SALES_ORDER_CAR_OPTION_CONFIG,
-        'common_options': SALES_ORDER_COMMON_OPTIONS,
+        'categories': categories,
+        'common_options': common,
     })
+
+
+# ======================== 数据字典 CRUD（SKU 改造）====================
+@app.route('/api/data-dictionaries', methods=['GET'])
+@login_required
+def get_data_dictionaries():
+    """字典查询；?category=xx & energy_type=xx 可选过滤。"""
+    conn = get_db()
+    category = (request.args.get('category') or '').strip()
+    energy_type = (request.args.get('energy_type') or '').strip()
+    sql = "SELECT * FROM data_dictionaries WHERE category NOT IN ({})".format(
+        ','.join('?' for _ in RETIRED_DICT_CATEGORIES)
+    )
+    params = list(RETIRED_DICT_CATEGORIES)
+    if category:
+        sql += " AND category=?"
+        params.append(category)
+    if energy_type:
+        sql += " AND energy_type=?"
+        params.append(energy_type)
+    sql += " ORDER BY category ASC, sort_order ASC, id ASC"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    visible_rows = []
+    for row in rows:
+        item = dict(row)
+        allowed_energies = DICT_CATEGORY_ENERGY_LIMITS.get(item['category'], ())
+        # 旧版本写入的错误能耗范围只保留在库中，不再展示或参与操作。
+        if allowed_energies and item.get('energy_type') not in allowed_energies:
+            continue
+        if not allowed_energies and item.get('energy_type'):
+            continue
+        visible_rows.append(item)
+    return jsonify(visible_rows)
+
+
+@app.route('/api/data-dictionaries', methods=['POST'])
+@require_role('老板')
+def upsert_data_dictionary():
+    """老板新增/修改字典项。"""
+    data = request.json or {}
+    category = (data.get('category') or '').strip()
+    value = (data.get('value') or '').strip()
+    energy_type = (data.get('energy_type') or '').strip()
+    sort_order = int(data.get('sort_order') or 0)
+    remark = (data.get('remark') or '').strip()
+    if not category:
+        return jsonify({'success': False, 'message': '请选择维度分类'}), 400
+    if not value:
+        return jsonify({'success': False, 'message': '请填写选项值'}), 400
+    if category in RETIRED_DICT_CATEGORIES:
+        return jsonify({'success': False, 'message': f'维度“{category}”已停用，不再维护'}), 400
+    if category not in dict(DICT_CATEGORIES):
+        return jsonify({'success': False, 'message': f'未知维度分类：{category}'}), 400
+    allowed_energies = DICT_CATEGORY_ENERGY_LIMITS.get(category, ())
+    if allowed_energies and energy_type not in allowed_energies:
+        return jsonify({
+            'success': False,
+            'message': f'{dict(DICT_CATEGORIES)[category]}仅适用于“{" / ".join(allowed_energies)}”',
+        }), 400
+    if not allowed_energies and energy_type:
+        return jsonify({
+            'success': False,
+            'message': f'{dict(DICT_CATEGORIES)[category]}为通用维度，不应指定能源类型',
+        }), 400
+
+    user = request.current_user
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db()
+    try:
+        dict_id = data.get('id')
+        if dict_id:
+            conn.execute("""
+                UPDATE data_dictionaries
+                SET value=?, energy_type=?, sort_order=?, remark=?, status=?, updated_by=?, updated_at=?
+                WHERE id=?
+            """, (value, energy_type, sort_order, remark, data.get('status') or '启用',
+                  user['display_name'], now, dict_id))
+        else:
+            # 重复值则直接置回启用
+            exists = conn.execute(
+                """SELECT id FROM data_dictionaries
+                   WHERE category=? AND value=? AND energy_type=?
+                   LIMIT 1""",
+                (category, value, energy_type)
+            ).fetchone()
+            if exists:
+                conn.execute("""
+                    UPDATE data_dictionaries SET status='启用', energy_type=?, sort_order=?, remark=?,
+                        updated_by=?, updated_at=? WHERE id=?
+                """, (energy_type, sort_order, remark, user['display_name'], now, exists['id']))
+                dict_id = exists['id']
+            else:
+                cur = conn.execute("""
+                    INSERT INTO data_dictionaries (category, value, energy_type, sort_order, status, created_by, updated_by, updated_at)
+                    VALUES (?, ?, ?, ?, '启用', ?, ?, ?)
+                """, (category, value, energy_type, sort_order, user['display_name'], user['display_name'], now))
+                dict_id = cur.lastrowid
+        log_audit(conn, '维护数据字典', 'data_dictionary', dict_id,
+                  f'{category}「{value}」', user['display_name'])
+        conn.commit()
+        return jsonify({'success': True, 'id': dict_id, 'message': '字典项已保存'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 400
+    finally:
+        conn.close()
+
+
+@app.route('/api/data-dictionaries/<int:did>', methods=['DELETE'])
+@require_role('老板')
+def delete_data_dictionary(did):
+    """软删字典项（status='停用'）。"""
+    conn = get_db()
+    row = conn.execute("SELECT category, value FROM data_dictionaries WHERE id=?", (did,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '字典项不存在'}), 404
+    conn.execute("UPDATE data_dictionaries SET status='停用', updated_by=?, updated_at=? WHERE id=?",
+                 (request.current_user['display_name'], datetime.now().strftime('%Y-%m-%d %H:%M:%S'), did))
+    log_audit(conn, '停用数据字典', 'data_dictionary', did,
+              f"{row['category']}「{row['value']}」", request.current_user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '字典项已停用'})
 
 
 @app.route('/api/model-guidance-prices', methods=['GET'])
@@ -2614,7 +3240,7 @@ def get_model_guidance_prices():
     conn = get_db()
     c = conn.cursor()
     c.execute("""
-        SELECT car_type, is_new, guidance_price, lease_installment_price, sale_total_price,
+        SELECT car_type, is_new, guidance_price, lease_installment_price,
                lease_deposit_guidance,
                box_standard_price, box_wide_price, box_high_rail_price,
                box_refrigerated_price, box_flatbed_price, tail_plate_price,
@@ -2624,7 +3250,7 @@ def get_model_guidance_prices():
     """)
     rows_all = [dict(row) for row in c.fetchall()]
     # 20260807 方案一：configured 键归一化为基准车型（去成色+去厢型），同 base+is_new 多行保留非0金额列最多的那行
-    _MONEY_COLS = ['guidance_price', 'lease_installment_price', 'sale_total_price',
+    _MONEY_COLS = ['guidance_price', 'lease_installment_price',
                    'lease_deposit_guidance', 'box_standard_price', 'box_wide_price',
                    'box_high_rail_price', 'box_refrigerated_price', 'box_flatbed_price',
                    'tail_plate_price']
@@ -2647,30 +3273,30 @@ def get_model_guidance_prices():
 
     c.execute("""
         SELECT car_type,
-               COUNT(*) as vehicle_count
+               COALESCE(NULLIF(condition, ''), '新车') AS is_new,
+               COUNT(*) AS vehicle_count
         FROM vehicles
         WHERE COALESCE(car_type, '') != ''
           AND (is_deleted IS NULL OR is_deleted = 0)
-        GROUP BY car_type
+        GROUP BY car_type, COALESCE(NULLIF(condition, ''), '新车')
         ORDER BY car_type ASC
     """)
     rows = []
     seen = set()
-    # 20260807 方案一：多个带厢型 car_type 归一化到同一基准 → 按 (base, is_new) 聚合并累加 vehicle_count
+    # 多个带厢型 car_type 归一化到同一基准，并按真实成色累计车辆数。
     agg = {}
     for row in c.fetchall():
         base = normalize_base_car_type(row['car_type'])
-        for is_new in ('新车', '二手车'):
-            key = (base, is_new)
-            g = agg.setdefault(key, {'vehicle_count': 0})
-            g['vehicle_count'] += row['vehicle_count']
+        is_new = row['is_new'] if row['is_new'] in ('新车', '二手车') else '新车'
+        key = (base, is_new)
+        g = agg.setdefault(key, {'vehicle_count': 0})
+        g['vehicle_count'] += row['vehicle_count']
     for key, g in sorted(agg.items()):
         base, is_new = key
         item = configured.get(key, {
             'car_type': base, 'is_new': is_new,
             'guidance_price': 0,
             'lease_installment_price': 0,
-            'sale_total_price': 0,
             'lease_deposit_guidance': 0,
             'box_standard_price': 0, 'box_wide_price': 0, 'box_high_rail_price': 0,
             'box_refrigerated_price': 0, 'box_flatbed_price': 0, 'tail_plate_price': 0,
@@ -2681,7 +3307,6 @@ def get_model_guidance_prices():
         item = dict(item)
         item['guidance_price'] = item.get('guidance_price') or 0
         item['lease_installment_price'] = item.get('lease_installment_price') or 0
-        item['sale_total_price'] = item.get('sale_total_price') or 0
         item['vehicle_count'] = g['vehicle_count']
         rows.append(item)
         seen.add(key)
@@ -2691,12 +3316,138 @@ def get_model_guidance_prices():
             item = dict(item)
             item['guidance_price'] = item.get('guidance_price') or 0
             item['lease_installment_price'] = item.get('lease_installment_price') or 0
-            item['sale_total_price'] = item.get('sale_total_price') or 0
             item['vehicle_count'] = 0
             rows.append(item)
 
     conn.close()
     return jsonify(rows)
+
+
+@app.route('/api/model-guidance-workbench', methods=['GET'])
+@require_role('老板')
+def get_model_guidance_workbench():
+    """返回一个基准车型的租赁覆盖矩阵与以租代售新车厢型方案矩阵。"""
+    requested_car_type = (request.args.get('car_type') or '').strip()
+    base_type = normalize_base_car_type(requested_car_type)
+    if not base_type:
+        return jsonify({'success': False, 'message': '请选择基准车型'}), 400
+
+    conn = get_db()
+    try:
+        guidance_rows = conn.execute("""
+            SELECT car_type, is_new, lease_deposit_guidance,
+                   box_standard_price, box_wide_price, box_high_rail_price,
+                   box_refrigerated_price, box_flatbed_price, tail_plate_price,
+                   remark, updated_by, updated_at
+            FROM model_guidance_prices
+        """).fetchall()
+        guidance_by_condition = {}
+        for db_row in guidance_rows:
+            row = dict(db_row)
+            if normalize_base_car_type(row['car_type']) != base_type:
+                continue
+            condition = row['is_new'] if row['is_new'] in ('新车', '二手车') else '新车'
+            previous = guidance_by_condition.get(condition)
+            money_fields = ('lease_deposit_guidance',) + tuple(BOX_TYPE_MONTHLY_PRICE_COLUMNS.values())
+            if not previous or sum(parse_money(row.get(k)) > 0 for k in money_fields) > sum(
+                parse_money(previous.get(k)) > 0 for k in money_fields
+            ):
+                guidance_by_condition[condition] = row
+
+        inventory_counts = {}
+        vehicles = conn.execute("""
+            SELECT car_type, condition, box_type
+            FROM vehicles
+            WHERE (is_deleted IS NULL OR is_deleted=0)
+              AND COALESCE(status, '') IN ('在库', '报单锁定中')
+        """).fetchall()
+        for db_vehicle in vehicles:
+            vehicle = dict(db_vehicle)
+            if normalize_base_car_type(vehicle['car_type']) != base_type:
+                continue
+            condition = vehicle['condition'] if vehicle['condition'] in ('新车', '二手车') else '新车'
+            box_type = (vehicle['box_type'] or '').strip()
+            if box_type in GUIDANCE_BOX_TYPES:
+                key = (condition, box_type)
+                inventory_counts[key] = inventory_counts.get(key, 0) + 1
+
+        lease_rows = []
+        for condition in ('新车', '二手车'):
+            price_row = guidance_by_condition.get(condition, {})
+            for box_type, price_field in BOX_TYPE_MONTHLY_PRICE_COLUMNS.items():
+                deposit = parse_money(price_row.get('lease_deposit_guidance'))
+                monthly = parse_money(price_row.get(price_field))
+                lease_rows.append({
+                    'condition': condition,
+                    'box_type': box_type,
+                    'price_field': price_field,
+                    'inventory_count': inventory_counts.get((condition, box_type), 0),
+                    'lease_deposit_guidance': deposit,
+                    'monthly_price': monthly,
+                    'tail_plate_price': parse_money(price_row.get('tail_plate_price')) or TAIL_PLATE_SURCHARGE,
+                    'remark': price_row.get('remark') or '',
+                    'updated_by': price_row.get('updated_by') or '',
+                    'updated_at': price_row.get('updated_at') or '',
+                    'status': '已设置' if deposit > 0 and monthly > 0 else '待设置',
+                })
+
+        plans = []
+        for db_plan in conn.execute(
+            "SELECT * FROM finance_plans ORDER BY sort_order ASC, id DESC"
+        ).fetchall():
+            plan = dict(db_plan)
+            if normalize_base_car_type(plan['car_type']) == base_type:
+                plan['car_type'] = base_type
+                plans.append(plan)
+
+        plans_by_box_type = {box_type: [] for box_type in GUIDANCE_BOX_TYPES}
+        legacy_plans = []
+        for plan in plans:
+            plan_condition = normalize_vehicle_condition(plan.get('condition'))
+            plan_box_type = (plan.get('box_type') or '').strip()
+            if plan_condition == '新车' and plan_box_type in plans_by_box_type:
+                plan['condition'] = '新车'
+                plans_by_box_type[plan_box_type].append(plan)
+            else:
+                # 历史方案原先只有基准车型，无法可靠推断厢型，不能参与报单匹配。
+                legacy_plans.append(plan)
+
+        rent_to_buy_rows = []
+        for box_type in GUIDANCE_BOX_TYPES:
+            box_plans = plans_by_box_type[box_type]
+            active_count = sum(1 for plan in box_plans if plan.get('status') != '停用')
+            rent_to_buy_rows.append({
+                'condition': '新车',
+                'box_type': box_type,
+                'inventory_count': inventory_counts.get(('新车', box_type), 0),
+                'plan_count': len(box_plans),
+                'active_plan_count': active_count,
+                'status': '已设置' if active_count else '待设置',
+                'plans': box_plans,
+            })
+
+        configured_count = sum(1 for row in lease_rows if row['status'] == '已设置')
+        return jsonify({
+            'success': True,
+            'car_type': base_type,
+            'lease_rows': lease_rows,
+            'finance_plans': plans,
+            'rent_to_buy_rows': rent_to_buy_rows,
+            'legacy_finance_plans': legacy_plans,
+            'summary': {
+                'total_count': len(lease_rows),
+                'configured_count': configured_count,
+                'missing_count': len(lease_rows) - configured_count,
+                'rent_to_buy_total_count': len(rent_to_buy_rows),
+                'rent_to_buy_configured_count': sum(
+                    1 for row in rent_to_buy_rows if row['status'] == '已设置'
+                ),
+                'rent_to_buy_plan_count': sum(row['plan_count'] for row in rent_to_buy_rows),
+                'legacy_finance_plan_count': len(legacy_plans),
+            },
+        })
+    finally:
+        conn.close()
 
 
 @app.route('/api/guidance-price-alerts', methods=['GET'])
@@ -2718,7 +3469,7 @@ def get_guidance_price_alerts():
     vehicle_groups = [dict(r) for r in c.fetchall()]
     c.execute("""
         SELECT car_type, is_new,
-               sale_total_price, guidance_price, lease_deposit_guidance,
+               guidance_price, lease_deposit_guidance,
                box_standard_price, box_wide_price, box_high_rail_price,
                box_refrigerated_price, box_flatbed_price
         FROM model_guidance_prices
@@ -2728,7 +3479,7 @@ def get_guidance_price_alerts():
 
     def _configured(r):
         return any(parse_money(r.get(k)) > 0 for k in (
-            'sale_total_price', 'guidance_price', 'lease_deposit_guidance',
+            'guidance_price', 'lease_deposit_guidance',
             'box_standard_price', 'box_wide_price', 'box_high_rail_price',
             'box_refrigerated_price', 'box_flatbed_price'))
 
@@ -2793,8 +3544,7 @@ def upsert_model_guidance_price():
     base_type = normalize_base_car_type(car_type)  # 去成色前缀+去厢型后缀，指导价按基准车型存（20260807）
     legacy_input = data.get('guidance_price', data.get('price'))
     lease_price = parse_money(data.get('lease_installment_price'))
-    sale_price = parse_money(data.get('sale_total_price'))
-    new_price = sale_price or lease_price
+    new_price = parse_money(legacy_input) or lease_price
     remark = (data.get('remark') or '').strip()
     # 新增Excel字段
     chassis_base_price = parse_money(data.get('chassis_base_price')) or 0
@@ -2822,15 +3572,31 @@ def upsert_model_guidance_price():
     conn = get_db()
     c = conn.cursor()
     try:
+        # 将旧版未显式记录“无尾板”的指导价在首次保存时迁移到新基准名，
+        # 避免同一无尾板车型在新旧名称下形成两条维护记录。
+        if base_type.endswith('无尾板'):
+            legacy_base_type = base_type[:-len('无尾板')]
+            legacy_row = c.execute(
+                "SELECT 1 FROM model_guidance_prices WHERE car_type=? AND is_new=?",
+                (legacy_base_type, is_new)
+            ).fetchone()
+            canonical_row = c.execute(
+                "SELECT 1 FROM model_guidance_prices WHERE car_type=? AND is_new=?",
+                (base_type, is_new)
+            ).fetchone()
+            if legacy_row and not canonical_row:
+                c.execute(
+                    "UPDATE model_guidance_prices SET car_type=? WHERE car_type=? AND is_new=?",
+                    (base_type, legacy_base_type, is_new)
+                )
         c.execute("""
-            SELECT guidance_price, lease_installment_price, sale_total_price
+            SELECT guidance_price, lease_installment_price
             FROM model_guidance_prices
             WHERE car_type=? AND is_new=?
         """, (base_type, is_new))
         existing = c.fetchone()
         old_price = existing['guidance_price'] if existing else 0
         old_lease_price = existing['lease_installment_price'] if existing else 0
-        old_sale_price = existing['sale_total_price'] if existing else 0
 
         # 20260807 方案一：按基准车型同步车辆（LIKE 后缀无法命中带厢型车名，改 Python 归一化过滤）
         all_vehicles = conn.execute(
@@ -2841,17 +3607,16 @@ def upsert_model_guidance_price():
 
         c.execute("""
             INSERT INTO model_guidance_prices
-                (car_type, is_new, guidance_price, lease_installment_price, sale_total_price,
+                (car_type, is_new, guidance_price, lease_installment_price,
                  chassis_base_price, landing_price, interest_free_plan, rent_to_buy_plan,
                  min_loan_plan, lease_plan, product_code, fuel_type,
                  lease_deposit_guidance, box_standard_price, box_wide_price, box_high_rail_price,
                  box_refrigerated_price, box_flatbed_price, tail_plate_price,
                  remark, updated_by, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(car_type, is_new) DO UPDATE SET
                 guidance_price=excluded.guidance_price,
                 lease_installment_price=excluded.lease_installment_price,
-                sale_total_price=excluded.sale_total_price,
                 chassis_base_price=excluded.chassis_base_price,
                 landing_price=excluded.landing_price,
                 interest_free_plan=excluded.interest_free_plan,
@@ -2871,7 +3636,7 @@ def upsert_model_guidance_price():
                 updated_by=excluded.updated_by,
                 updated_at=excluded.updated_at
         """, (
-            base_type, is_new, new_price, lease_price, sale_price,
+            base_type, is_new, new_price, lease_price,
             chassis_base_price, landing_price, interest_free_plan, rent_to_buy_plan,
             min_loan_plan, lease_plan, product_code, fuel_type,
             lease_deposit_guidance, box_standard_price, box_wide_price, box_high_rail_price,
@@ -2880,7 +3645,6 @@ def upsert_model_guidance_price():
         ))
         history_rows = [
             ('lease_installment', old_lease_price or old_price or 0, lease_price),
-            ('sale_total', old_sale_price or old_price or 0, sale_price),
         ]
         for price_kind, old_value, new_value in history_rows:
             c.execute("""
@@ -2903,7 +3667,7 @@ def upsert_model_guidance_price():
         remaining_missing_count = unresolved_guidance_vehicle_count(conn)
 
         log_audit(conn, '更新车型指导价', 'model_guidance_price', None,
-                  f'{user["display_name"]} 将车型「{car_type}」指导价调为整车价{new_price}，同步车辆 {affected_count} 台',
+                  f'{user["display_name"]} 将车型「{car_type}」租赁指导价调为月租{lease_price or new_price}，同步车辆 {affected_count} 台',
                   user['display_name'])
         conn.commit()
         return jsonify({
@@ -2912,7 +3676,6 @@ def upsert_model_guidance_price():
             'affected_vehicle_count': affected_count,
             'remaining_missing_guidance_count': remaining_missing_count,
             'lease_installment_price': lease_price,
-            'sale_total_price': sale_price,
         })
     except Exception as e:
         conn.rollback()
@@ -2993,6 +3756,7 @@ def import_guidance_prices():
             lease_plan = str(get(row_vals, '租赁方案') or '').strip() or None
             product_code = str(get(row_vals, '产品码') or '').strip() or None
             monthly = parse_monthly(rent_buy)
+            # sale_total_price（以租代售整车价）已废弃：Excel「整车」列仅作为历史单指导价展示来源
             guidance = landing or sale_total
 
             c.execute("SELECT id FROM model_guidance_prices WHERE car_type=?", (car_type,))
@@ -3001,26 +3765,26 @@ def import_guidance_prices():
                 c.execute("""
                     UPDATE model_guidance_prices SET
                         product_code=COALESCE(?, product_code),
-                        fuel_type=?, chassis_base_price=?, sale_total_price=?,
+                        fuel_type=?, chassis_base_price=?,
                         landing_price=?, guidance_price=?,
                         interest_free_plan=?, rent_to_buy_plan=?, min_loan_plan=?,
                         lease_plan=?,
                         lease_installment_price=CASE WHEN ? IS NOT NULL THEN ? ELSE lease_installment_price END,
                         updated_by=?, updated_at=?
                     WHERE car_type=?
-                """, (product_code, fuel_type, chassis, sale_total, landing, guidance,
+                """, (product_code, fuel_type, chassis, landing, guidance,
                       interest_free, rent_buy, min_loan, lease_plan,
                       monthly, monthly, user['display_name'], now, car_type))
                 updated += 1
             else:
                 c.execute("""
                     INSERT INTO model_guidance_prices
-                        (car_type, product_code, fuel_type, chassis_base_price, sale_total_price,
+                        (car_type, product_code, fuel_type, chassis_base_price,
                          landing_price, guidance_price, interest_free_plan, rent_to_buy_plan,
                          min_loan_plan, lease_plan, lease_installment_price,
                          updated_by, updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (car_type, product_code, fuel_type, chassis, sale_total,
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (car_type, product_code, fuel_type, chassis,
                       landing, guidance, interest_free, rent_buy, min_loan,
                       lease_plan, monthly or 0, user['display_name'], now))
                 created += 1
@@ -3035,16 +3799,31 @@ def import_guidance_prices():
 @app.route('/api/finance-plans', methods=['GET'])
 @login_required
 def get_finance_plans():
-    """金融方案列表；?car_type=xx 可选过滤（按基准车型，去成色前缀）。"""
+    """金融方案列表；可按基准车型、新车厢型过滤。"""
     conn = get_db()
     c = conn.cursor()
     car_type = (request.args.get('car_type') or '').strip()
+    condition = (request.args.get('condition') or '').strip()
+    box_type = (request.args.get('box_type') or '').strip()
     if car_type:
-        base = strip_condition_prefix(car_type)
-        c.execute("SELECT * FROM finance_plans WHERE car_type=? ORDER BY sort_order ASC, id DESC", (base,))
+        base = normalize_base_car_type(car_type)
+        rows = [
+            dict(row) for row in c.execute(
+                "SELECT * FROM finance_plans ORDER BY sort_order ASC, id DESC"
+            ).fetchall()
+            if normalize_base_car_type(row['car_type']) == base
+        ]
     else:
-        c.execute("SELECT * FROM finance_plans ORDER BY car_type ASC, sort_order ASC, id DESC")
-    rows = [dict(r) for r in c.fetchall()]
+        rows = [dict(r) for r in c.execute(
+            "SELECT * FROM finance_plans ORDER BY car_type ASC, sort_order ASC, id DESC"
+        ).fetchall()]
+    if condition:
+        rows = [
+            row for row in rows
+            if normalize_vehicle_condition(row.get('condition')) == normalize_vehicle_condition(condition)
+        ]
+    if box_type:
+        rows = [row for row in rows if (row.get('box_type') or '').strip() == box_type]
     conn.close()
     return jsonify(rows)
 
@@ -3052,17 +3831,31 @@ def get_finance_plans():
 @app.route('/api/finance-plans', methods=['POST'])
 @require_role('老板')
 def upsert_finance_plan():
-    """老板新增/修改金融方案（upsert）。"""
+    """老板新增/修改金融方案（基准车型 + 新车 + 厢型范围）。"""
     data = request.json or {}
-    car_type = strip_condition_prefix((data.get('car_type') or '').strip())
+    raw_car_type = (data.get('car_type') or '').strip()
+    car_type = normalize_base_car_type(raw_car_type)
+    condition = normalize_vehicle_condition(
+        (data.get('condition') or ('二手车' if raw_car_type.startswith('二手车') else '新车')).strip()
+    )
+    box_type = (data.get('box_type') or extract_guidance_box_type(raw_car_type) or '').strip()
     plan_name = (data.get('plan_name') or '').strip()
     down_payment = parse_money(data.get('down_payment'))
     period_price = parse_money(data.get('period_price'))
     periods = int(parse_money(data.get('periods')) or 0)
     sort_order = int(parse_money(data.get('sort_order')) or 0)
     remark = (data.get('remark') or '').strip()
+    # 20260810 SKU 改造：生效/失效日期
+    effective_date = (data.get('effective_date') or '').strip() or None
+    expiry_date = (data.get('expiry_date') or '').strip() or None
+    if effective_date and expiry_date and effective_date > expiry_date:
+        return jsonify({'success': False, 'message': '生效日期不能晚于失效日期'}), 400
     if not car_type:
         return jsonify({'success': False, 'message': '请填写车型'}), 400
+    if condition != '新车':
+        return jsonify({'success': False, 'message': '以租代售方案仅支持新车子型号'}), 400
+    if box_type not in GUIDANCE_BOX_TYPES:
+        return jsonify({'success': False, 'message': '请选择厢货、宽体、高栏、冷藏或平板中的一个厢型'}), 400
     if down_payment <= 0 or period_price <= 0 or periods <= 0:
         return jsonify({'success': False, 'message': '首付款、每期价格、期数均须大于0'}), 400
     if not plan_name:
@@ -3077,26 +3870,29 @@ def upsert_finance_plan():
         if plan_id:
             c.execute("""
                 UPDATE finance_plans
-                SET car_type=?, plan_name=?, down_payment=?, period_price=?, periods=?,
-                    sort_order=?, remark=?, status=?,
+                SET car_type=?, condition=?, box_type=?, plan_name=?, down_payment=?, period_price=?, periods=?,
+                    sort_order=?, remark=?, status=?, effective_date=?, expiry_date=?,
                     updated_by=?, updated_at=?
                 WHERE id=?
-            """, (car_type, plan_name, down_payment, period_price, periods,
+            """, (car_type, condition, box_type, plan_name, down_payment, period_price, periods,
                   sort_order, remark, data.get('status') or '启用',
+                  effective_date, expiry_date,
                   user['display_name'], now, plan_id))
             log_audit(conn, '修改金融方案', 'finance_plan', plan_id,
-                      f'{car_type} {plan_name} 首付{down_payment}/每期{period_price}×{periods}期', user['display_name'])
+                      f'{car_type} 新车{box_type} {plan_name} 首付{down_payment}/每期{period_price}×{periods}期', user['display_name'])
         else:
             c.execute("""
                 INSERT INTO finance_plans
-                    (car_type, plan_name, down_payment, period_price, periods,
-                     sort_order, remark, status, created_by, updated_by, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, '启用', ?, ?, ?)
-            """, (car_type, plan_name, down_payment, period_price, periods,
-                  sort_order, remark, user['display_name'], user['display_name'], now))
+                    (car_type, condition, box_type, plan_name, down_payment, period_price, periods,
+                     sort_order, remark, status, effective_date, expiry_date,
+                     created_by, updated_by, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '启用', ?, ?, ?, ?, ?)
+            """, (car_type, condition, box_type, plan_name, down_payment, period_price, periods,
+                  sort_order, remark, effective_date, expiry_date,
+                  user['display_name'], user['display_name'], now))
             plan_id = c.lastrowid
             log_audit(conn, '新增金融方案', 'finance_plan', plan_id,
-                      f'{car_type} {plan_name} 首付{down_payment}/每期{period_price}×{periods}期', user['display_name'])
+                      f'{car_type} 新车{box_type} {plan_name} 首付{down_payment}/每期{period_price}×{periods}期', user['display_name'])
         conn.commit()
         return jsonify({'success': True, 'id': plan_id, 'message': '金融方案已保存'})
     except Exception as e:
@@ -3112,7 +3908,7 @@ def delete_finance_plan(pid):
     """软删金融方案（status='停用'）。已出库报单走快照不受影响。"""
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT car_type, plan_name FROM finance_plans WHERE id=?", (pid,))
+    c.execute("SELECT car_type, condition, box_type, plan_name FROM finance_plans WHERE id=?", (pid,))
     row = c.fetchone()
     if not row:
         conn.close()
@@ -3121,10 +3917,195 @@ def delete_finance_plan(pid):
     c.execute("UPDATE finance_plans SET status='停用', updated_by=?, updated_at=? WHERE id=?",
               (request.current_user['display_name'], now, pid))
     log_audit(conn, '停用金融方案', 'finance_plan', pid,
-              f"{row['car_type']} {row['plan_name'] or ''}", request.current_user['display_name'])
+              f"{row['car_type']} {row['condition'] or '新车'}{row['box_type'] or '未归属'} {row['plan_name'] or ''}",
+              request.current_user['display_name'])
     conn.commit()
     conn.close()
     return jsonify({'success': True, 'message': '金融方案已停用'})
+
+
+# ======================== SKU 主表 + 库存聚合（SKU 改造）====================
+def _sku_match(v, sku):
+    """车辆是否匹配 SKU（归一化在 Python 端做，SQL 无法调用 Python 归一化函数）。"""
+    if not v:
+        return False
+    if normalize_base_car_type((v.get('car_type') or '')) != sku['car_type']:
+        return False
+    if (v.get('condition') or '新车') != sku['condition']:
+        return False
+    if (v.get('box_type') or '') != sku['box_type']:
+        return False
+    tail = normalize_tailgate(v.get('tailgate') or v.get('tail_plate'))
+    if tail != sku['tailgate']:
+        return False
+    return True
+
+
+def _load_sku_inventory(conn, skus, only_in_stock=True):
+    """为 SKU 列表聚合在库/总车辆数（Python 端归一化匹配）。"""
+    vehicles = conn.execute("""
+        SELECT id, car_type, condition, box_type, tailgate, status
+        FROM vehicles
+        WHERE (is_deleted IS NULL OR is_deleted=0)
+    """).fetchall()
+    vdicts = [dict(v) for v in vehicles]
+    result = []
+    for s in skus:
+        sdict = dict(s)
+        in_stock = sum(1 for v in vdicts if v['status'] == '在库' and _sku_match(v, sdict))
+        total = sum(1 for v in vdicts if _sku_match(v, sdict))
+        item = dict(sdict)
+        item['in_stock_count'] = in_stock
+        item['total_count'] = total
+        item['sku_id'] = item.get('sku_id') or item.get('id')
+        result.append(item)
+    return result
+
+
+@app.route('/api/skus', methods=['GET'])
+@login_required
+def get_skus():
+    """SKU 列表 + 按 SKU 聚合在库数量。?car_type=xx & condition=xx & box_type=xx & tailgate=xx 可选过滤。"""
+    conn = get_db()
+    car_type = (request.args.get('car_type') or '').strip()
+    condition = (request.args.get('condition') or '').strip()
+    box_type = (request.args.get('box_type') or '').strip()
+    tailgate = (request.args.get('tailgate') or '').strip()
+
+    where = "WHERE 1=1"
+    params = []
+    if car_type:
+        where += " AND s.car_type=?"
+        params.append(normalize_base_car_type(car_type))
+    if condition:
+        where += " AND s.condition=?"
+        params.append(condition)
+    if box_type:
+        where += " AND s.box_type=?"
+        params.append(box_type)
+    if tailgate:
+        where += " AND s.tailgate=?"
+        params.append(tailgate)
+
+    rows = conn.execute(f"""
+        SELECT s.*
+        FROM skus s
+        {where}
+        ORDER BY s.car_type ASC, s.condition ASC, s.box_type ASC, s.tailgate ASC
+    """, params).fetchall()
+    result = _load_sku_inventory(conn, rows, only_in_stock=False)
+    conn.close()
+    return jsonify(result)
+
+
+@app.route('/api/skus/inventory', methods=['GET'])
+@login_required
+def get_sku_inventory():
+    """SKU 实时库存视图：生效 SKU 按在库车辆聚合数量。
+    ?car_type=xx & condition=xx & box_type=xx & tailgate=xx 可选过滤（供销售端筛选联动）。"""
+    conn = get_db()
+    car_type = (request.args.get('car_type') or '').strip()
+    condition = (request.args.get('condition') or '').strip()
+    box_type = (request.args.get('box_type') or '').strip()
+    tailgate = (request.args.get('tailgate') or '').strip()
+
+    where = "WHERE s.status='生效'"
+    params = []
+    if car_type:
+        where += " AND s.car_type=?"
+        params.append(normalize_base_car_type(car_type))
+    if condition:
+        where += " AND s.condition=?"
+        params.append(condition)
+    if box_type:
+        where += " AND s.box_type=?"
+        params.append(box_type)
+    if tailgate:
+        where += " AND s.tailgate=?"
+        params.append(tailgate)
+
+    rows = conn.execute(f"""
+        SELECT s.id AS sku_id, s.car_type, s.condition, s.box_type, s.tailgate, s.status
+        FROM skus s
+        {where}
+        ORDER BY s.car_type ASC, s.condition ASC, s.box_type ASC, s.tailgate ASC
+    """, params).fetchall()
+    result = _load_sku_inventory(conn, rows, only_in_stock=True)
+    conn.close()
+    return jsonify(result)
+
+
+@app.route('/api/skus/<int:sku_id>/vehicles', methods=['GET'])
+@login_required
+def get_sku_vehicles(sku_id):
+    """SKU 下在库车辆列表（销售选 VIN 用）。"""
+    conn = get_db()
+    sku = conn.execute("SELECT * FROM skus WHERE id=?", (sku_id,)).fetchone()
+    if not sku:
+        conn.close()
+        return jsonify({'success': False, 'message': 'SKU 不存在'}), 404
+    sku_dict = dict(sku)
+    rows = conn.execute("""
+        SELECT id, vin, car_type, plate_number, condition, box_type, tailgate,
+               purchase_price, created_at, status,
+               vehicle_category, vehicle_engine_battery, vehicle_power_battery,
+               vehicle_color, box_type_remark
+        FROM vehicles
+        WHERE (is_deleted IS NULL OR is_deleted=0)
+        ORDER BY id ASC
+    """).fetchall()
+    matched = [dict(r) for r in rows if r['status'] == '在库' and _sku_match(dict(r), sku_dict)]
+    conn.close()
+    return jsonify(matched)
+
+
+@app.route('/api/skus/<int:sku_id>/toggle', methods=['POST'])
+@require_role('老板')
+def toggle_sku(sku_id):
+    """老板启用/停用 SKU（停用后销售端不可见）。"""
+    data = request.json or {}
+    conn = get_db()
+    row = conn.execute("SELECT car_type, condition, box_type, tailgate FROM skus WHERE id=?", (sku_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': 'SKU 不存在'}), 404
+    status = '生效' if data.get('status') != '失效' else '失效'
+    conn.execute("UPDATE skus SET status=?, updated_by=?, updated_at=? WHERE id=?",
+                 (status, request.current_user['display_name'],
+                  datetime.now().strftime('%Y-%m-%d %H:%M:%S'), sku_id))
+    log_audit(conn, '变更SKU状态', 'sku', sku_id,
+              f"{row['car_type']} {row['condition']} {row['box_type']} {row['tailgate']} → {status}",
+              request.current_user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': f'SKU 已{status}'})
+
+
+def backfill_skus(conn, operator='系统'):
+    """启动时回填：为存量在库车辆自动创建/关联 SKU（幂等）。返回新增数量。"""
+    created = 0
+    try:
+        vehicles = conn.execute("""
+            SELECT id, car_type, condition, box_type, tailgate, status
+            FROM vehicles
+            WHERE (is_deleted IS NULL OR is_deleted=0)
+        """).fetchall()
+        for v in vehicles:
+            vd = dict(v)
+            key = sku_key_for_vehicle(vd)
+            if not key:
+                continue
+            cur = conn.execute("""
+                INSERT OR IGNORE INTO skus (car_type, condition, box_type, tailgate, status, created_by, updated_by, updated_at)
+                VALUES (?, ?, ?, ?, '生效', ?, ?, ?)
+            """, (key['car_type'], key['condition'], key['box_type'], key['tailgate'],
+                  operator, operator, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            if cur.rowcount and cur.rowcount > 0:
+                created += 1
+        conn.commit()
+    except Exception as e:
+        print(f'[backfill_skus] error: {e}')
+    return created
 
 
 # ======================== 报单驳回退款闭环 ========================
@@ -3239,9 +4220,16 @@ def pay_order_refund(rid):
         (data.get('bank_card_no') or '').strip(),
         user, now, rid,
     ))
-    # 车辆释放回在库
+    # 车辆释放回在库（SKU 改造：多车报单批量释放）
+    release_vids = []
     if row['vehicle_id']:
-        c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (row['vehicle_id'],))
+        release_vids = [row['vehicle_id']]
+    if row['sales_order_id']:
+        so = c.execute("SELECT vehicle_id, vehicle_ids FROM sales_orders WHERE id=?", (row['sales_order_id'],)).fetchone()
+        if so:
+            release_vids = order_vehicle_ids(conn, so) or release_vids
+    for vid in release_vids:
+        c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (vid,))
     # 若有合同壳则终止
     if row['contract_id']:
         c.execute("""
@@ -3272,8 +4260,15 @@ def cancel_order_refund(rid):
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     c.execute("UPDATE order_refunds SET status='已取消', executed_by=?, executed_at=? WHERE id=?",
               (request.current_user['display_name'], now, rid))
+    release_vids = []
     if row['vehicle_id']:
-        c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (row['vehicle_id'],))
+        release_vids = [row['vehicle_id']]
+    if row['sales_order_id']:
+        so = c.execute("SELECT vehicle_id, vehicle_ids FROM sales_orders WHERE id=?", (row['sales_order_id'],)).fetchone()
+        if so:
+            release_vids = order_vehicle_ids(conn, so) or release_vids
+    for vid in release_vids:
+        c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (vid,))
     if row['contract_id']:
         c.execute("""
             UPDATE contracts SET contract_status='已终止', delivery_status='已终止'
@@ -3324,8 +4319,14 @@ def add_vehicle():
         if existing:
             return jsonify({'success': False, 'message': '车辆已在库'}), 400
 
-        # 车型自动计算：成色+品牌+品系+电池度数+马力+厢型+档位+尾板
-        if not data.get('car_type'):
+        # 手工录入按能源类型校验规格；尾板缺省即“无”，不会再生成未区分尾板的基准车型。
+        normalize_base_model_tailgate(data)
+        base_errors = validate_manual_vehicle_base_model(data)
+        if base_errors:
+            return jsonify({'success': False, 'message': '；'.join(base_errors)}), 400
+
+        # 车型是基准车型的计算字段；旧数据未提供任何规格时兼容保留传入车型。
+        if has_base_model_input(data):
             data['car_type'] = compute_car_type(data)
         car_type = (data.get('car_type') or '').strip()
 
@@ -3333,8 +4334,10 @@ def add_vehicle():
         guidance_price = 0
         if car_type:
             model_price = c.execute(
-                "SELECT guidance_price FROM model_guidance_prices WHERE car_type=? LIMIT 1",
-                (normalize_base_car_type(car_type),)
+                "SELECT guidance_price FROM model_guidance_prices WHERE car_type IN ({}) LIMIT 1".format(
+                    ','.join('?' for _ in guidance_base_candidates(car_type))
+                ),
+                guidance_base_candidates(car_type)
             ).fetchone()
             if model_price and parse_money(model_price['guidance_price']) > 0:
                 guidance_price = parse_money(model_price['guidance_price'])
@@ -3381,8 +4384,8 @@ def add_vehicle():
             data.get('gearbox_spec', ''), data.get('drive_motor_model', ''),
             data.get('battery_model', ''), data.get('suspension_model', ''),
         ]
-        # 字典校验
-        val_status, val_msg = validate_vehicle_dict(conn, car_type)
+        # 字典校验（SKU 改造：传 vehicle 做维度值字典检查）
+        val_status, val_msg = validate_vehicle_dict(conn, car_type, data)
         all_cols = all_cols + ['validation_status', 'validation_message']
         base_vals = base_vals + [val_status, val_msg]
         placeholders = ', '.join('?' for _ in all_cols)
@@ -3391,6 +4394,11 @@ def add_vehicle():
         VALUES ({placeholders})
         ''', base_vals)
         vehicle_id = c.lastrowid
+        # SKU 改造：入库后自动关联/创建 SKU
+        try:
+            ensure_sku_for_vehicle(conn, data, request.current_user['display_name'] if getattr(request, 'current_user', None) else '系统')
+        except Exception:
+            pass
         if guidance_price <= 0:
             log_audit(conn, '缺少指导价提醒', 'vehicle', vehicle_id,
                       f'新入库车辆 VIN:{vin} 车型:{car_type or "-"} 未设置指导价，请老板维护指导价')
@@ -3432,15 +4440,27 @@ VEHICLE_HEADER_MAP = {
     '经销商代码': 'dealer_code', '经销商编号': 'dealer_code',
 }
 
-# 车型计算源字段（按 Excel 公式 =A&B&C&D&E&F&H&I 顺序）
-CAR_TYPE_SOURCE_FIELDS = ['condition', 'brand', 'product_series', 'battery_capacity',
-                          'horsepower', 'box_type', 'gear_position', 'tailgate']
+# 基准车型计算源字段。成色、厢型、厢尺寸均属于子型号或附加描述，不参与基准车型。
+CAR_TYPE_SOURCE_FIELDS = [
+    'fuel_form', 'brand', 'product_series', 'battery_brand',
+    'battery_capacity', 'horsepower', 'gear_position', 'tailgate',
+]
 
 
 def compute_car_type(v):
-    """车型 = 成色+品牌+品系+电池度数+马力+厢型+档位+尾板（非空拼接）"""
-    parts = [str(v.get(f, '') or '').strip() for f in CAR_TYPE_SOURCE_FIELDS]
-    return ''.join(p for p in parts if p)
+    """按能源类型生成基准车型。
+
+    纯电：品牌 + 品系 + 电池品牌 + 电池度数 + 尾板
+    混动/燃油车：品牌 + 品系 + 马力 + 档位 + 尾板
+    """
+    energy_type = energy_type_for_vehicle(v)
+    fields = BASE_MODEL_FIELDS_BY_ENERGY.get(energy_type, ())
+    if not fields:
+        return ''
+    parts = [str(v.get(field, '') or '').strip() for field in fields]
+    if not all(parts):
+        return ''
+    return ''.join(parts) + base_model_tailgate_label(v.get('tailgate'))
 
 
 def derive_battery_capacity(battery_model):
@@ -3464,16 +4484,60 @@ def derive_battery_brand(battery_model):
 
 
 def derive_vehicle_computed(row_vals):
-    """导入时补充计算字段：电池度数/电池品牌（Excel 公式模拟）"""
+    """导入时补充电池规格，并按确认后的能源口径计算基准车型。"""
     vals = dict(row_vals)
     battery_model = vals.get('battery_model') or ''
     if not vals.get('battery_capacity') and battery_model:
         vals['battery_capacity'] = derive_battery_capacity(battery_model)
     if not vals.get('battery_brand') and battery_model:
         vals['battery_brand'] = derive_battery_brand(battery_model)
-    if not vals.get('car_type'):
+    normalize_base_model_tailgate(vals)
+    if has_base_model_input(vals):
         vals['car_type'] = compute_car_type(vals)
     return vals
+
+
+# ======================== SKU 关联（SKU 改造）====================
+def sku_key_for_vehicle(v):
+    """计算车辆对应 SKU 组合键；底盘车（纯车头）不建 SKU，返回 None。
+
+    组合 = 基准车型（去成色前缀+去厢型后缀）+ 成色 + 厢型 + 尾板（空→无）。
+    """
+    if not v:
+        return None
+    box_type = (v.get('box_type') or v.get('vehicle_box_type') or '').strip()
+    if box_type == '底盘':
+        return None
+    car_type = (v.get('car_type') or '').strip()
+    if not car_type:
+        return None
+    base = normalize_base_car_type(car_type)
+    if not base:
+        return None
+    condition = (v.get('condition') or '新车').strip() or '新车'
+    if condition not in ('新车', '二手车'):
+        condition = '新车'
+    tailgate = normalize_tailgate(v.get('tailgate') or v.get('tail_plate'))
+    return {'car_type': base, 'condition': condition, 'box_type': box_type, 'tailgate': tailgate}
+
+
+def ensure_sku_for_vehicle(conn, vehicle, operator='系统'):
+    """车辆入库/改维度后，自动创建/复用对应 SKU（INSERT OR IGNORE）。
+    返回 sku_id 或 None（底盘车/缺车型不建 SKU）。"""
+    key = sku_key_for_vehicle(vehicle)
+    if not key:
+        return None
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn.execute("""
+        INSERT OR IGNORE INTO skus (car_type, condition, box_type, tailgate, status, created_by, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, '生效', ?, ?, ?)
+    """, (key['car_type'], key['condition'], key['box_type'], key['tailgate'],
+          operator, operator, now))
+    row = conn.execute(
+        "SELECT id FROM skus WHERE car_type=? AND condition=? AND box_type=? AND tailgate=? LIMIT 1",
+        (key['car_type'], key['condition'], key['box_type'], key['tailgate'])
+    ).fetchone()
+    return row['id'] if row else None
 
 
 def _excel_cell_text(value):
@@ -3615,14 +4679,16 @@ def import_vehicles():
             guidance_price = 0
             if car_type:
                 mp = c.execute(
-                    "SELECT guidance_price FROM model_guidance_prices WHERE car_type=? LIMIT 1",
-                    (normalize_base_car_type(car_type),)
+                    "SELECT guidance_price FROM model_guidance_prices WHERE car_type IN ({}) LIMIT 1".format(
+                        ','.join('?' for _ in guidance_base_candidates(car_type))
+                    ),
+                    guidance_base_candidates(car_type)
                 ).fetchone()
                 if mp and parse_money(mp['guidance_price']) > 0:
                     guidance_price = parse_money(mp['guidance_price'])
 
-            # === 字典校验 ===
-            imp_val_status, imp_val_msg = validate_vehicle_dict(conn, car_type)
+            # === 字典校验（SKU 改造：传 row_vals 做维度值字典检查）===
+            imp_val_status, imp_val_msg = validate_vehicle_dict(conn, car_type, row_vals)
             if imp_val_status == 'invalid':
                 dictionary_invalid_count += 1
 
@@ -3672,6 +4738,11 @@ def import_vehicles():
                     vals
                 )
                 vehicle_id = c.lastrowid
+                # SKU 改造：导入入库后自动关联/创建 SKU
+                try:
+                    ensure_sku_for_vehicle(conn, row_vals, request.current_user['display_name'])
+                except Exception:
+                    pass
                 if guidance_price <= 0:
                     missing_guidance_count += 1
                     log_audit(conn, '缺少指导价提醒', 'vehicle', vehicle_id,
@@ -3718,9 +4789,9 @@ def import_vehicles():
 # 车辆维度编辑权限：老板可编辑所有字段；运营仅可编辑 12 个可编辑维度；其他角色无编辑权限
 BOSS_VEHICLE_EDITABLE = [
     'plate_number', 'condition', 'brand', 'product_series', 'battery_capacity',
-    'horsepower', 'box_type', 'box_dimension', 'gear_position', 'tailgate',
+    'horsepower', 'box_type', 'gear_position', 'tailgate',
     'vehicle_color', 'battery_brand',
-    'product_code', 'purchase_price', 'cab_type', 'other_config', 'fuel_form',
+    'product_code', 'purchase_price', 'cab_type', 'other_config',
     'cab_style', 'engine_spec', 'gearbox_spec', 'drive_motor_model',
     'battery_model', 'suspension_model',
     'company', 'tax_rate', 'invoice_contract_file', 'status',
@@ -3730,7 +4801,7 @@ BOSS_VEHICLE_EDITABLE = [
 ]
 OPS_VEHICLE_EDITABLE = [
     'condition', 'brand', 'product_series', 'battery_capacity', 'horsepower',
-    'box_type', 'box_dimension', 'gear_position', 'tailgate',
+    'box_type', 'gear_position', 'tailgate',
     'vehicle_color', 'battery_brand', 'plate_number',
 ]
 # 车型/车架号：任何角色都不可编辑
@@ -3739,7 +4810,7 @@ OPS_VEHICLE_EDITABLE = [
 @app.route('/api/vehicles/<int:vid>', methods=['PUT'])
 @require_role('运营', '老板')
 def update_vehicle(vid):
-    data = request.json
+    data = request.json or {}
     role = request.current_user['role']
     conn = get_db()
     c = conn.cursor()
@@ -3752,6 +4823,29 @@ def update_vehicle(vid):
     # 前端「网员价」提交为 dealer_price → 写入 purchase_price（网员价=购买价）
     if 'dealer_price' in data and role == '老板':
         data['purchase_price'] = data['dealer_price']
+    # 只接受当前角色被授权维护的字段。燃料形式来自采购导入，是能源规则
+    # 的只读依据，不能通过构造 PUT 请求把车辆切换到另一种能源类型。
+    data = {key: data[key] for key in editable if key in data}
+
+    existing = c.execute("SELECT * FROM vehicles WHERE id=?", (vid,)).fetchone()
+    if not existing:
+        conn.close()
+        return jsonify({'success': False, 'message': '车辆不存在'}), 404
+    candidate = dict(existing)
+    for key in editable:
+        if key in data:
+            candidate[key] = data[key]
+
+    # 成色/厢型是子型号字段，不触发基准车型重算；燃料和基准规格字段才会。
+    src_changed = any(k in data for k in CAR_TYPE_SOURCE_FIELDS)
+    if src_changed:
+        normalize_base_model_tailgate(candidate)
+        base_errors = validate_manual_vehicle_base_model(candidate)
+        if base_errors:
+            conn.close()
+            return jsonify({'success': False, 'message': '；'.join(base_errors)}), 400
+        # 规格变更时把尾板规范值一并落库，避免继续产生无尾板标识缺失的基准车型。
+        data['tailgate'] = candidate['tailgate']
 
     fields = []
     values = []
@@ -3763,21 +4857,23 @@ def update_vehicle(vid):
         values.append(vid)
         c.execute(f"UPDATE vehicles SET {', '.join(fields)} WHERE id = ?", values)
 
-    # 若修改了车型计算源字段 → 自动重算 car_type + 重新字典校验
-    src_changed = any(k in data for k in CAR_TYPE_SOURCE_FIELDS)
+    # 若修改了基准车型源字段 → 自动重算车型 + 重新字典校验。
     if src_changed:
-        row = c.execute("SELECT * FROM vehicles WHERE id=?", (vid,)).fetchone()
-        if row:
-            new_car_type = compute_car_type(dict(row))
-            c.execute("UPDATE vehicles SET car_type=? WHERE id=?", (new_car_type, vid))
-            val_status, val_msg = validate_vehicle_dict(conn, new_car_type)
-            c.execute("UPDATE vehicles SET validation_status=?, validation_message=? WHERE id=?",
-                      (val_status, val_msg, vid))
-    elif 'car_type' in data:
-        # 兼容：直接修改 car_type（老板）
-        val_status, val_msg = validate_vehicle_dict(conn, data['car_type'])
+        new_car_type = compute_car_type(candidate)
+        candidate['car_type'] = new_car_type
+        c.execute("UPDATE vehicles SET car_type=? WHERE id=?", (new_car_type, vid))
+        val_status, val_msg = validate_vehicle_dict(conn, new_car_type, candidate)
         c.execute("UPDATE vehicles SET validation_status=?, validation_message=? WHERE id=?",
                   (val_status, val_msg, vid))
+    elif any(k in data for k in ('condition', 'box_type')):
+        # 子型号变化不改变基准车型，但仍需重建 SKU 归属。
+        candidate['car_type'] = existing['car_type']
+
+    if src_changed or any(k in data for k in ('condition', 'box_type')):
+        try:
+            ensure_sku_for_vehicle(conn, candidate, request.current_user['display_name'])
+        except Exception:
+            pass
     conn.commit()
     conn.close()
     return jsonify({'success': True})
@@ -3789,11 +4885,12 @@ def revalidate_all_vehicles():
     """对所有库存车辆重新执行字典校验（新增字段时用于回填）"""
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT id, car_type FROM vehicles WHERE COALESCE(is_deleted,0)=0")
+    c.execute("SELECT * FROM vehicles WHERE COALESCE(is_deleted,0)=0")
     rows = c.fetchall()
     updated = 0
     for row in rows:
-        status, msg = validate_vehicle_dict(conn, row['car_type'])
+        vehicle = dict(row)
+        status, msg = validate_vehicle_dict(conn, vehicle['car_type'], vehicle)
         c.execute("UPDATE vehicles SET validation_status=?, validation_message=? WHERE id=?",
                   (status, msg, row['id']))
         updated += 1
@@ -4409,43 +5506,79 @@ def create_sales_order():
     conn = get_db()
     c = conn.cursor()
     vehicle = None
-    if vin:
-        if len(vin) != 17:
-            conn.close()
-            return jsonify({'success': False, 'message': '如填写车架号，请填写17位(VIN)'}), 400
-        c.execute("SELECT id, plate_number, car_type, condition, status, validation_status, validation_message FROM vehicles WHERE vin=?", (vin,))
-        vehicle = c.fetchone()
-        if not vehicle:
-            conn.close()
-            return jsonify({'success': False, 'message': '未找到对应库存车辆'}), 404
-        if not is_draft and vehicle['status'] not in ('在库', '报单锁定中'):
-            conn.close()
-            return jsonify({'success': False, 'message': '仅在库或报单锁定中车辆可以发起报单'}), 400
-        # 字典校验拦截：无效车辆不能发起报单
-        if not is_draft and vehicle and vehicle['validation_status'] == 'invalid':
-            v_msg = vehicle['validation_message'] or '车型未在指导价字典中维护'
-            conn.close()
-            return jsonify({'success': False, 'message': f'车辆字典校验不通过：{v_msg}，请先修正车辆信息'}), 400
+    vehicles_multi = []
 
-    if not is_draft and vehicle:
-        c.execute("""
-            SELECT id FROM contracts
-            WHERE vehicle_id=? AND contract_status!='已结清'
-            ORDER BY id DESC LIMIT 1
-        """, (vehicle['id'],))
-        if c.fetchone():
-            conn.close()
-            return jsonify({'success': False, 'message': '该 VIN 存在未结清合同，不能再次报单'}), 400
+    # 多车支持（SKU 改造）：vehicle_ids 为 VIN 数组（批量租赁/以租代售）；单车主车仍走 vin
+    raw_vehicle_ids = data.get('vehicle_ids')
+    vin_list = []
+    if raw_vehicle_ids:
+        if isinstance(raw_vehicle_ids, list):
+            vin_list = [str(v).strip().upper() for v in raw_vehicle_ids if str(v).strip()]
+        elif isinstance(raw_vehicle_ids, str):
+            vin_list = [v.strip().upper() for v in raw_vehicle_ids.replace('，', ',').split(',') if v.strip()]
+    elif vin:
+        vin_list = [vin]
 
-        c.execute("""
-            SELECT id, created_by FROM sales_orders
-            WHERE vehicle_id=? AND order_status IN ('待价格特批', '待财务确认', '已激活')
+    if vin_list:
+        # 校验所有 VIN
+        for i, v_vin in enumerate(vin_list):
+            if len(v_vin) != 17:
+                conn.close()
+                return jsonify({'success': False, 'message': f'第{i+1}个车架号需为17位(VIN)'}), 400
+            c.execute("""
+                SELECT id, plate_number, car_type, condition, status, box_type, vehicle_box_type,
+                       tailgate, brand, fuel_form, cab_type, cab_style, battery_brand,
+                       engine_spec, battery_capacity, horsepower, gear_position, gearbox_spec,
+                       vehicle_color, purchase_price, validation_status, validation_message, vin
+                FROM vehicles
+                WHERE vin=?
+            """, (v_vin,))
+            v_row = c.fetchone()
+            if not v_row:
+                conn.close()
+                return jsonify({'success': False, 'message': f'VIN {v_vin} 未找到对应库存车辆'}), 404
+            if not is_draft and v_row['status'] not in ('在库', '报单锁定中'):
+                conn.close()
+                return jsonify({'success': False, 'message': f'车辆 {v_vin} 仅在库或报单锁定中可发起报单（当前 {v_row["status"]}）'}), 400
+            if not is_draft and (v_row['box_type'] or v_row['vehicle_box_type'] or '').strip() == '底盘':
+                conn.close()
+                return jsonify({
+                    'success': False,
+                    'message': f'车辆 {v_vin} 为底盘车，请先配置实际厢体后再发起租赁或以租代售报单'
+                }), 400
+            # 字典校验拦截：无效车辆不能发起报单
+            if not is_draft and v_row['validation_status'] == 'invalid':
+                v_msg = v_row['validation_message'] or '车型未在指导价字典中维护'
+                conn.close()
+                return jsonify({'success': False, 'message': f'车辆 {v_vin} 字典校验不通过：{v_msg}，请先修正车辆信息'}), 400
+            vehicles_multi.append(dict(v_row))
+        vehicle = vehicles_multi[0]
+        vin = vehicle['vin']
+
+    # 多车唯一性校验（未结清合同/他人锁单）
+    if not is_draft and vehicles_multi:
+        vehicle_ids = [v['id'] for v in vehicles_multi]
+        placeholders = ', '.join('?' for _ in vehicle_ids)
+        c.execute(f"""
+            SELECT vehicle_id FROM contracts
+            WHERE vehicle_id IN ({placeholders}) AND contract_status NOT IN ('已结清', '已终止')
             ORDER BY id DESC LIMIT 1
-        """, (vehicle['id'],))
-        existing_order = c.fetchone()
-        if existing_order and existing_order['created_by'] != user['display_name'] and vehicle['status'] == '报单锁定中':
+        """, vehicle_ids)
+        conflict = c.fetchone()
+        if conflict:
             conn.close()
-            return jsonify({'success': False, 'message': f'该车辆已被 {existing_order["created_by"]} 报单锁定，其他销售不能进行二次报单'}), 400
+            return jsonify({'success': False, 'message': f'存在车辆（id={conflict["vehicle_id"]}）有未结清合同，不能再次报单'}), 400
+
+        for v_row in vehicles_multi:
+            c.execute("""
+                SELECT id, created_by FROM sales_orders
+                WHERE vehicle_id=? AND order_status IN ('待价格特批', '待财务确认', '已激活')
+                ORDER BY id DESC LIMIT 1
+            """, (v_row['id'],))
+            existing_order = c.fetchone()
+            if existing_order and existing_order['created_by'] != user['display_name'] and v_row['status'] == '报单锁定中':
+                conn.close()
+                return jsonify({'success': False, 'message': f'车辆 {v_row["vin"]} 已被 {existing_order["created_by"]} 报单锁定，其他销售不能进行二次报单'}), 400
 
     if not is_draft:
         customer_name = (data.get('customer_name') or '').strip()
@@ -4464,12 +5597,15 @@ def create_sales_order():
             conn.close()
             return jsonify({'success': False, 'message': '客户命中黑名单，请联系老板审核解禁'}), 400
 
-    sale_total_price = parse_money(data.get('sale_total_price'))
+    sale_total_price = 0  # sale_total_price 已废弃（整车销售下线，以租代售仅走金融方案）
     sales_mode = normalize_sales_mode(data.get('sales_mode', '经营租赁'))
     lease_quote = parse_money(data.get('vehicle_rent_amount', data.get('rent')))
     upfront_amount = parse_money(data.get('deposit_amount'))
-    vehicle_box_type = (data.get('vehicle_box_type') or '').strip()
-    tail_plate = (data.get('tail_plate') or '').strip()
+    order_vehicle = vehicle_order_snapshot(vehicle)
+    vehicle_box_type = (
+        order_vehicle.get('vehicle_box_type') or data.get('vehicle_box_type') or ''
+    ).strip()
+    tail_plate = order_vehicle.get('tail_plate') or normalize_tailgate(data.get('tail_plate'))
     finance_plan_id = data.get('finance_plan_id')
 
     # Use dummy vehicle dict if vehicle is None so guidance check can still use car_type from data
@@ -4486,7 +5622,7 @@ def create_sales_order():
     if guidance_check['mode'] == '租赁':
         expected_first_payment = round(upfront_amount + lease_quote, 2)  # 押金 + 首月月供
     elif guidance_check['mode'] == '以租代售':
-        plan = resolve_finance_plan(conn, finance_plan_id)
+        plan = guidance_check['guidance'].get('plan')
         expected_first_payment = round(parse_money(plan['down_payment'] if plan else 0), 2)
     else:
         expected_first_payment = round(upfront_amount, 2)
@@ -4530,9 +5666,9 @@ def create_sales_order():
             if not customer_screenshot_path:
                 conn.close()
                 return jsonify({'success': False, 'message': '请先上传客户首次付款截图'}), 400
-        if guidance_check['mode'] == '以租代售' and not resolve_finance_plan(conn, finance_plan_id):
+        if guidance_check['mode'] == '以租代售' and not guidance_check['guidance'].get('plan'):
             conn.close()
-            return jsonify({'success': False, 'message': '请选择以租代售金融方案'}), 400
+            return jsonify({'success': False, 'message': '请选择与该新车厢型一致的以租代售金融方案'}), 400
         if shortage > 0:
             if not first_payment_shortage_reason:
                 conn.close()
@@ -4561,8 +5697,8 @@ def create_sales_order():
              customer_screenshot_path, first_payment_received_amount, first_payment_shortage_amount,
              first_payment_shortage_reason, first_payment_promised_date, first_payment_check_status,
              order_exception_reason, finance_plan_id, snapshot_finance_plan,
-             snapshot_lease_deposit_guidance, snapshot_box_monthly_guidance)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             snapshot_lease_deposit_guidance, snapshot_box_monthly_guidance, vehicle_ids)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         data.get('payment_date') or datetime.now().strftime('%Y-%m-%d'),
         data.get('customer_name', '').strip() or ('草稿客户' if is_draft else ''),
@@ -4571,24 +5707,24 @@ def create_sales_order():
         sales_mode,
         vehicle['id'] if vehicle else None,
         vin,
-        (data.get('is_new') or '新车').strip(),
-        (data.get('vehicle_brand') or '').strip(),
+        order_vehicle.get('is_new') or (data.get('is_new') or '新车').strip(),
+        order_vehicle.get('vehicle_brand') or (data.get('vehicle_brand') or '').strip(),
         (data.get('lease_start_date') or '').strip(),
         (data.get('vehicle_category') or '').strip(),
         (data.get('vehicle_cab') or '').strip(),
         (data.get('vehicle_engine_battery') or '').strip(),
         (data.get('vehicle_power_battery') or '').strip(),
         (data.get('vehicle_gearbox') or '').strip(),
-        (data.get('vehicle_box_type') or '').strip(),
-        data.get('car_type', '').strip() or (vehicle['car_type'] if vehicle else ''),
-        data.get('vehicle_color', '').strip(),
-        data.get('plate_number', '').strip() or (vehicle['plate_number'] if vehicle else ''),
-        data.get('tail_plate', '').strip(),
+        vehicle_box_type,
+        order_vehicle.get('car_type') or data.get('car_type', '').strip(),
+        order_vehicle.get('vehicle_color') or (data.get('vehicle_color') or '').strip(),
+        order_vehicle.get('plate_number') or (data.get('plate_number') or '').strip(),
+        tail_plate,
         data.get('lease_term', '').strip(),
         data.get('cargo_length', '').strip(),
         sale_total_price,
         data.get('payment_category', '').strip(),
-        parse_money(data.get('car_purchase_amount')),
+        order_vehicle.get('car_purchase_amount', parse_money(data.get('car_purchase_amount'))),
         parse_money(data.get('vehicle_rent_amount')),
         data.get('receiving_company', '').strip(),
         parse_money(data.get('wechat_interest')),
@@ -4601,7 +5737,7 @@ def create_sales_order():
         order_status,
         0 if is_draft else guidance_price,
         0 if is_draft else guidance_check['guidance'].get('lease_installment_price', 0) if isinstance(guidance_check['guidance'], dict) else 0,
-        0 if is_draft else (guidance_check['guidance'].get('sale_total_price', 0) if isinstance(guidance_check['guidance'], dict) else 0),
+        0,  # snapshot_sale_total_price 已废弃
         price_check_status,
         order_exception_reason,
         '未生成',
@@ -4622,6 +5758,7 @@ def create_sales_order():
         snapshot_finance_plan,
         snapshot_lease_deposit_guidance,
         snapshot_box_monthly_guidance,
+        json.dumps([v['id'] for v in vehicles_multi], ensure_ascii=False) if vehicles_multi else None,
     ))
     order_id = c.lastrowid
     if needs_order_approval:
@@ -4629,8 +5766,11 @@ def create_sales_order():
     elif not is_draft:
         ensure_default_sales_order_planning_if_needed(conn, order_id)
         create_approval_flow(conn, 'sale_payment', order_id)
-    if not is_draft and vehicle:
-        c.execute("UPDATE vehicles SET status='报单锁定中' WHERE id=?", (vehicle['id'],))
+    # 批量锁车（多车报单锁定所有车辆）
+    if not is_draft and vehicles_multi:
+        vids = tuple(v['id'] for v in vehicles_multi)
+        placeholders = ', '.join('?' for _ in vids)
+        c.execute(f"UPDATE vehicles SET status='报单锁定中' WHERE id IN ({placeholders})", vids)
     log_audit(conn, '创建销售报单', 'sales_order', order_id,
               f"{user['display_name']} 报单 VIN:{vin} 模式:{sales_mode} 首付实收:{first_payment_received} 状态:{order_status}"
               + (f' 异常:{order_exception_reason}' if order_exception_reason else ''),
@@ -4664,26 +5804,56 @@ def update_sales_order_draft(order_id):
 
     vin = (data.get('vin') or order['vin'] or '').strip().upper()
     vehicle = None
-    if vin:
-        if len(vin) != 17:
-            conn.close()
-            return jsonify({'success': False, 'message': '如填写车架号，请填写17位(VIN)'}), 400
-        c.execute("SELECT id, plate_number, car_type, condition, status, validation_status, validation_message FROM vehicles WHERE vin=?", (vin,))
-        vehicle = c.fetchone()
-        if not vehicle:
-            conn.close()
-            return jsonify({'success': False, 'message': '未找到对应库存车辆'}), 404
-        if submit_now and vehicle and vehicle['validation_status'] == 'invalid':
-            v_msg = vehicle['validation_message'] or '车型未在指导价字典中维护'
-            conn.close()
-            return jsonify({'success': False, 'message': f'车辆字典校验不通过：{v_msg}，请先修正车辆信息'}), 400
+    vehicles_multi = []
+
+    # 多车支持（SKU 改造）：草稿提交同样支持 vehicle_ids
+    raw_vehicle_ids = data.get('vehicle_ids')
+    vin_list = []
+    if raw_vehicle_ids:
+        if isinstance(raw_vehicle_ids, list):
+            vin_list = [str(v).strip().upper() for v in raw_vehicle_ids if str(v).strip()]
+        elif isinstance(raw_vehicle_ids, str):
+            vin_list = [v.strip().upper() for v in raw_vehicle_ids.replace('，', ',').split(',') if v.strip()]
+    elif vin:
+        vin_list = [vin]
+    if vin_list:
+        for v_vin in vin_list:
+            if len(v_vin) != 17:
+                conn.close()
+                return jsonify({'success': False, 'message': '如填写车架号，请填写17位(VIN)'}), 400
+            c.execute("""
+                SELECT id, plate_number, car_type, condition, status, box_type, vehicle_box_type,
+                       tailgate, brand, fuel_form, cab_type, cab_style, battery_brand,
+                       engine_spec, battery_capacity, horsepower, gear_position, gearbox_spec,
+                       vehicle_color, purchase_price, validation_status, validation_message, vin
+                FROM vehicles WHERE vin=?
+            """, (v_vin,))
+            v_row = c.fetchone()
+            if not v_row:
+                conn.close()
+                return jsonify({'success': False, 'message': '未找到对应库存车辆'}), 404
+            if submit_now and v_row['validation_status'] == 'invalid':
+                v_msg = v_row['validation_message'] or '车型未在指导价字典中维护'
+                conn.close()
+                return jsonify({'success': False, 'message': f'车辆 {v_vin} 字典校验不通过：{v_msg}，请先修正车辆信息'}), 400
+            vehicles_multi.append(dict(v_row))
+        vehicle = vehicles_multi[0]
+        vin = vehicle['vin']
 
     sales_mode = normalize_sales_mode(data.get('sales_mode', order['sales_mode']))
-    sale_total_price = parse_money(data.get('sale_total_price'), order['sale_total_price'])
+    sale_total_price = 0  # sale_total_price 已废弃（整车销售下线，以租代售仅走金融方案）
     lease_quote = parse_money(data.get('vehicle_rent_amount', data.get('rent')), order['vehicle_rent_amount'])
     upfront_amount = parse_money(data.get('deposit_amount'), order['deposit_amount'])
-    vehicle_box_type = (data.get('vehicle_box_type') or order['vehicle_box_type'] or '').strip()
-    tail_plate = (data.get('tail_plate') or order['tail_plate'] or '').strip()
+    order_vehicle = vehicle_order_snapshot(vehicle)
+    vehicle_box_type = (
+        order_vehicle.get('vehicle_box_type')
+        or data.get('vehicle_box_type')
+        or order['vehicle_box_type']
+        or ''
+    ).strip()
+    tail_plate = order_vehicle.get('tail_plate') or normalize_tailgate(
+        data.get('tail_plate') or order['tail_plate']
+    )
     finance_plan_id = data.get('finance_plan_id') if data.get('finance_plan_id') is not None else order['finance_plan_id']
     effective_vehicle = vehicle or {'car_type': data.get('car_type', order['car_type']).strip(), 'guidance_price': 0}
     guidance_check = calculate_guidance_check(conn, effective_vehicle, sales_mode, sale_total_price, lease_quote, upfront_amount,
@@ -4714,6 +5884,9 @@ def update_sales_order_draft(order_id):
         if vehicle and vehicle['status'] not in ('在库', '报单锁定中'):
             conn.close()
             return jsonify({'success': False, 'message': '该车辆已被其他合同占用，请调整 VIN'}), 400
+        if vehicle and (vehicle.get('box_type') or vehicle.get('vehicle_box_type') or '').strip() == '底盘':
+            conn.close()
+            return jsonify({'success': False, 'message': '底盘车请先配置实际厢体后再发起租赁或以租代售报单'}), 400
         customer_name = (data.get('customer_name') or order['customer_name'] or '').strip()
         customer_phone = (data.get('customer_phone') or order['customer_phone'] or '').strip()
         c.execute("""
@@ -4751,7 +5924,7 @@ def update_sales_order_draft(order_id):
         if guidance_check['mode'] == '租赁':
             expected_first_payment = round(upfront_amount + lease_quote, 2)
         elif guidance_check['mode'] == '以租代售':
-            plan = resolve_finance_plan(conn, finance_plan_id)
+            plan = guidance_check['guidance'].get('plan')
             expected_first_payment = round(parse_money(plan['down_payment'] if plan else 0), 2)
         else:
             expected_first_payment = round(upfront_amount, 2)
@@ -4791,9 +5964,9 @@ def update_sales_order_draft(order_id):
             if not customer_screenshot_path:
                 conn.close()
                 return jsonify({'success': False, 'message': '请先上传客户首次付款截图'}), 400
-        if guidance_check['mode'] == '以租代售' and not resolve_finance_plan(conn, finance_plan_id):
+        if guidance_check['mode'] == '以租代售' and not guidance_check['guidance'].get('plan'):
             conn.close()
-            return jsonify({'success': False, 'message': '请选择以租代售金融方案'}), 400
+            return jsonify({'success': False, 'message': '请选择与该新车厢型一致的以租代售金融方案'}), 400
         if shortage > 0:
             if not first_payment_shortage_reason:
                 conn.close()
@@ -4818,7 +5991,7 @@ def update_sales_order_draft(order_id):
             customer_screenshot_path=?, first_payment_received_amount=?, first_payment_shortage_amount=?,
             first_payment_shortage_reason=?, first_payment_promised_date=?, first_payment_check_status=?,
             order_exception_reason=?, finance_plan_id=?, snapshot_finance_plan=?,
-            snapshot_lease_deposit_guidance=?, snapshot_box_monthly_guidance=?
+            snapshot_lease_deposit_guidance=?, snapshot_box_monthly_guidance=?, vehicle_ids=?
         WHERE id=?
     """, (
         data.get('payment_date') or order['payment_date'] or datetime.now().strftime('%Y-%m-%d'),
@@ -4828,24 +6001,24 @@ def update_sales_order_draft(order_id):
         sales_mode,
         vehicle['id'] if vehicle else None,
         vin,
-        (data.get('is_new') or order['is_new'] or '新车').strip(),
-        (data.get('vehicle_brand') or order['vehicle_brand'] or '').strip(),
+        order_vehicle.get('is_new') or (data.get('is_new') or order['is_new'] or '新车').strip(),
+        order_vehicle.get('vehicle_brand') or (data.get('vehicle_brand') or order['vehicle_brand'] or '').strip(),
         (data.get('lease_start_date') or order['lease_start_date'] or '').strip(),
         (data.get('vehicle_category') or order['vehicle_category'] or '').strip(),
         (data.get('vehicle_cab') or order['vehicle_cab'] or '').strip(),
         (data.get('vehicle_engine_battery') or order['vehicle_engine_battery'] or '').strip(),
         (data.get('vehicle_power_battery') or order['vehicle_power_battery'] or '').strip(),
         (data.get('vehicle_gearbox') or order['vehicle_gearbox'] or '').strip(),
-        (data.get('vehicle_box_type') or order['vehicle_box_type'] or '').strip(),
-        (data.get('car_type') or (vehicle['car_type'] if vehicle else '') or order['car_type'] or '').strip(),
-        (data.get('vehicle_color') or order['vehicle_color'] or '').strip(),
-        (data.get('plate_number') or (vehicle['plate_number'] if vehicle else '') or order['plate_number'] or '').strip(),
-        (data.get('tail_plate') or order['tail_plate'] or '').strip(),
+        vehicle_box_type,
+        order_vehicle.get('car_type') or (data.get('car_type') or order['car_type'] or '').strip(),
+        order_vehicle.get('vehicle_color') or (data.get('vehicle_color') or order['vehicle_color'] or '').strip(),
+        order_vehicle.get('plate_number') or (data.get('plate_number') or order['plate_number'] or '').strip(),
+        tail_plate,
         (data.get('lease_term') or order['lease_term'] or '').strip(),
         (data.get('cargo_length') or order['cargo_length'] or '').strip(),
         sale_total_price,
         (data.get('payment_category') or order['payment_category'] or '').strip(),
-        parse_money(data.get('car_purchase_amount'), order['car_purchase_amount']),
+        order_vehicle.get('car_purchase_amount', parse_money(data.get('car_purchase_amount'), order['car_purchase_amount'])),
         lease_quote,
         (data.get('receiving_company') or order['receiving_company'] or '').strip(),
         parse_money(data.get('wechat_interest'), order['wechat_interest']),
@@ -4878,6 +6051,7 @@ def update_sales_order_draft(order_id):
         snapshot_finance_plan,
         snapshot_lease_deposit_guidance,
         snapshot_box_monthly_guidance,
+        json.dumps([v['id'] for v in vehicles_multi], ensure_ascii=False) if vehicles_multi else order['vehicle_ids'] if 'vehicle_ids' in order.keys() and order['vehicle_ids'] else None,
         order_id,
     ))
     if submit_now:
@@ -4886,8 +6060,11 @@ def update_sales_order_draft(order_id):
         else:
             ensure_default_sales_order_planning_if_needed(conn, order_id)
             create_approval_flow(conn, 'sale_payment', order_id)
-        if vehicle:
-            c.execute("UPDATE vehicles SET status='报单锁定中' WHERE id=?", (vehicle['id'],))
+        # 批量锁车（多车草稿提交锁定所有车辆）
+        if vehicles_multi:
+            vids = tuple(v['id'] for v in vehicles_multi)
+            placeholders = ', '.join('?' for _ in vids)
+            c.execute(f"UPDATE vehicles SET status='报单锁定中' WHERE id IN ({placeholders})", vids)
     log_audit(conn, '提交草稿报单' if submit_now else '更新报单草稿', 'sales_order', order_id,
               f'VIN:{vin} 状态:{order_status}', user['display_name'])
     conn.commit()
@@ -5009,9 +6186,19 @@ def activate_sales_order(order_id):
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     c.execute("""
         UPDATE sales_orders
-        SET order_status='已激活', finance_confirmed_by=?, finance_confirmed_at=?
+        SET order_status='已激活',
+            finance_confirmed_by=?,
+            finance_confirmed_at=?,
+            finance_bank_serial=?,
+            finance_bank_receipt_path=?
         WHERE id=?
-    """, (request.current_user['display_name'], now, order_id))
+    """, (
+        request.current_user['display_name'],
+        now,
+        bank_serial or None,
+        bank_receipt_path or None,
+        order_id,
+    ))
     c.execute("""
         UPDATE approval_flows
         SET status='已通过', operator_id=?, operator_name=?, comment=COALESCE(NULLIF(comment, ''), '财务确认报单'), acted_at=?
@@ -5115,7 +6302,7 @@ def void_sales_order(order_id):
 
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT id, vehicle_id, order_status FROM sales_orders WHERE id=?", (order_id,))
+    c.execute("SELECT id, vehicle_id, vehicle_ids, contract_id, order_status FROM sales_orders WHERE id=?", (order_id,))
     row = c.fetchone()
     if not row:
         conn.close()
@@ -5134,7 +6321,20 @@ def void_sales_order(order_id):
         WHERE id=?
     """, (now, reason, user['display_name'], order_id))
     if row['vehicle_id'] and row['order_status'] != '草稿':
-        c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (row['vehicle_id'],))
+        # 释放所有关联车辆（SKU 改造：多车报单批量释放）
+        try:
+            vehicle_ids = json.loads(row['vehicle_ids']) if row['vehicle_ids'] else []
+        except (TypeError, ValueError):
+            vehicle_ids = []
+        release_ids = list(vehicle_ids) if vehicle_ids else [row['vehicle_id']]
+        for vid in release_ids:
+            c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (vid,))
+    # 终止报单计划合同壳（避免残留合同壳阻塞车辆重新报单）
+    if row['contract_id']:
+        c.execute("""
+            UPDATE contracts SET contract_status='已终止', delivery_status='已终止'
+            WHERE id=? AND contract_status='报单计划中'
+        """, (row['contract_id'],))
     c.execute("""
         UPDATE approval_flows
         SET status='已取消', comment=COALESCE(NULLIF(comment, ''), ?), acted_at=COALESCE(acted_at, ?)
@@ -5164,6 +6364,22 @@ def get_contracts():
         ORDER BY c.id ASC
     """)
     contracts = [dict(row) for row in c.fetchall()]
+    # SKU 改造：多车合同带出关联车辆 VIN 列表（供前端展示）
+    for ct in contracts:
+        cv_rows = c.execute("""
+            SELECT v.vin, v.plate_number, cv.is_primary
+            FROM contract_vehicles cv
+            JOIN vehicles v ON v.id = cv.vehicle_id
+            WHERE cv.contract_id=?
+            ORDER BY cv.is_primary DESC, cv.id ASC
+        """, (ct['id'],)).fetchall()
+        if cv_rows:
+            ct['contract_vehicle_vins'] = [
+                {'vin': r['vin'], 'plate_number': r['plate_number'], 'is_primary': r['is_primary']}
+                for r in cv_rows
+            ]
+        else:
+            ct['contract_vehicle_vins'] = []
     user = get_current_user()
     if user:
         contracts = redact_for_role(conn, user['role'], 'contracts', contracts)
@@ -5191,7 +6407,16 @@ def add_contract():
             order = c.fetchone()
             if not order:
                 return jsonify({'success': False, 'message': '关联报单不存在'}), 404
-            if order['vehicle_id'] != vehicle_id:
+            # 多车支持（SKU 改造）：报单 vehicle_ids（JSON）中须含当前主车
+            order_vehicle_ids = []
+            try:
+                order_vehicle_ids = json.loads(order['vehicle_ids']) if order['vehicle_ids'] else []
+            except (TypeError, ValueError):
+                order_vehicle_ids = []
+            if order_vehicle_ids:
+                if vehicle_id not in order_vehicle_ids:
+                    return jsonify({'success': False, 'message': '报单车辆与合同车辆不一致'}), 400
+            elif order['vehicle_id'] != vehicle_id:
                 return jsonify({'success': False, 'message': '报单车辆与合同车辆不一致'}), 400
             if order['order_status'] != '已激活':
                 if order['order_status'] == '待价格特批':
@@ -5214,7 +6439,7 @@ def add_contract():
                 FROM contracts
                 WHERE sales_order_id=?
                   AND contract_status!='报单计划中'
-                  AND contract_status!='已结清'
+                  AND contract_status NOT IN ('已结清', '已终止')
                 ORDER BY id DESC LIMIT 1
             """, (sales_order_id,))
             existing_order_contract = c.fetchone()
@@ -5252,19 +6477,27 @@ def add_contract():
         planning = c.fetchone()
         planning_contract_id = planning_contract_id or (planning['id'] if planning else None)
 
-        # ===== 校验：同一辆车不能重复签约；历史计划合同可复用 =====
-        if planning_contract_id:
-            c.execute("""SELECT id, contract_type, contract_status, delivery_status
-                         FROM contracts
-                         WHERE vehicle_id=? AND contract_status != '已结清' AND id!=?""",
-                      (vehicle_id, planning_contract_id))
-        else:
-            c.execute("""SELECT id, contract_type, contract_status, delivery_status
-                         FROM contracts WHERE vehicle_id=? AND contract_status != '已结清'""", (vehicle_id,))
-        existing = c.fetchone()
-        if existing:
-            status_desc = existing['delivery_status'] or existing['contract_status']
-            return jsonify({'success': False, 'message': f'该车辆已有未结清合同（状态: {status_desc}），不能重复签约'}), 400
+        # ===== 校验：报单内所有车辆都不能重复签约；历史计划合同可复用 =====
+        contract_vehicles_all = []
+        try:
+            contract_vehicles_all = json.loads(order['vehicle_ids']) if order and order['vehicle_ids'] else []
+        except (TypeError, ValueError):
+            contract_vehicles_all = []
+        if not contract_vehicles_all:
+            contract_vehicles_all = [vehicle_id]
+        for cvid in contract_vehicles_all:
+            if planning_contract_id:
+                c.execute("""SELECT id, contract_type, contract_status, delivery_status
+                             FROM contracts
+                             WHERE vehicle_id=? AND contract_status NOT IN ('已结清', '已终止') AND id!=?""",
+                          (cvid, planning_contract_id))
+            else:
+                c.execute("""SELECT id, contract_type, contract_status, delivery_status
+                             FROM contracts WHERE vehicle_id=? AND contract_status NOT IN ('已结清', '已终止')""", (cvid,))
+            existing = c.fetchone()
+            if existing:
+                status_desc = existing['delivery_status'] or existing['contract_status']
+                return jsonify({'success': False, 'message': f'车辆（id={cvid}）已有未结清合同（状态: {status_desc}），不能重复签约'}), 400
 
         if not contract_file:
             return jsonify({'success': False, 'message': '请先上传线下签署的合同文档'}), 400
@@ -5288,11 +6521,30 @@ def add_contract():
             repayment_day_default = 1
         repayment_day = int(parse_money(data.get('repayment_day'), repayment_day_default) or repayment_day_default)
         repayment_day = min(max(repayment_day, 1), 28)
+        plan_snapshot = {}
+        if contract_type == '以租代售' and order and order['snapshot_finance_plan']:
+            try:
+                plan_snapshot = json.loads(order['snapshot_finance_plan'])
+            except (TypeError, ValueError):
+                plan_snapshot = {}
         loan_periods = int(parse_money(data.get('loan_periods'), 0) or 0)
-        if loan_periods <= 0:
-            loan_periods = parse_period_count(order['lease_term'] if order else None, factory_count or 12)
+        if plan_snapshot:
+            loan_periods = parse_period_count(plan_snapshot.get('periods'), factory_count or 12)
+        elif loan_periods <= 0:
+            loan_periods = parse_period_count(
+                order['lease_term'] if order else None,
+                factory_count or 12,
+            )
         total_price = parse_money(data.get('total_price'), 0)  # sale_total_price 已废弃（以租代售走金融方案）
-        rent = parse_money(data.get('rent'), parse_money(order['vehicle_rent_amount']) if order else 0)
+        rent = parse_money(
+            data.get('rent'),
+            parse_money(
+                plan_snapshot.get('period_price'),
+                parse_money(order['vehicle_rent_amount']) if order else 0,
+            ),
+        )
+        if plan_snapshot:
+            rent = parse_money(plan_snapshot.get('period_price'), rent)
         if rent <= 0 and total_price > 0 and loan_periods > 0:
             rent = round(total_price / loan_periods, 2)
         monthly_payment = parse_money(data.get('monthly_payment'), factory_avg)
@@ -5305,7 +6557,15 @@ def add_contract():
         order_payment_amount = parse_money(order['deposit_amount']) if order else 0
         if contract_type == '以租代售':
             deposit = parse_money(data.get('deposit'), 0)
-            down_payment = parse_money(data.get('down_payment'), order_payment_amount or parse_money(order['car_purchase_amount']) if order else 0)
+            down_payment = parse_money(
+                data.get('down_payment'),
+                parse_money(
+                    plan_snapshot.get('down_payment'),
+                    order_payment_amount or parse_money(order['car_purchase_amount']) if order else 0,
+                ),
+            )
+            if plan_snapshot:
+                down_payment = parse_money(plan_snapshot.get('down_payment'), down_payment)
             business_mode = data.get('business_mode') or '以租代售'
         else:
             deposit = parse_money(data.get('deposit'), order_payment_amount)
@@ -5337,6 +6597,9 @@ def add_contract():
             remaining = round(max(0, first_payment_received - deposit_paid), 2)
             collected_rent_init = min(remaining, rent) if rent > 0 else 0
         payment_ok = first_payment_status in ('足额', '特批通过')
+        # 报单已完成首付核验时可直接进入出库；没有关联报单的手工合同必须
+        # 先走首次付款及财务回单审核，避免“待出库”与首次付款入口相互阻塞。
+        delivery_status = '待出库' if order and payment_ok else '待首付款'
         deposit_status_val = '免收' if deposit == 0 else ('已收' if (payment_ok and deposit_paid >= deposit) else ('部分已收' if deposit_paid > 0 else '待收'))
         down_payment_status_val = '免收' if down_payment == 0 else ('已收' if (payment_ok and down_payment_paid >= down_payment) else ('部分已收' if down_payment_paid > 0 else '待收'))
         rental_method = data.get('rental_method') or ('经营租赁' if contract_type == '租赁' else contract_type)
@@ -5398,7 +6661,7 @@ def add_contract():
                     start_date=?, end_date=?, total_price=?, customer_loan_amount=?, loan_amount=?, monthly_payment=?,
                     rent=?, loan_periods=?, company=?, yard=?, lease_bank_name=?, lease_bank_card_no=?,
                     factory_guarantee_deposit=?, factory_repayment_months=?, factory_periods=?, deposit=?, down_payment=?,
-                    down_payment_status=?, deposit_status=?, delivery_status='待出库',
+                    down_payment_status=?, deposit_status=?, delivery_status=?,
                     contract_status=?, sales_order_id=?,
                     snapshot_guidance_price=?, snapshot_invoice_price=?,
                     snapshot_finance_plan=?, snapshot_lease_deposit_guidance=?, snapshot_box_monthly_guidance=?,
@@ -5413,6 +6676,7 @@ def add_contract():
                 monthly_payment, rent, loan_periods, company, yard, lease_bank_name, lease_bank_card_no, factory_guarantee_deposit, factory_repayment_months, factory_periods, deposit, down_payment,
                 down_payment_status_val,
                 deposit_status_val,
+                delivery_status,
                 contract_status, sales_order_id,
                 snap_guidance, snap_invoice,
                 order['snapshot_finance_plan'] if order else None,
@@ -5436,7 +6700,7 @@ def add_contract():
                                    snapshot_finance_plan, snapshot_lease_deposit_guidance, snapshot_box_monthly_guidance,
                                    collected_deposit, collected_rent,
                                    expected_profit_floor, expected_profit_ceiling, contract_file, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 vehicle_id, customer_id, contract_type, business_mode,
                 rental_method, repayment_day,
@@ -5445,7 +6709,7 @@ def add_contract():
                 monthly_payment, rent, loan_periods, company, yard, lease_bank_name, lease_bank_card_no, factory_guarantee_deposit, factory_repayment_months, factory_periods, deposit, down_payment,
                 down_payment_status_val,
                 deposit_status_val,
-                '待出库',
+                delivery_status,
                 contract_status, sales_order_id,
                 snap_guidance, snap_invoice,
                 order['snapshot_finance_plan'] if order else None,
@@ -5458,6 +6722,13 @@ def add_contract():
                 user['display_name'],
             ))
             contract_id = c.lastrowid
+
+        # ===== 多车桥表（SKU 改造）：合同关联所有报单车辆，主车 vehicle_id 已写入 contracts =====
+        for cvid in contract_vehicles_all:
+            c.execute("""
+                INSERT OR IGNORE INTO contract_vehicles (contract_id, vehicle_id, is_primary)
+                VALUES (?, ?, ?)
+            """, (contract_id, cvid, 1 if cvid == vehicle_id else 0))
 
         comparison = None
         if planning_contract_id:
@@ -5519,6 +6790,7 @@ def add_contract():
                     paid_at=?,
                     bank_serial=COALESCE(NULLIF(bank_serial,''), ?),
                     screenshot_path=COALESCE(NULLIF(screenshot_path,''), ?),
+                    bank_receipt_path=COALESCE(NULLIF(bank_receipt_path,''), ?),
                     verified_by=?,
                     verified_at=?
                 WHERE contract_id=? AND period=0
@@ -5526,8 +6798,9 @@ def add_contract():
                 min(first_payment_received, parse_money(deposit) + parse_money(down_payment)),
                 min(first_payment_received, parse_money(deposit) + parse_money(down_payment)),
                 today,
-                order['finance_confirmed_at'] or '',
+                order['finance_bank_serial'] or '',
                 first_payment_screenshot or None,
+                order['finance_bank_receipt_path'] or None,
                 user['display_name'],
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 contract_id,
@@ -5550,7 +6823,8 @@ def add_contract():
                   f'类型{contract_type} 车辆{vehicle_id} 月租{rent} 月供{monthly_payment} 期数{loan_periods} 合同附件:{contract_file}',
                   user['display_name'])
         conn.commit()
-        return jsonify({'success': True, 'id': contract_id, 'message': '线下合同已上传，等待车管出库'})
+        message = '线下合同已上传，等待车管出库' if delivery_status == '待出库' else '线下合同已上传，请先发起首次付款审核'
+        return jsonify({'success': True, 'id': contract_id, 'message': message})
     except Exception as e:
         conn.rollback()
         return jsonify({'success': False, 'message': str(e)}), 400
@@ -6349,6 +7623,16 @@ def get_pending_bills():
         ORDER BY r.due_date ASC
     """)
     bills = [dict(row) for row in c.fetchall()]
+    # T-3 黄色预警：为「临近还款」账单附带流程图 4.1 提醒文案。
+    for bill in bills:
+        if bill.get('status') == '临近还款':
+            log = c.execute(
+                "SELECT detail FROM audit_logs WHERE action='T-3还款提醒' AND target_type='repayment' AND target_id=? ORDER BY id DESC LIMIT 1",
+                (bill['id'],),
+            ).fetchone()
+            bill['t3_reminder_text'] = (log['detail'] if log else '') or _t3_reminder_text(
+                bill.get('customer_name'), bill.get('plate_number'), bill.get('vin'), bill.get('due_date'),
+            )
     conn.close()
     return jsonify(bills)
 
@@ -6917,7 +8201,7 @@ def create_return_inspection():
             SELECT v.*, c.id as cid, c.deposit, c.start_date, c.end_date, c.lease_bank_name, c.lease_bank_card_no,
                    c.company as contract_company, c.yard as contract_yard, cu.name as cust_name
             FROM vehicles v
-            LEFT JOIN contracts c ON c.vehicle_id=v.id AND c.contract_status != '已结清'
+            LEFT JOIN contracts c ON c.vehicle_id=v.id AND c.contract_status NOT IN ('已结清', '已终止')
             LEFT JOIN customers cu ON cu.id=c.customer_id
             WHERE v.id=?
             ORDER BY c.id DESC
@@ -6996,8 +8280,9 @@ def create_return_inspection():
 
 
 @app.route('/api/return-inspections/<int:rid>', methods=['PUT'])
+@login_required
 def update_return_inspection(rid):
-    data = request.json
+    data = request.json or {}
     conn = get_db()
     c = conn.cursor()
     user = get_current_user()
@@ -7007,23 +8292,31 @@ def update_return_inspection(rid):
         conn.close()
         return jsonify({'success': False, 'message': '退车单不存在'}), 404
 
+    if user and user['role'] == '销售' and row['status'] != '已驳回待销售修改':
+        conn.close()
+        return jsonify({'success': False, 'message': '销售只能修改被老板驳回的退车单'}), 403
+
     fields = []
     values = []
-    for key in ['plate_number','customer_name','rental_period','vin','car_type','company','lease_bank_name','lease_bank_card_no',
+    editable_fields = ['plate_number','customer_name','rental_period','vin','car_type','company','lease_bank_name','lease_bank_card_no',
                 'refund_company_name','refund_bank_name','refund_bank_card_no',
                 'return_reason','tool_triangle','tool_vest','tool_extinguisher','tool_wedge','tool_jack',
                 'tool_kit','tent_pole','car_wash_fee','body_ad_clean','other_info',
                 'doc_license','doc_keys','mileage','body_tire_clean',
                 'accident_info','insurance_surcharge','violation_info','etc_info','maintenance_info',
                 'rent_late_fee','return_late_fee','deposit_rent_receivable','deposit_paid',
-                'total_deduction','actual_refund','needs_repair','repair_reason','remark','sales_advisor']:
+                'total_deduction','actual_refund','needs_repair','repair_reason','remark','sales_advisor']
+    if user and user['role'] == '销售':
+        editable_fields = ['return_reason', 'remark', 'sales_advisor']
+    for key in editable_fields:
         if key in data:
             fields.append(f"{key}=?")
             values.append(data[key])
 
     if user and user['role'] == '销售':
+        # 驳回状态只能保存销售修改；须通过专用重提接口重新进入车管环节。
         fields.append("sales_status=?")
-        values.append('已登记')
+        values.append('待修改')
     if user and user['role'] == '车管':
         fields.append("fleet_status=?")
         values.append('已填写')
@@ -7043,7 +8336,8 @@ def update_return_inspection(rid):
     if fields:
         values.append(rid)
         c.execute(f"UPDATE return_inspections SET {','.join(fields)} WHERE id=?", values)
-        update_return_inspection_status(conn, rid)
+        if not (user and user['role'] == '销售'):
+            update_return_inspection_status(conn, rid)
         conn.commit()
     conn.close()
     return jsonify({'success': True})
@@ -7207,6 +8501,33 @@ def update_return_finance(rid):
     return jsonify({'success': True, 'message': '财务复核已保存'})
 
 
+def return_inspection_to_sales_for_revision(c, rid, operator_name, now, reason):
+    """老板驳回退车后，保留单据和车辆占用，回到销售修改并重提。"""
+    c.execute("""
+        UPDATE return_inspections
+        SET status='已驳回待销售修改',
+            sales_status='待修改',
+            fleet_status='待填写',
+            operator_status='待填写',
+            finance_status='待填写',
+            finance_approved=0,
+            finance_approved_by=NULL,
+            finance_approved_at=NULL,
+            boss_approved=0,
+            boss_approved_by=NULL,
+            boss_approved_at=NULL,
+            rejected_by=?,
+            rejected_at=?,
+            reject_reason=?
+        WHERE id=?
+    """, (operator_name, now, reason, rid))
+    c.execute("""
+        UPDATE vehicles
+        SET status='退车中'
+        WHERE id=(SELECT vehicle_id FROM return_inspections WHERE id=?)
+    """, (rid,))
+
+
 @app.route('/api/return-inspections/<int:rid>/boss-approve', methods=['POST'])
 @require_role('老板')
 def boss_approve_return(rid):
@@ -7254,6 +8575,125 @@ def boss_approve_return(rid):
     conn.commit()
     conn.close()
     return jsonify({'success': True, 'message': '领导审批已通过'})
+
+
+@app.route('/api/return-inspections/<int:rid>/boss-reject', methods=['POST'])
+@require_role('老板')
+def boss_reject_return(rid):
+    data = request.get_json(silent=True) or {}
+    reason = (data.get('reason') or data.get('comment') or '').strip()
+    if not reason:
+        return jsonify({'success': False, 'message': '驳回原因不能为空'}), 400
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT plate_number, status FROM return_inspections WHERE id=?", (rid,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '退车单不存在'}), 404
+    if row['status'] != '待领导审批':
+        conn.close()
+        return jsonify({'success': False, 'message': '当前退车单未到领导审批环节'}), 400
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    batch_no = create_approval_flow(conn, 'return_stock', rid)
+    c.execute("""
+        UPDATE approval_flows
+        SET status='已驳回',
+            operator_id=?,
+            operator_name=?,
+            comment=?,
+            acted_at=?
+        WHERE batch_no=? AND required_role='老板'
+    """, (
+        request.current_user['id'],
+        request.current_user['display_name'],
+        reason,
+        now,
+        batch_no,
+    ))
+    return_inspection_to_sales_for_revision(
+        c,
+        rid,
+        request.current_user['display_name'],
+        now,
+        reason,
+    )
+    log_audit(conn, '退车领导驳回', 'return_inspection', rid,
+              f"老板驳回 {row['plate_number']} 原因:{reason}", request.current_user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '已驳回，退车单已退回销售修改'})
+
+
+@app.route('/api/return-inspections/<int:rid>/resubmit', methods=['POST'])
+@require_role('销售')
+def resubmit_return_inspection(rid):
+    data = request.get_json(silent=True) or {}
+    note = (data.get('resubmit_note') or '').strip()
+    if not note:
+        return jsonify({'success': False, 'message': '请填写销售修改说明后再提交'}), 400
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, status FROM return_inspections WHERE id=?", (rid,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '退车单不存在'}), 404
+    if row['status'] != '已驳回待销售修改':
+        conn.close()
+        return jsonify({'success': False, 'message': '当前退车单不在销售修改重提环节'}), 400
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    c.execute("""
+        UPDATE return_inspections
+        SET return_reason=COALESCE(NULLIF(?, ''), return_reason),
+            sales_advisor=COALESCE(NULLIF(?, ''), sales_advisor),
+            remark=COALESCE(NULLIF(?, ''), remark),
+            sales_status='已登记',
+            fleet_status='待填写',
+            operator_status='待填写',
+            finance_status='待填写',
+            finance_approved=0,
+            finance_approved_by=NULL,
+            finance_approved_at=NULL,
+            boss_approved=0,
+            boss_approved_by=NULL,
+            boss_approved_at=NULL,
+            rejected_by=NULL,
+            rejected_at=NULL,
+            reject_reason=NULL,
+            resubmitted_by=?,
+            resubmitted_at=?,
+            resubmit_note=?,
+            status='待车管验车'
+        WHERE id=?
+    """, (
+        (data.get('return_reason') or '').strip(),
+        (data.get('sales_advisor') or '').strip(),
+        (data.get('remark') or '').strip(),
+        request.current_user['display_name'],
+        now,
+        note,
+        rid,
+    ))
+    c.execute("""
+        UPDATE approval_flows
+        SET status='已取消',
+            comment=COALESCE(NULLIF(comment, ''), '老板驳回后已由销售重新提交'),
+            acted_at=COALESCE(acted_at, ?)
+        WHERE ref_type='return_stock' AND ref_id=? AND status='待审批'
+    """, (now, rid))
+    c.execute("""
+        UPDATE vehicles
+        SET status='退车中'
+        WHERE id=(SELECT vehicle_id FROM return_inspections WHERE id=?)
+    """, (rid,))
+    log_audit(conn, '退车销售重提', 'return_inspection', rid,
+              f'销售修改说明:{note}', request.current_user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '已重新提交，等待车管验车'})
 
 
 @app.route('/api/return-inspections/<int:rid>/pay', methods=['POST'])
@@ -7335,8 +8775,9 @@ def _synthesize_return_items(conn, user):
     rows = [dict(r) for r in c.fetchall()]
     items = []
     for row in rows:
+        is_rejected = row.get('status') == '已驳回待销售修改'
         done = {
-            1: True,
+            1: row.get('sales_status') == '已登记',
             2: row.get('fleet_status') == '已填写',
             3: row.get('operator_status') == '已填写',
             4: bool(row.get('finance_approved')),
@@ -7352,7 +8793,7 @@ def _synthesize_return_items(conn, user):
             6: (row.get('paid_out_by', ''), row.get('paid_out_at', '')),
         }
         current_step = next((cfg['step'] for cfg in _RETURN_FLOW_STEPS if not done[cfg['step']]), 0)
-        overall_status = '已完成' if current_step == 0 else '审批中'
+        overall_status = '已驳回' if is_rejected else ('已完成' if current_step == 0 else '审批中')
         steps = [
             {
                 'id': 0, 'ref_type': 'return_stock', 'ref_id': row['id'],
@@ -7377,6 +8818,7 @@ def _synthesize_return_items(conn, user):
             'contract_type': '退车入库',
             'created_at': row.get('created_at', ''),
             'return_reason': row.get('return_reason', ''),
+            'reject_reason': row.get('reject_reason', ''),
             'delivery_status': row.get('status', ''),
             'requested_by': row.get('created_by', ''),
             'created_by': row.get('created_by', ''),
@@ -7517,10 +8959,9 @@ def get_approvals():
                 'customer_phone': row.get('customer_phone', ''),
                 'contract_type': row.get('sales_mode', '销售报单'),
                 'delivery_status': row.get('order_status', ''),
-                'total_price': row.get('sale_total_price', 0),
+                'total_price': 0,  # sale_total_price 已废弃（整车销售下线）
                 'snapshot_guidance_price': row.get('snapshot_guidance_price', 0),
                 'snapshot_lease_installment_price': row.get('snapshot_lease_installment_price', 0),
-                'snapshot_sale_total_price': row.get('snapshot_sale_total_price', 0),
                 'price_check_status': row.get('price_check_status', ''),
                 'price_exception_reason': row.get('price_exception_reason', ''),
                 'customer_plan_match_status': row.get('customer_plan_match_status', ''),
@@ -7883,6 +9324,22 @@ def approve_step(flow_id):
                 conn.close()
                 return jsonify({'success': False, 'message': blocker}), 400
             c.execute("""
+                SELECT finance_bank_serial, finance_bank_receipt_path
+                FROM sales_orders
+                WHERE id=?
+            """, (ref_id,))
+            payment_proof = c.fetchone()
+            if not payment_proof or (
+                len((payment_proof['finance_bank_serial'] or '').strip()) < 4
+                and not (payment_proof['finance_bank_receipt_path'] or '').strip()
+            ):
+                conn.rollback()
+                conn.close()
+                return jsonify({
+                    'success': False,
+                    'message': '请在销售报单中填写银行流水号或上传公司收款回单后再确认',
+                }), 400
+            c.execute("""
                 UPDATE sales_orders
                 SET order_status='已激活', finance_confirmed_by=?, finance_confirmed_at=?
                 WHERE id=? AND order_status='待财务确认'
@@ -7954,6 +9411,20 @@ def approve_step(flow_id):
     return jsonify({'success': True, 'message': message})
 
 
+# 报单 → 关联车辆 id 列表（SKU 改造：多车支持）
+def order_vehicle_ids(conn, order):
+    """返回报单关联的所有车辆 id 列表（含主车）。"""
+    if not order:
+        return []
+    try:
+        ids = json.loads(order['vehicle_ids']) if order['vehicle_ids'] else []
+    except (TypeError, ValueError):
+        ids = []
+    if ids:
+        return [int(i) for i in ids]
+    return [order['vehicle_id']] if order['vehicle_id'] else []
+
+
 @app.route('/api/approvals/<int:flow_id>/reject', methods=['POST'])
 @login_required
 def reject_step(flow_id):
@@ -8009,7 +9480,7 @@ def reject_step(flow_id):
             WHERE ref_type IN ('order_exception', 'sale_payment') AND ref_id=? AND status='待审批'
         """, (now, ref_id))
     elif ref_type == 'price_exception':
-        c.execute("SELECT vehicle_id FROM sales_orders WHERE id=?", (ref_id,))
+        c.execute("SELECT vehicle_id, vehicle_ids FROM sales_orders WHERE id=?", (ref_id,))
         order = c.fetchone()
         c.execute("""
             UPDATE sales_orders
@@ -8020,10 +9491,11 @@ def reject_step(flow_id):
                 voided_by=?
             WHERE id=?
         """, (now, comment, user['display_name'], ref_id))
-        if order and order['vehicle_id']:
-            c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (order['vehicle_id'],))
+        if order:
+            for vid in order_vehicle_ids(conn, order):
+                c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (vid,))
     elif ref_type == 'sale_payment':
-        c.execute("SELECT vehicle_id FROM sales_orders WHERE id=?", (ref_id,))
+        c.execute("SELECT vehicle_id, vehicle_ids, contract_id FROM sales_orders WHERE id=?", (ref_id,))
         order = c.fetchone()
         c.execute("""
             UPDATE sales_orders
@@ -8033,8 +9505,15 @@ def reject_step(flow_id):
                 voided_by=?
             WHERE id=?
         """, (now, comment, user['display_name'], ref_id))
-        if order and order['vehicle_id']:
-            c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (order['vehicle_id'],))
+        if order:
+            for vid in order_vehicle_ids(conn, order):
+                c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (vid,))
+            # 终止报单计划合同壳（SKU 改造：多车报单的合同壳也需清理）
+            if order['contract_id']:
+                c.execute("""
+                    UPDATE contracts SET contract_status='已终止', delivery_status='已终止'
+                    WHERE id=? AND contract_status='报单计划中'
+                """, (order['contract_id'],))
     elif ref_type == 'contract_delivery':
         c.execute("UPDATE contracts SET delivery_status='已驳回' WHERE id=?", (ref_id,))
     elif ref_type == 'initial_payment':
@@ -8059,7 +9538,13 @@ def reject_step(flow_id):
                 SET delivery_status='已终止', contract_status='已终止'
                 WHERE id=?
             """, (payment['contract_id'],))
-            c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status IN ('报单锁定中','待出库')", (payment['vehicle_id'],))
+            # 释放合同关联的所有车辆（SKU 改造：多车）
+            cv = c.execute("SELECT vehicle_id FROM contract_vehicles WHERE contract_id=?", (payment['contract_id'],)).fetchall()
+            if cv:
+                for r in cv:
+                    c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status IN ('报单锁定中','待出库')", (r['vehicle_id'],))
+            elif payment['vehicle_id']:
+                c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status IN ('报单锁定中','待出库')", (payment['vehicle_id'],))
             if payment['sales_order_id']:
                 c.execute("""
                     UPDATE sales_orders
@@ -8067,7 +9552,7 @@ def reject_step(flow_id):
                     WHERE id=?
                 """, (now, comment or '首次付款不足老板驳回，退款终止', user['display_name'], payment['sales_order_id']))
     elif ref_type == 'return_stock':
-        c.execute("UPDATE return_inspections SET boss_approved=0, status='待领导审批' WHERE id=?", (ref_id,))
+        return_inspection_to_sales_for_revision(c, ref_id, user['display_name'], now, comment)
     elif ref_type == 'invoice':
         c.execute("""
             UPDATE invoice_requests
@@ -8120,7 +9605,8 @@ def resubmit_approval(ref_id):
             WHERE id=(SELECT contract_id FROM contract_initial_payments WHERE id=?)
         """, (ref_id,))
     elif ref_type == 'return_stock':
-        c.execute("UPDATE return_inspections SET status='待领导审批' WHERE id=?", (ref_id,))
+        conn.close()
+        return jsonify({'success': False, 'message': '退车驳回后请由销售在退车单中修改并重新提交'}), 400
     elif ref_type == 'invoice':
         # 发票驳回后可重提：状态回到待审批，重新走老板审批
         c.execute("UPDATE invoice_requests SET status='待审批' WHERE id=?", (ref_id,))
@@ -8553,14 +10039,28 @@ def deliver_vehicle(vid):
 
     c.execute("UPDATE contracts SET delivery_status='已出库', delivery_date=? WHERE id=?",
               (datetime.now().strftime('%Y-%m-%d'), ct['id']))
+    c.execute("""
+        UPDATE repayments
+        SET status='待还款'
+        WHERE contract_id=?
+          AND period>=1
+          AND status='未激活'
+    """, (ct['id'],))
 
     # 更新车辆状态：仅 租赁 / 以租代售 两种合同类型（整车销售已下线）
+    # 多车支持（SKU 改造）：合同关联的所有车辆批量更新状态
     contract_type = ct['contract_type']
     status_map = {'以租代售': '以租代售', '租赁': '租赁中'}
     new_status = status_map.get(contract_type, '租赁中')
-    c.execute("UPDATE vehicles SET status=? WHERE id=?", (new_status, vid))
+    cv_rows = c.execute("SELECT vehicle_id FROM contract_vehicles WHERE contract_id=?", (ct['id'],)).fetchall()
+    if cv_rows:
+        deliver_vids = [r['vehicle_id'] for r in cv_rows]
+    else:
+        deliver_vids = [vid]
+    for dvid in deliver_vids:
+        c.execute("UPDATE vehicles SET status=? WHERE id=?", (new_status, dvid))
 
-    log_audit(conn, '车辆出库', 'vehicle', vid, f'{user["display_name"]}({user["role"]}) 确认出库 合同类型:{contract_type}')
+    log_audit(conn, '车辆出库', 'vehicle', vid, f'{user["display_name"]}({user["role"]}) 确认出库 合同类型:{contract_type} 关联车辆:{len(deliver_vids)}台')
     conn.commit()
     conn.close()
     return jsonify({'success': True, 'message': '车辆已出库'})
@@ -8570,9 +10070,9 @@ def deliver_vehicle(vid):
 @app.route('/api/repayments/<int:rid>/urge', methods=['POST'])
 @login_required
 def urge_repayment(rid):
-    """H2 催款执行（新口径）：diff>=3 运营催款 / diff>=7 销售催款。
-    催款仅推送任务，不动押金/首付款，与滞纳金计提是两套独立节奏。"""
+    """完成 T+3 运营或 T+7 销售催收任务，证据是锁车的前置条件。"""
     user = request.current_user
+    data = request.json or {}
     conn = get_db()
     c = conn.cursor()
 
@@ -8582,37 +10082,89 @@ def urge_repayment(rid):
     if not row:
         conn.close()
         return jsonify({'success': False, 'message': '还款记录不存在'}), 404
+    if int(row['period'] or 0) <= 0 or row['status'] == '已还款':
+        conn.close()
+        return jsonify({'success': False, 'message': '该记录不需要催收'}), 400
+    if not row['due_date']:
+        conn.close()
+        return jsonify({'success': False, 'message': '还款日期缺失，无法催收'}), 400
 
-    overdue_days = max(0, (datetime.now() - datetime.strptime(row['due_date'], '%Y-%m-%d')).days)
+    try:
+        overdue_days = max(0, (datetime.now().date() - datetime.strptime(row['due_date'], '%Y-%m-%d').date()).days)
+    except ValueError:
+        conn.close()
+        return jsonify({'success': False, 'message': '还款日期格式错误'}), 400
 
-    # 确定催款类型（H2 新口径：diff=3 运营催款 / diff=7 销售催款）
-    if overdue_days >= 7 and user['role'] in ('销售', '老板'):
+    if overdue_days >= 7 and user['role'] == '销售':
         urge_type = '销售催款'
         urge_day = 7
-    elif overdue_days >= 3 and user['role'] in ('运营', '老板'):
+    elif overdue_days >= 3 and user['role'] == '运营':
         urge_type = '运营催款'
         urge_day = 3
     else:
         conn.close()
         return jsonify({'success': False, 'message': f'当前逾期{overdue_days}天，不满足催款条件或角色不匹配'}), 400
 
-    c.execute("""INSERT INTO urge_records (repayment_id, contract_id, vehicle_id, urge_type, urge_day, operator_id, operator_name)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
-              (rid, row['cid'], row['vehicle_id'], urge_type, urge_day, user['id'], user['display_name']))
+    evidence_path = (data.get('evidence_path') or data.get('screenshot_path') or '').strip()
+    result = (data.get('result') or '').strip() or '已联系，待跟进'
+    remark = (data.get('remark') or '').strip()
+    promised_repay_date = (data.get('promised_repay_date') or '').strip() or None
+    if not evidence_path:
+        conn.close()
+        return jsonify({'success': False, 'message': '请上传催收证据后再提交'}), 400
+
+    c.execute("""
+        INSERT OR IGNORE INTO urge_records
+            (repayment_id, contract_id, vehicle_id, urge_type, urge_day, status, result, remark)
+        VALUES (?, ?, ?, ?, ?, '待执行', '待跟进', ?)
+    """, (
+        rid,
+        row['cid'],
+        row['vehicle_id'],
+        urge_type,
+        urge_day,
+        f'补建逾期 T+{urge_day} 催收任务',
+    ))
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    c.execute("""
+        UPDATE urge_records
+        SET status='已完成',
+            result=?,
+            remark=?,
+            evidence_path=?,
+            promised_repay_date=?,
+            operator_id=?,
+            operator_name=?,
+            closed_by=?,
+            completed_at=?
+        WHERE repayment_id=? AND urge_day=?
+    """, (
+        result,
+        remark or None,
+        evidence_path,
+        promised_repay_date,
+        user['id'],
+        user['display_name'],
+        user['display_name'],
+        now,
+        rid,
+        urge_day,
+    ))
 
     log_audit(conn, '催款', 'repayment', rid,
-              f'{user["display_name"]}({urge_type}) 逾期{overdue_days}天')
+              f'{user["display_name"]}({urge_type}) 完成逾期{overdue_days}天催收，证据:{evidence_path}')
     conn.commit()
     conn.close()
-    return jsonify({'success': True, 'message': f'{urge_type} 已记录'})
+    return jsonify({'success': True, 'message': f'{urge_type} 已完成'})
 
 
 @app.route('/api/repayments/<int:rid>/urge-records', methods=['GET'])
+@login_required
 def get_urge_records(rid):
     """获取某笔还款的催促记录"""
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM urge_records WHERE repayment_id=? ORDER BY created_at DESC", (rid,))
+    c.execute("SELECT * FROM urge_records WHERE repayment_id=? ORDER BY urge_day ASC, created_at DESC", (rid,))
     records = [dict(r) for r in c.fetchall()]
     conn.close()
     return jsonify(records)
@@ -8662,11 +10214,18 @@ def create_lock_request():
         conn.close()
         return jsonify({'success': False, 'message': '逾期满 7 天（diff≥7）后才能发起锁车申请'}), 400
 
-    # 前置校验：对应期数已存在 H2 催款记录
-    c.execute("SELECT id FROM urge_records WHERE repayment_id=? LIMIT 1", (repayment_id,))
+    # 前置校验：销售已完成 T+7 催收并留存证据。
+    c.execute("""
+        SELECT id FROM urge_records
+        WHERE repayment_id=?
+          AND urge_day=7
+          AND status='已完成'
+          AND COALESCE(evidence_path, '')!=''
+        LIMIT 1
+    """, (repayment_id,))
     if not c.fetchone() and user['role'] != '老板':
         conn.close()
-        return jsonify({'success': False, 'message': '请先完成该期 H2 催款，再发起锁车申请'}), 400
+        return jsonify({'success': False, 'message': '请先完成并留存该期 T+7 销售催收证据，再发起锁车申请'}), 400
 
     # 同车已存在进行中的锁车/解锁流程则拒绝
     c.execute("""
@@ -8919,6 +10478,15 @@ if __name__ == '__main__':
     finally:
         migration_conn.close()
     seed_data()
+    # SKU 改造：字典种子数据（静态配置 + 存量车辆维度值灌入，幂等）
+    seed_conn = get_db()
+    try:
+        seed_data_dictionaries(seed_conn)
+        sku_created = backfill_skus(seed_conn)
+        if sku_created:
+            print(f"SKU backfilled: {sku_created} entries")
+    finally:
+        seed_conn.close()
     # 启动补跑一次（漏跑兜底），并启动每日 00:30 调度线程
     try:
         run_daily_collect(force=False)

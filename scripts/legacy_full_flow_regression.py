@@ -1,3 +1,10 @@
+"""Historical pre-August regression script.
+
+This script covers retired sales flows and removed schema fields. It is kept for
+reference only and intentionally lives outside unittest discovery. The current
+release gate is the August lease/rent-to-buy acceptance suite in tests/.
+"""
+
 import os
 import shutil
 import tempfile

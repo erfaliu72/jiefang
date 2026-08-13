@@ -12,8 +12,8 @@ from migrate_guidance_merge_base import strip_box_suffix, normalize_base_car_typ
 
 class TestStripBoxSuffix(unittest.TestCase):
     def test_multilevel_suffix(self):
-        # 冷藏带尾板 → 先去带尾板再去冷藏
-        self.assertEqual(strip_box_suffix('解放J6F锡柴150冷藏带尾板'), '解放J6F锡柴150')
+        # 冷藏带尾板 → 去厢型、保留尾板基准维度
+        self.assertEqual(strip_box_suffix('解放J6F锡柴150冷藏带尾板'), '解放J6F锡柴150有尾板')
 
     def test_chassis_suffix(self):
         self.assertEqual(strip_box_suffix('解放J6F锡柴150底盘'), '解放J6F锡柴150')
@@ -38,8 +38,8 @@ class TestStripBoxSuffix(unittest.TestCase):
 
     def test_condition_prefix(self):
         # 去成色前缀
-        self.assertEqual(normalize_base_car_type('新车解放J6F锡柴150冷藏'), '解放J6F锡柴150')
-        self.assertEqual(normalize_base_car_type('二手车解放J6F全柴190LNG高栏'), '解放J6F全柴190LNG')
+        self.assertEqual(normalize_base_car_type('新车解放J6F锡柴150冷藏'), '解放J6F锡柴150无尾板')
+        self.assertEqual(normalize_base_car_type('二手车解放J6F全柴190LNG高栏'), '解放J6F全柴190LNG无尾板')
 
     def test_empty(self):
         self.assertEqual(strip_box_suffix(''), '')

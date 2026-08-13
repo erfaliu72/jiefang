@@ -5,14 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>陕西金聚源车辆管理系统</title>
     <meta name="description" content="陕西金聚源解放轻卡西安区 - 车辆全生命周期资产管控系统">
-    <script src="https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/element-plus@2.9.7/dist/index.css" />
-    <script src="https://unpkg.com/element-plus@2.9.7"></script>
-    <script src="https://unpkg.com/element-plus@2.9.7/dist/locale/zh-cn.min.js"></script>
-    <script src="https://unpkg.com/@element-plus/icons-vue@2.3.1"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="/static/vendor/vue.global.prod.js"></script>
+    <link rel="stylesheet" href="/static/vendor/element-plus.css" />
+    <script src="/static/vendor/element-plus.min.js"></script>
+    <script src="/static/vendor/element-plus-locale-zh-cn.min.js"></script>
+    <script src="/static/vendor/element-plus-icons.min.js"></script>
+    <script src="/static/vendor/chart.umd.min.js"></script>
     <link rel="stylesheet" href="/static/style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         .readonly-field {
             display: inline-flex;
@@ -303,6 +302,15 @@
                                 <el-table-column label="状态" width="110">
                                     <template #default="s"><span class="status-badge" :class="deliveryStatusClass(s.row.order_status)">{{ s.row.order_status || '-' }}</span></template>
                                 </el-table-column>
+                                <el-table-column label="财务回单" width="140">
+                                    <template #default="s">
+                                        <div v-if="s.row.finance_bank_serial || s.row.finance_bank_receipt_path" style="display:flex;flex-direction:column;gap:4px">
+                                            <span v-if="s.row.finance_bank_serial" class="mono-text" style="font-size:12px">{{ s.row.finance_bank_serial }}</span>
+                                            <a v-if="s.row.finance_bank_receipt_path" :href="s.row.finance_bank_receipt_path" target="_blank" style="font-size:12px;color:#2563eb">查看回单</a>
+                                        </div>
+                                        <span v-else style="color:#9ca3af">-</span>
+                                    </template>
+                                </el-table-column>
                                 <el-table-column label="合同状态" width="180">
                                     <template #default="s">
                                         <div style="display:flex;flex-direction:column;gap:4px">
@@ -395,7 +403,8 @@
                                                 </el-radio-group>
                                             </div>
                                             <el-table :data="repaymentTab==='customer' ? currentRepayments : currentFactoryRepayments" size="small" max-height="300">
-                                                <el-table-column prop="period" label="期数" width="70" due_date" label="应还日期" width="120"></el-table-column>
+                                                <el-table-column prop="period" label="期数" width="70"></el-table-column>
+                                                <el-table-column prop="due_date" label="应还日期" width="120"></el-table-column>
                                                 <el-table-column label="应还金额" width="120">
                                                     <template #default="s"><span class="num">¥{{ numberFormat(s.row.amount) }}</span></template>
                                                 </el-table-column>
@@ -440,9 +449,6 @@
                                 </el-table-column>
                                 <el-table-column prop="box_type" label="厢型" width="90" v-if="colVisible('box_type')">
                                     <template #default="s">{{ s.row.box_type || '-' }}</template>
-                                </el-table-column>
-                                <el-table-column prop="box_dimension" label="厢尺寸" width="120" v-if="colVisible('box_dimension')">
-                                    <template #default="s">{{ s.row.box_dimension || '-' }}</template>
                                 </el-table-column>
                                 <el-table-column prop="gear_position" label="档位" width="80" v-if="colVisible('gear_position')">
                                     <template #default="s">{{ s.row.gear_position || '-' }}</template>
@@ -651,6 +657,49 @@
                             </el-pagination>
                             </div>
                         </div>
+                        <div class="card" style="margin-top:16px">
+                            <div class="card-title-row">
+                                <div class="card-title">SKU 库存视图</div>
+                                <div style="display:flex;gap:8px;align-items:center">
+                                    <el-select v-model="skuFilterCondition" placeholder="全部成色" clearable style="width:120px">
+                                        <el-option label="新车" value="新车"></el-option><el-option label="二手车" value="二手车"></el-option>
+                                    </el-select>
+                                    <el-select v-model="skuFilterBoxType" placeholder="全部厢型" clearable style="width:120px">
+                                        <el-option v-for="bt in dictOptionsByCategory('box_type')" :key="bt" :label="bt" :value="bt"></el-option>
+                                    </el-select>
+                                    <el-button size="small" plain @click="loadSkuInventory"><el-icon><Refresh/></el-icon> 刷新</el-button>
+                                </div>
+                            </div>
+                            <el-table :data="filteredSkuInventory" stripe style="width:100%" max-height="400">
+                                <el-table-column prop="car_type" label="基准车型" min-width="220"></el-table-column>
+                                <el-table-column label="成色" width="90">
+                                    <template #default="s">
+                                        <el-tag v-if="s.row.condition==='二手车'" type="warning" size="small" round>二手</el-tag>
+                                        <el-tag v-else type="primary" size="small" round>新车</el-tag>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column prop="box_type" label="厢型" width="90"></el-table-column>
+                                <el-table-column prop="tailgate" label="尾板" width="80"></el-table-column>
+                                <el-table-column label="在库数" width="100">
+                                    <template #default="s">
+                                        <span :style="s.row.in_stock_count>0 ? 'color:#16a34a;font-weight:600' : 'color:#9ca3af'">{{ s.row.in_stock_count || 0 }} 台</span>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="状态" width="90">
+                                    <template #default="s">
+                                        <el-tag :type="s.row.status==='生效' ? 'success' : 'info'" size="small" round>{{ s.row.status }}</el-tag>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="操作" width="200" fixed="right">
+                                    <template #default="s">
+                                        <el-button v-if="s.row.in_stock_count>0" type="warning" size="small" plain round @click="openSkuPickVehicle(s.row)">发起报单</el-button>
+                                        <el-button v-if="currentUser.role==='老板'" size="small" :type="s.row.status==='生效' ? 'danger' : 'success'" link @click="toggleSku(s.row)">
+                                            {{ s.row.status==='生效' ? '停用' : '启用' }}
+                                        </el-button>
+                                    </template>
+                                </el-table-column>
+                            </el-table>
+                        </div>
                     </div>
                     <!-- ================== INVOICE ================== -->
                     <div v-if="currentPage === 'invoice'" class="page fade-in">
@@ -761,6 +810,14 @@
                                 <el-table-column label="状态" width="100">
                                     <template #default="s">
                                         <span class="status-badge" :class="repayClass(s.row.status)">{{ s.row.status }}</span>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="T-3 提醒" min-width="260">
+                                    <template #default="s">
+                                        <el-tooltip v-if="s.row.t3_reminder_text" :content="s.row.t3_reminder_text" placement="top" :show-after="100">
+                                            <span class="status-badge badge-yellow" style="cursor:default">🔔 已提醒</span>
+                                        </el-tooltip>
+                                        <span v-else class="text-muted">-</span>
                                     </template>
                                 </el-table-column>
                                 <el-table-column label="逾期天数" width="100">
@@ -898,7 +955,7 @@
                                                 </el-table-column>
                                                 <el-table-column label="状态" width="100">
                                                     <template #default="s">
-                                                        <span class="status-badge" :class="s.row.status==='已还款'?'badge-green':s.row.status==='逾期'?'badge-red':'badge-orange'">{{ s.row.status }}</span>
+                                                        <span class="status-badge" :class="s.row.status==='已还款'?'badge-green':(s.row.status==='逾期'||String(s.row.status).startsWith('逾期'))?'badge-red':s.row.status==='临近还款'?'badge-yellow':'badge-orange'">{{ s.row.status }}</span>
                                                     </template>
                                                 </el-table-column>
                                                 <el-table-column label="操作" min-width="220">
@@ -1532,6 +1589,12 @@
                                 </el-table-column>
                                 <el-table-column label="操作" width="200">
                                     <template #default="s">
+                                        <el-upload v-if="(currentUser.role==='运营' && calcOverdueDays(s.row.due_date)>=3 && calcOverdueDays(s.row.due_date)<7) || (currentUser.role==='销售' && calcOverdueDays(s.row.due_date)>=7)"
+                                            action="/api/upload" :show-file-list="false" :with-credentials="true"
+                                            :on-success="(res) => onUrgeEvidenceUpload(s.row, res)"
+                                            accept=".jpg,.jpeg,.png,.pdf">
+                                            <el-button type="warning" size="small" plain>上传催收证据</el-button>
+                                        </el-upload>
                                         <el-button v-if="calcOverdueDays(s.row.due_date)>=7" type="warning" size="small" round @click="requestLock(s.row)">申请锁车</el-button>
                                         <el-button type="primary" size="small" round @click="confirmRepayment(s.row)">核销</el-button>
                                     </template>
@@ -1675,131 +1738,136 @@
                             <div class="card-title-row">
                                 <div>
                                     <div class="card-title">车型指导价维护</div>
-                                    <div style="font-size:12px;color:#6b7280;margin-top:4px">以租代售：按车型维护金融方案（首付/每期/期数），销售报单选方案。租赁：核对押金和月供，月供=箱型5选1+尾板。</div>
+                                    <div style="font-size:12px;color:#6b7280;margin-top:4px">租赁按新/二手车与厢型维护；以租代售按新车厢型维护多套方案，销售只能选择与车辆厢型一致的方案。</div>
                                 </div>
                                 <div style="display:flex;gap:8px">
                                     <el-button type="warning" plain @click="revalidateAllVehicles" :loading="revalidating"><el-icon><Refresh/></el-icon> 重新校验所有车辆</el-button>
                                 </div>
                             </div>
+                            <div style="display:flex;align-items:end;gap:12px;margin-top:14px">
+                                <div style="min-width:320px;max-width:560px;flex:1">
+                                    <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#374151">基准车型</div>
+                                    <el-select v-model="guidanceWorkbenchCarType" placeholder="选择基准车型" filterable clearable style="width:100%" @change="loadGuidanceWorkbench">
+                                        <el-option v-for="t in modelGuidanceCarTypeOptions" :key="t" :label="t" :value="t"></el-option>
+                                    </el-select>
+                                </div>
+                                <el-tag v-if="guidanceWorkbenchCarType" type="info" effect="plain">租赁 {{ guidanceWorkbenchSummary.configured_count || 0 }}/{{ guidanceWorkbenchSummary.total_count || 10 }} 已设置</el-tag>
+                                <el-tag v-if="guidanceWorkbenchCarType" type="success" effect="plain">以租代售 {{ guidanceWorkbenchSummary.rent_to_buy_configured_count || 0 }}/{{ guidanceWorkbenchSummary.rent_to_buy_total_count || 5 }} 厢型已配置</el-tag>
+                            </div>
                             <el-tabs v-model="guidanceTab" style="margin-top:8px">
                                 <el-tab-pane label="租赁指导价" name="lease">
-                                    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px 20px;margin-bottom:14px">
-                                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-                                            <div style="font-weight:600;font-size:14px;color:#1f2937">维护租赁指导价</div>
-                                            <div style="font-size:12px;color:#6b7280">押金 + 箱型月供（报单时押金/月供不得低于指导价）</div>
-                                        </div>
-                                        <el-form :model="modelGuidanceForm" label-position="top" size="default">
-                                            <el-row :gutter="20">
-                                                <el-col :span="8"><el-form-item label="车型" required style="margin-bottom:10px">
-                                                    <el-select v-model="modelGuidanceForm.car_type" placeholder="选择车型" filterable style="width:100%" @change="onModelGuidanceCarTypeChange(modelGuidanceForm.car_type)">
-                                                        <el-option v-for="t in modelGuidanceCarTypeOptions" :key="t" :label="t" :value="t"></el-option>
-                                                    </el-select>
-                                                </el-form-item></el-col>
-                                                <el-col :span="6"><el-form-item label="成色" style="margin-bottom:10px">
-                                                    <el-select v-model="modelGuidanceForm.is_new" style="width:100%" @change="onModelGuidanceCarTypeChange(modelGuidanceForm.car_type)">
-                                                        <el-option label="新车" value="新车"></el-option><el-option label="二手车" value="二手车"></el-option>
-                                                    </el-select>
-                                                </el-form-item></el-col>
-                                                <el-col :span="10"><el-form-item label="押金（元）" style="margin-bottom:10px">
-                                                    <el-input-number v-model="modelGuidanceForm.lease_deposit_guidance" :min="0" :step="500" :controls="false" style="width:100%"></el-input-number>
-                                                </el-form-item></el-col>
-                                            </el-row>
-                                            <div style="font-size:12px;color:#6b7280;margin-bottom:8px">月供指导价（5选1）· 尾板加价</div>
-                                            <el-row :gutter="20">
-                                                <el-col :span="4"><el-form-item label="厢货" style="margin-bottom:10px"><el-input-number v-model="modelGuidanceForm.box_standard_price" :min="0" :step="100" :controls="false" style="width:100%"></el-input-number></el-form-item></el-col>
-                                                <el-col :span="4"><el-form-item label="宽体" style="margin-bottom:10px"><el-input-number v-model="modelGuidanceForm.box_wide_price" :min="0" :step="100" :controls="false" style="width:100%"></el-input-number></el-form-item></el-col>
-                                                <el-col :span="4"><el-form-item label="高栏" style="margin-bottom:10px"><el-input-number v-model="modelGuidanceForm.box_high_rail_price" :min="0" :step="100" :controls="false" style="width:100%"></el-input-number></el-form-item></el-col>
-                                                <el-col :span="4"><el-form-item label="冷藏" style="margin-bottom:10px"><el-input-number v-model="modelGuidanceForm.box_refrigerated_price" :min="0" :step="100" :controls="false" style="width:100%"></el-input-number></el-form-item></el-col>
-                                                <el-col :span="4"><el-form-item label="平板" style="margin-bottom:10px"><el-input-number v-model="modelGuidanceForm.box_flatbed_price" :min="0" :step="100" :controls="false" style="width:100%"></el-input-number></el-form-item></el-col>
-                                                <el-col :span="4"><el-form-item label="尾板加价" style="margin-bottom:10px"><el-input-number v-model="modelGuidanceForm.tail_plate_price" :min="0" :step="50" :controls="false" style="width:100%"></el-input-number></el-form-item></el-col>
-                                            </el-row>
-                                            <el-row :gutter="20">
-                                                <el-col :span="16"><el-form-item label="备注" style="margin-bottom:0"><el-input v-model="modelGuidanceForm.remark" placeholder="备注（可选）"></el-input></el-form-item></el-col>
-                                                <el-col :span="8" style="display:flex;align-items:flex-end;justify-content:flex-end;gap:8px">
-                                                    <el-button @click="resetModelGuidanceForm">清空</el-button>
-                                                    <el-button type="primary" @click="submitModelGuidancePrice" :loading="submitting">保存租赁指导价</el-button>
-                                                </el-col>
-                                            </el-row>
-                                        </el-form>
-                                    </div>
-                                    <el-input v-model="modelGuidanceSearch" placeholder="搜索车型..." clearable style="width:320px;margin:0 0 8px" :prefix-icon="Search"></el-input>
-                                    <el-table :data="filteredModelGuidancePrices" stripe style="width:100%" max-height="400">
-                                        <el-table-column label="成色" width="80">
-                                            <template #default="s">
-                                                <el-tag v-if="s.row.is_new==='二手车'" type="warning" size="small" round>二手</el-tag>
-                                                <el-tag v-else type="primary" size="small" round>新车</el-tag>
-                                            </template>
-                                        </el-table-column>
-                                        <el-table-column prop="car_type" label="车型" min-width="200"></el-table-column>
-                                        <el-table-column label="押金" width="100">
-                                            <template #default="s"><span class="num">{{ s.row.lease_deposit_guidance ? '¥' + numberFormat(s.row.lease_deposit_guidance) : '-' }}</span></template>
-                                        </el-table-column>
-                                        <el-table-column label="厢货月供" width="100">
-                                            <template #default="s"><span class="num">{{ s.row.box_standard_price ? '¥' + numberFormat(s.row.box_standard_price) : '-' }}</span></template>
-                                        </el-table-column>
-                                        <el-table-column label="宽体月供" width="100">
-                                            <template #default="s"><span class="num">{{ s.row.box_wide_price ? '¥' + numberFormat(s.row.box_wide_price) : '-' }}</span></template>
-                                        </el-table-column>
-                                        <el-table-column label="高栏月供" width="100">
-                                            <template #default="s"><span class="num">{{ s.row.box_high_rail_price ? '¥' + numberFormat(s.row.box_high_rail_price) : '-' }}</span></template>
-                                        </el-table-column>
-                                        <el-table-column label="冷藏月供" width="100">
-                                            <template #default="s"><span class="num">{{ s.row.box_refrigerated_price ? '¥' + numberFormat(s.row.box_refrigerated_price) : '-' }}</span></template>
-                                        </el-table-column>
-                                        <el-table-column label="平板月供" width="100">
-                                            <template #default="s"><span class="num">{{ s.row.box_flatbed_price ? '¥' + numberFormat(s.row.box_flatbed_price) : '-' }}</span></template>
-                                        </el-table-column>
-                                        <el-table-column label="尾板加价" width="90">
-                                            <template #default="s"><span class="num">{{ s.row.tail_plate_price ? '¥' + numberFormat(s.row.tail_plate_price) : '-' }}</span></template>
-                                        </el-table-column>
-                                        <el-table-column prop="updated_at" label="更新时间" width="150"></el-table-column>
-                                        <el-table-column label="操作" width="60">
-                                            <template #default="s">
-                                                <el-button type="primary" link size="small" @click="editModelGuidancePrice(s.row)">编辑</el-button>
-                                            </template>
-                                        </el-table-column>
-                                    </el-table>
+                                    <el-empty v-if="!guidanceWorkbenchCarType" description="请选择基准车型" :image-size="84"></el-empty>
+                                    <template v-else>
+                                        <el-table v-loading="guidanceWorkbenchLoading" :data="guidanceWorkbenchRows" stripe style="width:100%" max-height="460">
+                                            <el-table-column label="成色" width="86">
+                                                <template #default="s"><el-tag :type="s.row.condition==='二手车' ? 'warning' : 'primary'" size="small">{{ s.row.condition }}</el-tag></template>
+                                            </el-table-column>
+                                            <el-table-column prop="box_type" label="厢型" width="86"></el-table-column>
+                                            <el-table-column label="在库" width="76"><template #default="s">{{ s.row.inventory_count || 0 }} 台</template></el-table-column>
+                                            <el-table-column label="押金指导价" min-width="142">
+                                                <template #default="s"><el-input-number v-model="s.row.lease_deposit_guidance" :min="0" :step="500" :controls="false" style="width:100%" @change="syncLeaseConditionField(s.row, 'lease_deposit_guidance')"></el-input-number></template>
+                                            </el-table-column>
+                                            <el-table-column label="月供指导价" min-width="142">
+                                                <template #default="s"><el-input-number v-model="s.row.monthly_price" :min="0" :step="100" :controls="false" style="width:100%"></el-input-number></template>
+                                            </el-table-column>
+                                            <el-table-column label="尾板加价" min-width="126">
+                                                <template #default="s"><el-input-number v-model="s.row.tail_plate_price" :min="0" :step="50" :controls="false" style="width:100%" @change="syncLeaseConditionField(s.row, 'tail_plate_price')"></el-input-number></template>
+                                            </el-table-column>
+                                            <el-table-column label="配置状态" width="96">
+                                                <template #default="s"><el-tag :type="Number(s.row.lease_deposit_guidance)>0 && Number(s.row.monthly_price)>0 ? 'success' : 'danger'" size="small">{{ Number(s.row.lease_deposit_guidance)>0 && Number(s.row.monthly_price)>0 ? '已设置' : '待设置' }}</el-tag></template>
+                                            </el-table-column>
+                                            <el-table-column prop="updated_at" label="更新时间" width="156"></el-table-column>
+                                            <el-table-column label="操作" width="76" fixed="right">
+                                                <template #default="s"><el-button type="primary" link size="small" @click="saveLeaseGuidanceRow(s.row)" :loading="guidanceSavingKey===leaseRowKey(s.row)">保存</el-button></template>
+                                            </el-table-column>
+                                        </el-table>
+                                    </template>
                                 </el-tab-pane>
                                 <el-tab-pane label="以租代售方案" name="plan">
+                                    <el-empty v-if="!guidanceWorkbenchCarType" description="请选择基准车型" :image-size="84"></el-empty>
+                                    <template v-else>
+                                        <el-alert v-if="guidanceWorkbenchLegacyPlans.length" type="warning" :closable="false" style="margin-bottom:12px">
+                                            <template #title>有 {{ guidanceWorkbenchLegacyPlans.length }} 条历史方案未归属厢型，不能用于新的以租代售报单；请在对应厢型行新增或重建方案。</template>
+                                        </el-alert>
+                                        <el-table v-loading="guidanceWorkbenchLoading" :data="guidanceWorkbenchPlanRows" row-key="box_type" stripe style="width:100%" max-height="520">
+                                            <el-table-column type="expand" width="50">
+                                                <template #default="parent">
+                                                    <div style="padding:4px 12px 10px 50px;background:#f8fafc">
+                                                        <div style="display:flex;justify-content:space-between;align-items:center;margin:6px 0 10px">
+                                                            <div style="font-size:13px;font-weight:600;color:#374151">新车{{ parent.row.box_type }}价格方案</div>
+                                                            <el-button type="primary" size="small" @click="addFinancePlanRow(parent.row)"><el-icon><Plus/></el-icon> 新增方案</el-button>
+                                                        </div>
+                                                        <el-empty v-if="!parent.row.plans.length" description="该厢型暂无方案，点击新增方案开始维护" :image-size="58"></el-empty>
+                                                        <el-table v-else :data="parent.row.plans" border size="small" style="width:100%">
+                                                            <el-table-column label="方案名" min-width="145"><template #default="s"><el-input v-model="s.row.plan_name" placeholder="方案名"></el-input></template></el-table-column>
+                                                            <el-table-column label="首付款" min-width="118"><template #default="s"><el-input-number v-model="s.row.down_payment" :min="0" :step="500" :controls="false" style="width:100%"></el-input-number></template></el-table-column>
+                                                            <el-table-column label="每期价格" min-width="118"><template #default="s"><el-input-number v-model="s.row.period_price" :min="0" :step="100" :controls="false" style="width:100%"></el-input-number></template></el-table-column>
+                                                            <el-table-column label="期数" width="90"><template #default="s"><el-input-number v-model="s.row.periods" :min="1" :max="120" :controls="false" style="width:100%"></el-input-number></template></el-table-column>
+                                                            <el-table-column label="生效日期" min-width="140"><template #default="s"><el-date-picker v-model="s.row.effective_date" type="date" value-format="YYYY-MM-DD" clearable style="width:100%"></el-date-picker></template></el-table-column>
+                                                            <el-table-column label="失效日期" min-width="140"><template #default="s"><el-date-picker v-model="s.row.expiry_date" type="date" value-format="YYYY-MM-DD" clearable style="width:100%"></el-date-picker></template></el-table-column>
+                                                            <el-table-column label="备注" min-width="140"><template #default="s"><el-input v-model="s.row.remark" placeholder="备注"></el-input></template></el-table-column>
+                                                            <el-table-column label="状态" width="94"><template #default="s"><el-select v-model="s.row.status"><el-option label="启用" value="启用"></el-option><el-option label="停用" value="停用"></el-option></el-select></template></el-table-column>
+                                                            <el-table-column label="操作" width="116" fixed="right">
+                                                                <template #default="s">
+                                                                    <el-button type="primary" link size="small" @click="saveFinancePlanRow(s.row)" :loading="guidanceSavingKey===financePlanRowKey(s.row)">保存</el-button>
+                                                                    <el-button v-if="!s.row.id" type="danger" link size="small" @click="removeFinancePlanDraft(parent.row, s.row)">移除</el-button>
+                                                                </template>
+                                                            </el-table-column>
+                                                        </el-table>
+                                                    </div>
+                                                </template>
+                                            </el-table-column>
+                                            <el-table-column label="成色" width="86"><template #default><el-tag type="primary" size="small">新车</el-tag></template></el-table-column>
+                                            <el-table-column prop="box_type" label="厢型" min-width="120"></el-table-column>
+                                            <el-table-column label="在库" width="92"><template #default="s">{{ s.row.inventory_count || 0 }} 台</template></el-table-column>
+                                            <el-table-column label="方案摘要" min-width="220"><template #default="s">共 {{ s.row.plan_count || 0 }} 个价格方案，其中 {{ s.row.active_plan_count || 0 }} 个启用</template></el-table-column>
+                                            <el-table-column label="配置状态" width="110"><template #default="s"><el-tag :type="s.row.active_plan_count ? 'success' : 'danger'" size="small">{{ s.row.active_plan_count ? '已设置' : '待设置' }}</el-tag></template></el-table-column>
+                                            <el-table-column label="操作" width="100" fixed="right"><template #default="s"><el-button type="primary" link size="small" @click="addFinancePlanRow(s.row)">新增方案</el-button></template></el-table-column>
+                                        </el-table>
+                                    </template>
+                                </el-tab-pane>
+                                <el-tab-pane label="数据字典" name="dict">
                                     <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px 20px;margin-bottom:14px">
                                         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-                                            <div style="font-weight:600;font-size:14px;color:#1f2937">维护以租代售金融方案</div>
-                                            <div style="font-size:12px;color:#6b7280">销售报单时选择方案，首付/每期/期数即为方案内容</div>
+                                            <div style="font-weight:600;font-size:14px;color:#1f2937">维护数据字典</div>
+                                            <div style="font-size:12px;color:#6b7280">基准车型字段按能源类型维护：纯电维护电池品牌/度数，混动与燃油车维护马力/档位</div>
                                         </div>
-                                        <el-form :model="financePlanForm" label-position="top" size="default">
-                                            <el-row :gutter="20">
-                                                <el-col :span="8"><el-form-item label="车型" required style="margin-bottom:10px">
-                                                    <el-select v-model="financePlanForm.car_type" placeholder="选择车型" filterable style="width:100%">
-                                                        <el-option v-for="t in modelGuidanceCarTypeOptions" :key="t" :label="t" :value="t"></el-option>
+                                        <el-form :model="dictForm" label-position="top" size="default">
+                                            <el-row :gutter="16">
+                                                <el-col :span="6"><el-form-item label="维度分类" required style="margin-bottom:10px">
+                                                    <el-select v-model="dictForm.category" placeholder="选择维度" style="width:100%" @change="onDictCategoryChange">
+                                                        <el-option v-for="dc in dictCategories" :key="dc[0]" :label="dc[1]" :value="dc[0]"></el-option>
                                                     </el-select>
                                                 </el-form-item></el-col>
-                                                <el-col :span="6"><el-form-item label="方案名" style="margin-bottom:10px"><el-input v-model="financePlanForm.plan_name" placeholder="如：方案一"></el-input></el-form-item></el-col>
-                                                <el-col :span="5"><el-form-item label="首付款(元)" required style="margin-bottom:10px"><el-input-number v-model="financePlanForm.down_payment" :min="0" :step="500" :controls="false" style="width:100%"></el-input-number></el-form-item></el-col>
-                                                <el-col :span="5"><el-form-item label="每期价格(元)" required style="margin-bottom:10px"><el-input-number v-model="financePlanForm.period_price" :min="0" :step="100" :controls="false" style="width:100%"></el-input-number></el-form-item></el-col>
-                                            </el-row>
-                                            <el-row :gutter="20">
-                                                <el-col :span="4"><el-form-item label="期数" required style="margin-bottom:10px"><el-input-number v-model="financePlanForm.periods" :min="1" :max="120" :controls="false" style="width:100%"></el-input-number></el-form-item></el-col>
-                                                <el-col :span="14"><el-form-item label="备注" style="margin-bottom:10px"><el-input v-model="financePlanForm.remark" placeholder="备注（可选）"></el-input></el-form-item></el-col>
+                                                <el-col :span="5"><el-form-item label="选项值" required style="margin-bottom:10px">
+                                                    <el-input v-model="dictForm.value" placeholder="如 解放 / 厢货 / 100度"></el-input>
+                                                </el-form-item></el-col>
+                                                <el-col :span="4"><el-form-item label="适用能源" style="margin-bottom:10px">
+                                                    <el-select v-model="dictForm.energy_type" :disabled="!dictEnergyOptions.length" style="width:100%">
+                                                        <el-option v-if="!dictEnergyOptions.length" label="通用" value=""></el-option>
+                                                        <el-option v-for="energy in dictEnergyOptions" :key="energy" :label="energy" :value="energy"></el-option>
+                                                    </el-select>
+                                                </el-form-item></el-col>
+                                                <el-col :span="3"><el-form-item label="排序" style="margin-bottom:10px"><el-input-number v-model="dictForm.sort_order" :min="0" :controls="false" style="width:100%"></el-input-number></el-form-item></el-col>
                                                 <el-col :span="6" style="display:flex;align-items:flex-end;justify-content:flex-end;gap:8px">
-                                                    <el-button @click="resetFinancePlanForm">清空</el-button>
-                                                    <el-button type="primary" @click="submitFinancePlan" :loading="submitting">保存方案</el-button>
+                                                    <el-button @click="resetDictForm">清空</el-button>
+                                                    <el-button type="primary" @click="submitDictForm" :loading="submitting">保存字典项</el-button>
                                                 </el-col>
                                             </el-row>
                                         </el-form>
                                     </div>
-                                    <el-table :data="financePlans" stripe style="width:100%" max-height="400">
-                                        <el-table-column prop="car_type" label="车型" min-width="200"></el-table-column>
-                                        <el-table-column prop="plan_name" label="方案名" min-width="140"></el-table-column>
-                                        <el-table-column label="首付款" width="110"><template #default="s">¥{{ numberFormat(s.row.down_payment) }}</template></el-table-column>
-                                        <el-table-column label="每期" width="110"><template #default="s">¥{{ numberFormat(s.row.period_price) }}</template></el-table-column>
-                                        <el-table-column prop="periods" label="期数" width="80"></el-table-column>
-                                        <el-table-column prop="status" label="状态" width="80"></el-table-column>
-                                        <el-table-column label="操作" width="140">
-                                            <template #default="s">
-                                                <el-button v-if="s.row.status!=='停用'" size="small" type="primary" link @click="editFinancePlan(s.row)">编辑</el-button>
-                                                <el-button v-if="s.row.status!=='停用'" size="small" type="danger" link @click="deleteFinancePlan(s.row)">停用</el-button>
-                                            </template>
-                                        </el-table-column>
+                                    <div style="display:flex;gap:8px;margin-bottom:10px">
+                                        <el-select v-model="dictFilterCategory" placeholder="全部维度" clearable style="width:180px"><el-option v-for="dc in dictCategories" :key="dc[0]" :label="dc[1]" :value="dc[0]"></el-option></el-select>
+                                        <el-input v-model="dictSearch" placeholder="搜索字典项" clearable style="width:240px" :prefix-icon="Search"></el-input>
+                                    </div>
+                                    <el-table :data="filteredDictRows" stripe style="width:100%" max-height="400">
+                                        <el-table-column label="维度" width="150"><template #default="s">{{ dictCategoryLabel(s.row.category) }}</template></el-table-column>
+                                        <el-table-column prop="value" label="选项值" min-width="200"></el-table-column>
+                                        <el-table-column label="适用能源" width="120"><template #default="s">{{ s.row.energy_type || '通用' }}</template></el-table-column>
+                                        <el-table-column prop="sort_order" label="排序" width="90"></el-table-column>
+                                        <el-table-column prop="status" label="状态" width="90"></el-table-column>
+                                        <el-table-column prop="updated_at" label="更新时间" width="160"></el-table-column>
+                                        <el-table-column label="操作" width="150" fixed="right"><template #default="s"><el-button type="primary" link size="small" @click="editDictRow(s.row)">编辑</el-button><el-button v-if="s.row.status!=='停用'" type="danger" link size="small" @click="deleteDictRow(s.row)">停用</el-button></template></el-table-column>
                                     </el-table>
                                 </el-tab-pane>
                             </el-tabs>
@@ -2069,7 +2137,11 @@
                     <template v-for="f in vehicleEditFields" :key="f.key">
                         <el-col :span="12">
                             <el-form-item :label="f.label">
-                                <el-input v-model="vehicleEditForm[f.key]" :disabled="f.disabled" :placeholder="f.label"></el-input>
+                                <el-select v-if="f.options" v-model="vehicleEditForm[f.key]" :disabled="f.disabled"
+                                    :placeholder="`请选择${f.label}`" filterable style="width:100%">
+                                    <el-option v-for="option in f.options" :key="option.value" :label="option.label" :value="option.value"></el-option>
+                                </el-select>
+                                <el-input v-else v-model="vehicleEditForm[f.key]" :disabled="f.disabled" :placeholder="f.label"></el-input>
                             </el-form-item>
                         </el-col>
                     </template>
@@ -2287,7 +2359,7 @@
                     </el-col>
                 </el-row>
                 <!-- 以租代售 和 租赁 都需要还款信息 -->
-                <template v-else>
+                <template>
                     <el-divider content-position="left">合同条款</el-divider>
                     <div style="margin-bottom:14px;font-size:13px;font-weight:700;color:#1f2937">一、金聚源给客户分期</div>
                     <el-row :gutter="16">
@@ -2413,6 +2485,25 @@
             </template>
         </el-dialog>
 
+        <!-- SKU 选车弹窗（从 SKU 库存视图发起报单，支持多选） -->
+        <el-dialog v-model="showSkuPickDialog" title="选择车辆发起报单" width="720" :close-on-click-modal="false">
+            <div v-if="skuPickTarget" style="padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:12px;font-size:13px;color:#1f2937">
+                <b>{{ skuPickTarget.car_type }}</b> · {{ skuPickTarget.condition }} · {{ skuPickTarget.box_type }} · {{ skuPickTarget.tailgate === '有' ? '有尾板' : '无尾板' }}
+                <span style="color:#16a34a;margin-left:8px">在库 {{ skuPickTarget.in_stock_count || 0 }} 台</span>
+            </div>
+            <div style="font-size:12px;color:#6b7280;margin-bottom:8px">勾选一辆或多辆车（批量租赁/以租代售），双击单行可直接发起单车报单</div>
+            <el-table :data="skuPickVehicles" stripe style="width:100%" max-height="420" @row-dblclick="pickSkuVehicle">
+                <el-table-column type="selection" width="46"></el-table-column>
+                <el-table-column prop="vin" label="VIN" min-width="180" class-name="mono-text"></el-table-column>
+                <el-table-column prop="plate_number" label="车牌号" width="110"></el-table-column>
+                <el-table-column prop="car_type" label="车型" min-width="200"></el-table-column>
+            </el-table>
+            <template #footer>
+                <el-button @click="showSkuPickDialog = false">取消</el-button>
+                <el-button type="warning" @click="pickSelectedSkuVehicles">发起报单（勾选 {{ skuPickSelected.length }} 台）</el-button>
+            </template>
+        </el-dialog>
+
         <el-dialog v-model="showOrderDialog" title="新建销售报单" width="900" :close-on-click-modal="false">
             <el-form :model="newOrder" label-position="top">
                 <el-form-item label="销售方式" required>
@@ -2442,6 +2533,17 @@
                 </el-row>
 
                 <el-divider content-position="left">车辆信息</el-divider>
+                <el-row :gutter="16" style="margin-bottom:8px">
+                    <el-col :span="24">
+                        <div style="display:flex;gap:8px;align-items:center;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:8px 12px">
+                            <span style="font-size:12px;color:#0369a1;white-space:nowrap">⚡ SKU 快速定位</span>
+                            <el-select v-model="quickSkuId" placeholder="按规格快速选择（可选）" clearable filterable style="flex:1" @change="onQuickSkuSelect">
+                                <el-option v-for="sku in quickSkuOptions" :key="sku.id" :label="skuLabel(sku)" :value="sku.id"></el-option>
+                            </el-select>
+                            <el-button v-if="quickSkuId && quickSkuVehicles.length" type="warning" size="small" plain round @click="openSkuPickFromOrder">选择车辆</el-button>
+                        </div>
+                    </el-col>
+                </el-row>
                 <el-row :gutter="16">
                     <el-col :span="6">
                         <el-form-item label="成色">
@@ -2459,6 +2561,13 @@
                     <el-col :span="6">
                         <el-form-item label="品牌">
                             <el-input v-model="newOrder.vehicle_brand" placeholder="如 解放/东风"></el-input>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
+                <el-row :gutter="16">
+                    <el-col :span="24">
+                        <el-form-item label="车型">
+                            <el-input v-model="newOrder.car_type" disabled></el-input>
                         </el-form-item>
                     </el-col>
                 </el-row>
@@ -2809,6 +2918,9 @@
         <!-- ========== 退还车辆验收单 DIALOG ========== -->
         <el-dialog v-model="showReturnDialog" title="退还车辆验收单" width="820" :close-on-click-modal="false" top="3vh">
             <el-form :model="returnForm" label-position="top" label-width="100px" size="default">
+                <el-alert v-if="returnForm.status==='已驳回待销售修改'" type="error" :closable="false" style="margin-bottom:14px"
+                    title="老板已驳回，请由销售修改后重新提交"
+                    :description="returnForm.reject_reason || '请根据驳回意见完善退车信息。'" />
                 <!-- 表头信息 -->
                 <el-divider content-position="left">基本信息</el-divider>
                 <el-row :gutter="16">
@@ -2971,10 +3083,12 @@
             </el-form>
             <template #footer>
                 <el-button @click="showReturnDialog = false">取消</el-button>
-                <el-button v-if="!returnForm.id && ['销售','老板'].includes(currentUser.role)" type="primary" @click="submitReturnInspection" :loading="submitting">发起退车</el-button>
+                <el-button v-if="!returnForm.id && currentUser.role==='销售'" type="primary" @click="submitReturnInspection" :loading="submitting">发起退车</el-button>
                 <el-button v-if="returnForm.id && currentUser.role==='车管' && returnForm.status==='待车管验车'" type="warning" @click="submitReturnFleet(returnForm)" :loading="submitting">车管确认验车</el-button>
                 <el-button v-if="returnForm.id && currentUser.role==='运营' && returnForm.status==='待运营填写'" type="warning" @click="submitReturnOperator(returnForm)" :loading="submitting">运营确认填单</el-button>
                 <el-button v-if="returnForm.id && currentUser.role==='财务' && returnForm.status==='待财务复核'" type="warning" @click="submitReturnFinance(returnForm)" :loading="submitting">财务复核</el-button>
+                <el-button v-if="returnForm.id && currentUser.role==='销售' && returnForm.status==='已驳回待销售修改'" type="primary" @click="resubmitReturnInspection(returnForm)" :loading="submitting">修改后重新提交</el-button>
+                <el-button v-if="returnForm.id && currentUser.role==='老板' && returnForm.status==='待领导审批'" type="danger" plain @click="submitReturnBossReject(returnForm)" :loading="submitting">驳回</el-button>
                 <el-button v-if="returnForm.id && currentUser.role==='老板' && returnForm.status==='待领导审批'" type="danger" @click="submitReturnBoss(returnForm)" :loading="submitting">领导审批</el-button>
                 <el-button v-if="returnForm.id && ['财务','老板'].includes(currentUser.role) && returnForm.status==='待出款'" type="success" @click="submitReturnPay(returnForm)" :loading="submitting">退还押金</el-button>
             </template>
@@ -3078,7 +3192,8 @@
                 }
             }
             function canEditReturnSalesSection() {
-                return currentUser.value && ['销售', '老板'].includes(currentUser.value.role) && !returnForm.id;
+                return currentUser.value && currentUser.value.role === '销售'
+                    && (!returnForm.id || returnForm.status === '已驳回待销售修改');
             }
             function canEditReturnFleetSection() {
                 return currentUser.value && currentUser.value.role === '车管' && returnForm.id && returnForm.status === '待车管验车';
@@ -3098,6 +3213,17 @@
                 const day = String(d.getDate()).padStart(2, '0');
                 return `${d.getFullYear()}-${m}-${day}`;
             }
+            function normalizeOrderTailgate(value) {
+                const raw = String(value || '').trim();
+                if (['有', '带尾板', '有尾板', '是'].includes(raw)) return '有';
+                return '无';
+            }
+            function fuelFormToCategory(value) {
+                const fuel = String(value || '').trim();
+                if (fuel === '纯电') return '纯电';
+                if (fuel === '混动') return '混动';
+                return fuel ? '燃油车' : '';
+            }
             function openSalesOrderFromVehicle(row) {
                 if (!row || !row.vin) return ElementPlus.ElMessage.warning('该车辆缺少 VIN，无法发起报单');
                 if (!canInitiateVehicleOrder(row)) {
@@ -3116,15 +3242,18 @@
                     sales_mode: '经营租赁',
                     vin: (row.vin || '').trim().toUpperCase(),
                     car_type: row.car_type || '',
-                    vehicle_category: row.vehicle_category || '',
-                    vehicle_cab: '',
-                    vehicle_engine_battery: row.vehicle_engine_battery || '',
-                    vehicle_power_battery: row.vehicle_power_battery || '',
-                    vehicle_gearbox: '',
+                    is_new: row.condition || row.is_new || '新车',
+                    vehicle_brand: row.brand || row.vehicle_brand || '',
+                    vehicle_category: fuelFormToCategory(row.fuel_form) || row.vehicle_category || '',
+                    vehicle_cab: row.cab_type || row.cab_style || row.vehicle_cab || '',
+                    vehicle_engine_battery: row.battery_brand || row.engine_spec || row.vehicle_engine_battery || '',
+                    vehicle_power_battery: row.battery_capacity || row.horsepower || row.vehicle_power_battery || '',
+                    vehicle_gearbox: row.gear_position || row.gearbox_spec || row.vehicle_gearbox || '',
                     vehicle_color: row.vehicle_color || '',
-                    vehicle_box_type: row.vehicle_box_type || '',
+                    vehicle_box_type: row.box_type || row.vehicle_box_type || '',
                     box_type_remark: row.box_type_remark || '',
                     plate_number: row.plate_number || '',
+                    tail_plate: normalizeOrderTailgate(row.tailgate || row.tail_plate),
                     lease_term: '',
                     cargo_length: '',
                     payment_category: '',
@@ -3166,7 +3295,7 @@
                 {key:'idx',label:'#'},{key:'vin',label:'车架号(VIN)'},{key:'plate_number',label:'车牌号'},
                 {key:'condition',label:'成色'},{key:'brand',label:'品牌'},{key:'product_series',label:'品系'},
                 {key:'battery_capacity',label:'电池度数'},{key:'horsepower',label:'马力'},{key:'box_type',label:'厢型'},
-                {key:'box_dimension',label:'厢尺寸'},{key:'gear_position',label:'档位'},{key:'tailgate',label:'尾板'},
+                {key:'gear_position',label:'档位'},{key:'tailgate',label:'尾板'},
                 {key:'vehicle_color',label:'颜色'},{key:'battery_brand',label:'电池品牌'},
                 {key:'car_type',label:'车型'},{key:'customer_name',label:'客户'},
                 {key:'product_code',label:'产品代码'},{key:'dealer_price',label:'网员价'},
@@ -3384,57 +3513,97 @@
             const vehicleEditSaving = ref(false);
             const vehicleEditForm = reactive({});
             const vehicleEditHint = ref('');
+            const vehicleEditEnergyType = computed(() => {
+                const fuel = String(vehicleEditForm.fuel_form || '');
+                if (fuel.includes('纯电')) return '纯电';
+                if (fuel.includes('混动')) return '混动';
+                if (fuel) return '燃油车';
+                if (vehicleEditForm.battery_brand || vehicleEditForm.battery_capacity || vehicleEditForm.battery_model) return '纯电';
+                if (vehicleEditForm.horsepower || vehicleEditForm.gear_position) return '燃油车';
+                return '';
+            });
+            function vehicleEditOptions(key, energy) {
+                const fixedOptions = {
+                    condition: [{ label: '新车', value: '新车' }, { label: '二手车', value: '二手车' }],
+                    tailgate: [{ label: '无尾板', value: '无' }, { label: '有尾板', value: '有' }],
+                };
+                if (fixedOptions[key]) return fixedOptions[key];
+                const categoryByField = {
+                    brand: 'brand',
+                    product_series: 'product_series',
+                    box_type: 'box_type',
+                    battery_brand: 'battery_brand',
+                    battery_capacity: 'battery_capacity',
+                    horsepower: 'horsepower',
+                    gear_position: 'gear_position',
+                };
+                const category = categoryByField[key];
+                if (!category) return null;
+                const energyScoped = ['battery_brand', 'battery_capacity', 'horsepower', 'gear_position'].includes(key);
+                return dictOptionsByCategory(category, energyScoped ? energy : '')
+                    .map(value => ({ label: value, value }));
+            }
             const vehicleEditFields = computed(() => {
-                const all = [
-                    {key:'condition',label:'成色'},{key:'brand',label:'品牌'},{key:'product_series',label:'品系'},
-                    {key:'battery_capacity',label:'电池度数'},{key:'horsepower',label:'马力'},{key:'box_type',label:'厢型'},
-                    {key:'box_dimension',label:'厢尺寸'},{key:'gear_position',label:'档位'},{key:'tailgate',label:'尾板'},
-                    {key:'vehicle_color',label:'颜色'},{key:'battery_brand',label:'电池品牌'},{key:'plate_number',label:'车牌号'},
-                    {key:'car_type',label:'车型'},{key:'vin',label:'VIN'},
-                    {key:'product_code',label:'产品代码'},{key:'dealer_price',label:'网员价'},
-                    {key:'cab_type',label:'驾驶室'},{key:'other_config',label:'其他'},{key:'fuel_form',label:'燃料形式'},
-                    {key:'cab_style',label:'驾驶室类型'},{key:'engine_spec',label:'发动机厂家及功率'},
-                    {key:'gearbox_spec',label:'变速箱厂家及型号'},{key:'drive_motor_model',label:'驱动电机型号'},
-                    {key:'battery_model',label:'新能源动力电池型号'},{key:'suspension_model',label:'悬架型号'},
-                ];
-                const opsEditable = ['condition','brand','product_series','battery_capacity','horsepower',
-                    'box_type','box_dimension','gear_position','tailgate','vehicle_color','battery_brand','plate_number'];
                 const role = currentUser.value?.role;
+                const energy = vehicleEditEnergyType.value;
+                const opsEditable = ['condition','brand','product_series','battery_capacity','horsepower',
+                    'box_type','gear_position','tailgate','vehicle_color','battery_brand','plate_number'];
+                const all = [
+                    {key:'condition',label:'成色'}, {key:'brand',label:'品牌'}, {key:'product_series',label:'品系'},
+                    {key:'fuel_form',label:'燃料形式'},
+                    ...(energy === '纯电'
+                        ? [{key:'battery_brand',label:'电池品牌'}, {key:'battery_capacity',label:'电池度数'}]
+                        : energy ? [{key:'horsepower',label:'马力'}, {key:'gear_position',label:'档位'}] : []),
+                    {key:'box_type',label:'厢型'}, {key:'tailgate',label:'尾板'},
+                    {key:'vehicle_color',label:'颜色'}, {key:'plate_number',label:'车牌号'},
+                    {key:'car_type',label:'基准车型'}, {key:'vin',label:'VIN'},
+                ];
+                if (role === '老板') {
+                    all.push(
+                        {key:'product_code',label:'产品代码'}, {key:'dealer_price',label:'网员价'},
+                        {key:'cab_type',label:'驾驶室'}, {key:'other_config',label:'其他'},
+                        {key:'cab_style',label:'驾驶室类型'},
+                        ...(energy === '纯电'
+                            ? [{key:'drive_motor_model',label:'驱动电机型号'}, {key:'battery_model',label:'新能源动力电池型号'}]
+                            : energy ? [{key:'engine_spec',label:'发动机厂家及功率'}, {key:'gearbox_spec',label:'变速箱厂家及型号'}] : []),
+                        {key:'suspension_model',label:'悬架型号'},
+                    );
+                }
                 return all.map(f => {
-                    if (f.key === 'vin') return {...f, disabled: true};
-                    if (f.key === 'car_type') return {...f, disabled: true};
+                    const options = vehicleEditOptions(f.key, energy);
+                    if (f.key === 'vin' || f.key === 'car_type' || f.key === 'fuel_form') {
+                        return {...f, options, disabled: true};
+                    }
                     if (role === '运营' && !opsEditable.includes(f.key)) return {...f, disabled: true};
-                    return f;
+                    return options ? {...f, options} : f;
                 });
             });
-            function openVehicleEdit(row) {
+            async function openVehicleEdit(row) {
+                await loadDictRows();
                 vehicleEditTargetId.value = row.id;
                 Object.keys(vehicleEditForm).forEach(k => delete vehicleEditForm[k]);
                 const role = currentUser.value?.role;
                 const opsEditable = ['condition','brand','product_series','battery_capacity','horsepower',
-                    'box_type','box_dimension','gear_position','tailgate','vehicle_color','battery_brand','plate_number'];
+                    'box_type','gear_position','tailgate','vehicle_color','battery_brand','plate_number'];
                 const keys = role === '老板' ? [
                     'condition','brand','product_series','battery_capacity','horsepower','box_type',
-                    'box_dimension','gear_position','tailgate','vehicle_color','battery_brand','plate_number',
+                    'gear_position','tailgate','vehicle_color','battery_brand','plate_number',
                     'product_code','dealer_price','cab_type','other_config','fuel_form','cab_style',
                     'engine_spec','gearbox_spec','drive_motor_model','battery_model','suspension_model',
-                ] : opsEditable;
+                ] : [...opsEditable, 'fuel_form', 'battery_model'];
                 keys.forEach(k => { vehicleEditForm[k] = row[k] ?? ''; });
                 vehicleEditForm.car_type = row.car_type || '';
                 vehicleEditForm.vin = row.vin || '';
                 vehicleEditHint.value = role === '运营'
-                    ? '运营端：仅可编辑成色、品牌、品系、电池度数、马力、厢型、厢尺寸、档位、尾板、颜色、电池品牌、车牌号；车型根据所选维度自动计算'
-                    : '老板端：可编辑全部维度（车型、VIN 除外）；车型根据所选维度自动计算';
+                    ? '燃料形式来自采购导入且不可修改；运营仅维护当前能源类型适用的基准车型字段，成色和厢型为子型号字段'
+                    : '燃料形式来自采购导入且不可修改；纯电维护电池品牌和度数，混动和燃油车维护马力和档位，成色和厢型不参与基准车型计算';
                 showVehicleEditDialog.value = true;
             }
             async function saveVehicleEdit() {
-                const row = vehicles.value.find(x => x.id === vehicleEditTargetId.value) || {};
-                const role = currentUser.value?.role;
-                const opsEditable = ['condition','brand','product_series','battery_capacity','horsepower',
-                    'box_type','box_dimension','gear_position','tailgate','vehicle_color','battery_brand','plate_number'];
                 const payload = {};
-                const keys = role === '老板' ? Object.keys(vehicleEditForm).filter(k => !['car_type','vin'].includes(k))
-                                             : opsEditable.filter(k => k in vehicleEditForm);
+                const keys = vehicleEditFields.value
+                    .filter(field => !field.disabled && field.key in vehicleEditForm)
+                    .map(field => field.key);
                 keys.forEach(k => { payload[k] = vehicleEditForm[k]; });
                 vehicleEditSaving.value = true;
                 try {
@@ -3492,7 +3661,15 @@
             const financePlans = ref([]);
             const modelGuidanceSearch = ref('');
             const guidanceHistoryCache = ref({});
-            const PRICE_KIND_LABELS = { sale_total:'整车价', legacy:'指导价' };
+            const guidanceWorkbenchCarType = ref('');
+            const guidanceWorkbenchRows = ref([]);
+            const guidanceWorkbenchPlans = ref([]);
+            const guidanceWorkbenchPlanRows = ref([]);
+            const guidanceWorkbenchLegacyPlans = ref([]);
+            const guidanceWorkbenchSummary = ref({ total_count: 0, configured_count: 0, missing_count: 0 });
+            const guidanceWorkbenchLoading = ref(false);
+            const guidanceSavingKey = ref('');
+            const PRICE_KIND_LABELS = { lease_installment:'租赁月租', legacy:'历史指导价', sale_total:'历史整车价(已废弃)' };
             async function loadGuidanceHistory(carType) {
                 if (guidanceHistoryCache.value[carType]) return;
                 guidanceHistoryCache.value[carType] = [];
@@ -3506,9 +3683,9 @@
             );
             const modelGuidanceForm = reactive({
                 car_type: '', guidance_price: 0, is_new: '新车',
-                sale_total_price: 0, remark: '',
+                remark: '',
                 // Excel 字段
-                chassis_base_price_wan: 0, sale_total_price_wan: 0, landing_price_wan: 0,
+                chassis_base_price_wan: 0, landing_price_wan: 0,
                 interest_free_plan: '', rent_to_buy_plan: '', min_loan_plan: '', lease_plan: '',
                 product_code: '', fuel_type: '',
                 // 20260804 租赁指导价（元）：押金 + 箱型月供 + 尾板
@@ -3586,7 +3763,9 @@
                 customer_screenshot_path: '',
                 first_payment_received_amount: 0,
                 first_payment_shortage_reason: '',
-                first_payment_promised_date: ''
+                first_payment_promised_date: '',
+                // 20260810 SKU 改造：多车报单（VIN 数组，主车仍写 vin）
+                vehicle_ids: []
             });
 
             const initialPaymentForm = reactive({
@@ -3970,14 +4149,14 @@
 	            watch(currentPage, (page) => {
 	                if (page === 'dashboard') refreshDashboardPanels();
                 if (page === 'orders') { fetchSalesOrders(); loadFinancePlans(); }
-                if (page === 'assets') { fetchAll(); fetchContracts(); }
+                if (page === 'assets') { fetchAll(); fetchContracts(); loadSkuInventory(); }
                 if (page === 'approvals') { fetchApprovals(); fetchApprovalReminders(); fetchLockRequests(); fetchContracts(); fetchReturns(); }
                 if (page === 'risk') { fetchOverdue(); fetchInsuranceWarnings(); }
                 if (page === 'bills') { fetchBills(); fetchContracts(); fetchInvoices(); fetchReceivingCompanies(); }
                 if (page === 'invoice') fetchInvoices();
                 if (page === 'profit') { fetchProfit(); fetchVehicleRebates(); }
                 if (page === 'reconciliation') { fetchRecon(); fetchReceivables(); }
-                if (page === 'settings') { fetchAll(); fetchModelGuidancePrices(); fetchMissingGuidanceAlerts(); fetchReceivingCompanies(); fetchCustomerBlacklist(); loadFinancePlans(); }
+                if (page === 'settings') { fetchAll(); fetchModelGuidancePrices(); fetchMissingGuidanceAlerts(); fetchReceivingCompanies(); fetchCustomerBlacklist(); loadFinancePlans(); loadDictRows(); }
             });
             // 按能源类型分组的车型列表
             const carTypeGroups = computed(() => {
@@ -3991,8 +4170,7 @@
                 return order.filter(k => groups[k]).map(k => ({ label: k, options: groups[k] }));
             });
             const modelGuidanceCarTypeOptions = computed(() => {
-                // 以车辆管理中的标准车型命名为准（去成色前缀、去厢型后缀，显示基准车型）
-                // 厢型为"底盘"（仅车头）的车辆不进指导价维护选项
+                // 仅从库存车型生成维护入口；历史指导价和方案的自由文本不能反向进入下拉。
                 const names = new Set();
                 vehicles.value.forEach(v => {
                     if (v.box_type === '底盘') return;
@@ -4004,11 +4182,9 @@
                 const map = {};
                 modelGuidancePrices.value.forEach(item => {
                     if (item.car_type) {
-                        const sale = Number(item.sale_total_price || 0);
                         const base = normalizeBaseCarType(item.car_type);
                         const key = `${base}|${item.is_new || '新车'}`;
                         map[key] = {
-                            lease: sale, sale,
                             lease_deposit_guidance: Number(item.lease_deposit_guidance || 0),
                             box_standard_price: Number(item.box_standard_price || 0),
                             box_wide_price: Number(item.box_wide_price || 0),
@@ -4024,10 +4200,10 @@
                 return map;
             });
             function guidancePriceForCarType(carType, isNew) {
-                if (!carType) return { lease: 0, sale: 0 };
+                if (!carType) return {};
                 const base = normalizeBaseCarType(carType);
                 const key = `${base}|${isNew || '新车'}`;
-                return guidancePriceMap.value[key] || guidancePriceMap.value[base] || { lease: 0, sale: 0 };
+                return guidancePriceMap.value[key] || guidancePriceMap.value[base] || {};
             }
             // ===== 20260804 大改版：金融方案 + 租赁双指导价 + 首付判断 =====
             function stripConditionPrefix(carType) {
@@ -4057,11 +4233,27 @@
                 return stripBoxSuffix(stripConditionPrefix(carType));
             }
             const financePlansForCarType = computed(() => {
-                const ct = stripConditionPrefix(newOrder.car_type || '');
-                return financePlans.value.filter(p => p.car_type === ct && p.status !== '停用');
+                const ct = normalizeBaseCarType(newOrder.car_type || '');
+                const today = new Date().toISOString().slice(0, 10);
+                return financePlans.value.filter(p =>
+                    normalizeBaseCarType(p.car_type || '') === ct &&
+                    (p.condition || '新车') === (newOrder.is_new || '新车') &&
+                    (p.box_type || '') === (newOrder.vehicle_box_type || '') &&
+                    p.status !== '停用' &&
+                    (!p.effective_date || p.effective_date <= today) &&
+                    (!p.expiry_date || p.expiry_date >= today)
+                );
             });
             const currentFinancePlan = computed(() =>
                 financePlansForCarType.value.find(p => p.id === newOrder.finance_plan_id) || null
+            );
+            watch(
+                () => [newOrder.car_type, newOrder.is_new, newOrder.vehicle_box_type],
+                () => {
+                    if (newOrder.finance_plan_id && !financePlansForCarType.value.some(p => p.id === newOrder.finance_plan_id)) {
+                        newOrder.finance_plan_id = null;
+                    }
+                }
             );
             const leaseGuidanceForOrder = computed(() => {
                 const ct = newOrder.car_type || '';
@@ -4111,11 +4303,147 @@
                 } catch (e) { financePlans.value = []; }
             }
 
+            function leaseRowKey(row) {
+                return `lease:${row.condition}:${row.box_type}`;
+            }
+            function financePlanRowKey(row) {
+                return `plan:${row.id || row._draft_key}`;
+            }
+            async function loadGuidanceWorkbench(carType = guidanceWorkbenchCarType.value) {
+                if (!carType) {
+                    guidanceWorkbenchRows.value = [];
+                    guidanceWorkbenchPlans.value = [];
+                    guidanceWorkbenchPlanRows.value = [];
+                    guidanceWorkbenchLegacyPlans.value = [];
+                    guidanceWorkbenchSummary.value = { total_count: 0, configured_count: 0, missing_count: 0, rent_to_buy_total_count: 0, rent_to_buy_configured_count: 0 };
+                    return;
+                }
+                guidanceWorkbenchLoading.value = true;
+                try {
+                    const response = await fetch(`/api/model-guidance-workbench?car_type=${encodeURIComponent(carType)}`);
+                    const data = await response.json();
+                    if (!data.success) throw new Error(data.message || '读取指导价工作台失败');
+                    guidanceWorkbenchCarType.value = data.car_type || carType;
+                    guidanceWorkbenchRows.value = Array.isArray(data.lease_rows) ? data.lease_rows : [];
+                    guidanceWorkbenchPlans.value = Array.isArray(data.finance_plans) ? data.finance_plans : [];
+                    guidanceWorkbenchPlanRows.value = Array.isArray(data.rent_to_buy_rows) ? data.rent_to_buy_rows : [];
+                    guidanceWorkbenchLegacyPlans.value = Array.isArray(data.legacy_finance_plans) ? data.legacy_finance_plans : [];
+                    guidanceWorkbenchSummary.value = data.summary || { total_count: 10, configured_count: 0, missing_count: 10, rent_to_buy_total_count: 5, rent_to_buy_configured_count: 0 };
+                } catch (e) {
+                    guidanceWorkbenchRows.value = [];
+                    guidanceWorkbenchPlans.value = [];
+                    guidanceWorkbenchPlanRows.value = [];
+                    guidanceWorkbenchLegacyPlans.value = [];
+                    ElementPlus.ElMessage.error(e.message || '读取指导价工作台失败');
+                } finally {
+                    guidanceWorkbenchLoading.value = false;
+                }
+            }
+            function syncLeaseConditionField(row, field) {
+                const nextValue = Number(row[field] || 0);
+                guidanceWorkbenchRows.value.forEach(item => {
+                    if (item.condition === row.condition) item[field] = nextValue;
+                });
+            }
+            async function saveLeaseGuidanceRow(row) {
+                if (!guidanceWorkbenchCarType.value) return ElementPlus.ElMessage.warning('请选择基准车型');
+                const conditionRows = guidanceWorkbenchRows.value.filter(item => item.condition === row.condition);
+                const payload = {
+                    car_type: guidanceWorkbenchCarType.value,
+                    is_new: row.condition,
+                    lease_deposit_guidance: Number(row.lease_deposit_guidance || 0),
+                    tail_plate_price: Number(row.tail_plate_price || 0),
+                    remark: row.remark || '',
+                };
+                conditionRows.forEach(item => {
+                    payload[item.price_field] = Number(item.monthly_price || 0);
+                });
+                const key = leaseRowKey(row);
+                guidanceSavingKey.value = key;
+                try {
+                    const response = await fetch('/api/model-guidance-prices', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    const data = await response.json();
+                    if (!data.success) throw new Error(data.message || '保存失败');
+                    ElementPlus.ElMessage.success('租赁指导价已保存');
+                    await Promise.all([loadGuidanceWorkbench(), fetchModelGuidancePrices(), fetchMissingGuidanceAlerts()]);
+                } catch (e) {
+                    ElementPlus.ElMessage.error(e.message || '保存失败');
+                } finally {
+                    guidanceSavingKey.value = '';
+                }
+            }
+            function addFinancePlanRow(parentRow) {
+                if (!guidanceWorkbenchCarType.value) return ElementPlus.ElMessage.warning('请选择基准车型');
+                if (!parentRow || !parentRow.box_type) return ElementPlus.ElMessage.warning('请选择要维护的厢型');
+                if (!Array.isArray(parentRow.plans)) parentRow.plans = [];
+                parentRow.plans.push({
+                    _draft_key: `draft_${Date.now()}`,
+                    car_type: guidanceWorkbenchCarType.value,
+                    condition: '新车',
+                    box_type: parentRow.box_type,
+                    plan_name: '',
+                    down_payment: 0,
+                    period_price: 0,
+                    periods: 1,
+                    sort_order: parentRow.plans.length + 1,
+                    remark: '',
+                    status: '启用',
+                    effective_date: '',
+                    expiry_date: '',
+                });
+                syncFinancePlanRowSummary(parentRow);
+            }
+            function syncFinancePlanRowSummary(parentRow) {
+                parentRow.plan_count = Array.isArray(parentRow.plans) ? parentRow.plans.length : 0;
+                parentRow.active_plan_count = (parentRow.plans || []).filter(item => item.status !== '停用').length;
+                parentRow.status = parentRow.active_plan_count ? '已设置' : '待设置';
+            }
+            function removeFinancePlanDraft(parentRow, row) {
+                parentRow.plans = (parentRow.plans || []).filter(item => item !== row);
+                syncFinancePlanRowSummary(parentRow);
+            }
+            async function saveFinancePlanRow(row) {
+                if (!guidanceWorkbenchCarType.value) return ElementPlus.ElMessage.warning('请选择基准车型');
+                if (!Number(row.down_payment) || !Number(row.period_price) || !Number(row.periods)) {
+                    return ElementPlus.ElMessage.warning('首付款、每期价格、期数均须大于0');
+                }
+                const key = financePlanRowKey(row);
+                guidanceSavingKey.value = key;
+                try {
+                    const response = await fetch('/api/finance-plans', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            ...row,
+                            car_type: guidanceWorkbenchCarType.value,
+                            condition: '新车',
+                            box_type: row.box_type,
+                            down_payment: Number(row.down_payment || 0),
+                            period_price: Number(row.period_price || 0),
+                            periods: Number(row.periods || 0),
+                        }),
+                    });
+                    const data = await response.json();
+                    if (!data.success) throw new Error(data.message || '保存失败');
+                    ElementPlus.ElMessage.success('以租代售方案已保存');
+                    await Promise.all([loadGuidanceWorkbench(), loadFinancePlans()]);
+                } catch (e) {
+                    ElementPlus.ElMessage.error(e.message || '保存失败');
+                } finally {
+                    guidanceSavingKey.value = '';
+                }
+            }
+
             // ===== 金融方案管理（设置页）=====
             const guidanceTab = ref('lease');
             const financePlanForm = reactive({
                 id: null, car_type: '', plan_name: '', down_payment: 0,
-                period_price: 0, periods: 0, sort_order: 0, remark: ''
+                period_price: 0, periods: 0, sort_order: 0, remark: '',
+                effective_date: '', expiry_date: ''
             });
             function openFinancePlanManager() {
                 loadFinancePlans();
@@ -4124,12 +4452,13 @@
             function resetFinancePlanForm() {
                 Object.assign(financePlanForm, {
                     id: null, car_type: '', plan_name: '', down_payment: 0,
-                    period_price: 0, periods: 0, sort_order: 0, remark: ''
+                    period_price: 0, periods: 0, sort_order: 0, remark: '',
+                    effective_date: '', expiry_date: ''
                 });
             }
             function resetModelGuidanceForm() {
                 Object.assign(modelGuidanceForm, {
-                    car_type: '', is_new: '新车', guidance_price: 0, sale_total_price: 0, remark: '',
+                    car_type: '', is_new: '新车', guidance_price: 0, remark: '',
                     lease_deposit_guidance: 0,
                     box_standard_price: 0, box_wide_price: 0, box_high_rail_price: 0,
                     box_refrigerated_price: 0, box_flatbed_price: 0,
@@ -4141,7 +4470,8 @@
                     id: row.id, car_type: row.car_type, plan_name: row.plan_name || '',
                     down_payment: Number(row.down_payment || 0), period_price: Number(row.period_price || 0),
                     periods: Number(row.periods || 0),
-                    sort_order: Number(row.sort_order || 0), remark: row.remark || ''
+                    sort_order: Number(row.sort_order || 0), remark: row.remark || '',
+                    effective_date: row.effective_date || '', expiry_date: row.expiry_date || ''
                 });
             }
             async function submitFinancePlan() {
@@ -4166,6 +4496,228 @@
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '停用失败');
                 ElementPlus.ElMessage.success(data.message || '方案已停用');
                 loadFinancePlans();
+            }
+
+            // ===== 数据字典管理（SKU 改造）=====
+            const dictCategories = [
+                ['brand', '品牌'], ['product_series', '品系'], ['box_type', '厢型'],
+                ['battery_capacity', '电池度数'], ['horsepower', '马力'],
+                ['gear_position', '档位'],
+                ['battery_brand', '电池品牌'],
+            ];
+            const dictCategoryEnergyLimits = {
+                battery_brand: ['纯电'], battery_capacity: ['纯电'],
+                horsepower: ['混动', '燃油车'], gear_position: ['混动', '燃油车'],
+            };
+            const dictRows = ref([]);
+            const dictFilterCategory = ref('');
+            const dictSearch = ref('');
+            const dictForm = reactive({ id: null, category: '', value: '', energy_type: '', sort_order: 0, remark: '' });
+            const dictEnergyOptions = computed(() => dictCategoryEnergyLimits[dictForm.category] || []);
+            const filteredDictRows = computed(() => {
+                let rows = dictRows.value;
+                if (dictFilterCategory.value) rows = rows.filter(r => r.category === dictFilterCategory.value);
+                if (dictSearch.value) rows = rows.filter(r => (r.value || '').includes(dictSearch.value));
+                return rows;
+            });
+            function dictCategoryLabel(cat) {
+                const found = dictCategories.find(dc => dc[0] === cat);
+                return found ? found[1] : cat;
+            }
+            async function loadDictRows() {
+                try {
+                    const res = await fetch('/api/data-dictionaries');
+                    const data = await res.json();
+                    dictRows.value = Array.isArray(data) ? data : [];
+                } catch (e) { dictRows.value = []; }
+            }
+            function resetDictForm() {
+                Object.assign(dictForm, { id: null, category: '', value: '', energy_type: '', sort_order: 0, remark: '' });
+            }
+            function onDictCategoryChange() {
+                const allowed = dictCategoryEnergyLimits[dictForm.category] || [];
+                dictForm.energy_type = allowed.length === 1 ? allowed[0] : '';
+            }
+            function editDictRow(row) {
+                Object.assign(dictForm, {
+                    id: row.id, category: row.category, value: row.value,
+                    energy_type: row.energy_type || '', sort_order: Number(row.sort_order || 0),
+                    remark: row.remark || ''
+                });
+            }
+            async function submitDictForm() {
+                if (!dictForm.category) return ElementPlus.ElMessage.warning('请选择维度分类');
+                if (!dictForm.value) return ElementPlus.ElMessage.warning('请填写选项值');
+                const res = await fetch('/api/data-dictionaries', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...dictForm })
+                });
+                const data = await res.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '保存失败');
+                ElementPlus.ElMessage.success(data.message || '字典项已保存');
+                resetDictForm();
+                loadDictRows();
+            }
+            async function deleteDictRow(row) {
+                await ElementPlus.ElMessageBox.confirm(`确认停用字典项「${row.value}」？`, '停用字典项', { type: 'warning' });
+                const res = await fetch(`/api/data-dictionaries/${row.id}`, { method: 'DELETE' });
+                const data = await res.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '停用失败');
+                ElementPlus.ElMessage.success(data.message || '字典项已停用');
+                loadDictRows();
+            }
+
+            // ===== SKU 库存视图（SKU 改造）=====
+            const skuInventory = ref([]);
+            const skuFilterCondition = ref('');
+            const skuFilterBoxType = ref('');
+            const filteredSkuInventory = computed(() => {
+                let rows = skuInventory.value;
+                if (skuFilterCondition.value) rows = rows.filter(r => r.condition === skuFilterCondition.value);
+                if (skuFilterBoxType.value) rows = rows.filter(r => r.box_type === skuFilterBoxType.value);
+                return rows;
+            });
+            function dictOptionsByCategory(cat, energyType = '') {
+                const seen = new Set();
+                dictRows.value.forEach(r => {
+                    if (r.category !== cat || r.status !== '启用') return;
+                    if (energyType && r.energy_type !== energyType) return;
+                    if (!energyType && r.energy_type) return;
+                    seen.add(r.value);
+                });
+                return Array.from(seen);
+            }
+            async function loadSkuInventory() {
+                try {
+                    const res = await fetch('/api/skus/inventory');
+                    const data = await res.json();
+                    skuInventory.value = Array.isArray(data) ? data : [];
+                } catch (e) { skuInventory.value = []; }
+            }
+            // SKU 选车弹窗（从 SKU 发起报单，支持多选）
+            const showSkuPickDialog = ref(false);
+            const skuPickTarget = ref(null);
+            const skuPickVehicles = ref([]);
+            const skuPickSelected = ref([]);
+            async function openSkuPickVehicle(sku) {
+                skuPickTarget.value = sku;
+                skuPickVehicles.value = [];
+                skuPickSelected.value = [];
+                try {
+                    const res = await fetch(`/api/skus/${sku.id}/vehicles`);
+                    const data = await res.json();
+                    skuPickVehicles.value = Array.isArray(data) ? data : [];
+                } catch (e) { skuPickVehicles.value = []; }
+                showSkuPickDialog.value = true;
+            }
+            function skuVehicleToRow(vehicle) {
+                return {
+                    vin: (vehicle.vin || '').trim().toUpperCase(),
+                    car_type: vehicle.car_type || '',
+                    plate_number: vehicle.plate_number || '',
+                    condition: vehicle.condition || '新车',
+                    box_type: vehicle.box_type || '',
+                    tailgate: vehicle.tailgate || '',
+                    vehicle_box_type: vehicle.box_type || '',
+                    tail_plate: normalizeOrderTailgate(vehicle.tailgate),
+                    purchase_price: vehicle.purchase_price || 0,
+                    validation_status: 'valid',
+                    vehicle_category: vehicle.vehicle_category || '',
+                    vehicle_engine_battery: vehicle.vehicle_engine_battery || '',
+                    vehicle_power_battery: vehicle.vehicle_power_battery || '',
+                    vehicle_color: vehicle.vehicle_color || '',
+                    box_type_remark: vehicle.box_type_remark || ''
+                };
+            }
+            function pickSkuVehicle(vehicle) {
+                showSkuPickDialog.value = false;
+                openSalesOrderFromVehicle(skuVehicleToRow(vehicle));
+            }
+            // 多选发起（批量租赁/以租代售）
+            function pickSelectedSkuVehicles() {
+                if (!skuPickSelected.value.length) return ElementPlus.ElMessage.warning('请先勾选车辆');
+                const rows = skuPickSelected.value.map(v => skuVehicleToRow(v));
+                const first = rows[0];
+                showSkuPickDialog.value = false;
+                currentPage.value = 'orders';
+                currentOrderDraftId.value = null;
+                orderPrefillLock.value = true;
+                Object.assign(newOrder, {
+                    payment_date: todayString(),
+                    customer_name: '', customer_phone: '',
+                    sales_mode: '经营租赁',
+                    vin: first.vin,
+                    vehicle_ids: rows.map(r => r.vin),
+                    car_type: first.car_type,
+                    vehicle_category: first.vehicle_category || '',
+                    vehicle_cab: '', vehicle_engine_battery: first.vehicle_engine_battery || '',
+                    vehicle_power_battery: first.vehicle_power_battery || '', vehicle_gearbox: '',
+                    vehicle_color: first.vehicle_color || '', vehicle_box_type: first.vehicle_box_type || '',
+                    box_type_remark: first.box_type_remark || '', plate_number: first.plate_number || '',
+                    lease_term: '', cargo_length: '', payment_category: '',
+                    car_purchase_amount: Number(first.purchase_price || 0), vehicle_rent_amount: 0,
+                    receiving_company: '陕西金聚源汽车服务有限公司',
+                    wechat_interest: 0, wechat_registration_fee: 0, wechat_purchase_tax: 0,
+                    sales_advisor: (currentUser.value && currentUser.value.display_name) || '',
+                    full_package: false, wechat_private_fee: 0, gifted_items: '',
+                    deposit_amount: 0,
+                    remark: `由 SKU 库存发起批量报单：${rows.length} 台`
+                });
+                nextTick(() => {
+                    showOrderDialog.value = true;
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                    orderPrefillLock.value = false;
+                });
+            }
+            async function toggleSku(sku) {
+                const nextStatus = sku.status === '生效' ? '失效' : '生效';
+                const res = await fetch(`/api/skus/${sku.id}/toggle`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: nextStatus })
+                });
+                const data = await res.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '操作失败');
+                ElementPlus.ElMessage.success(data.message || '已更新');
+                loadSkuInventory();
+            }
+
+            // ===== 报单 SKU 快速定位（SKU 改造）=====
+            const quickSkuId = ref(null);
+            const quickSkuVehicles = ref([]);
+            const quickSkuOptions = computed(() => {
+                if (!newOrder.car_type) return [];
+                const ct = stripConditionPrefix(newOrder.car_type || '');
+                return skuInventory.value.filter(s => s.car_type === ct && s.status === '生效');
+            });
+            function skuLabel(sku) {
+                return `${sku.condition} · ${sku.box_type || '无厢型'} · ${sku.tailgate === '有' ? '有尾板' : '无尾板'}（在库 ${sku.in_stock_count || 0} 台）`;
+            }
+            async function onQuickSkuSelect() {
+                if (!quickSkuId.value) {
+                    quickSkuVehicles.value = [];
+                    return;
+                }
+                const sku = quickSkuOptions.value.find(s => s.id === quickSkuId.value);
+                if (!sku) return;
+                // 带出规格
+                newOrder.is_new = sku.condition || '新车';
+                newOrder.vehicle_box_type = sku.box_type || '';
+                newOrder.tail_plate = normalizeOrderTailgate(sku.tailgate);
+                quickSkuVehicles.value = [];
+                try {
+                    const res = await fetch(`/api/skus/${sku.id}/vehicles`);
+                    const data = await res.json();
+                    quickSkuVehicles.value = Array.isArray(data) ? data : [];
+                } catch (e) { quickSkuVehicles.value = []; }
+            }
+            function openSkuPickFromOrder() {
+                if (!quickSkuVehicles.value.length) return ElementPlus.ElMessage.warning('该 SKU 暂无在库车辆');
+                const sku = quickSkuOptions.value.find(s => s.id === quickSkuId.value);
+                skuPickTarget.value = sku;
+                skuPickVehicles.value = quickSkuVehicles.value;
+                showSkuPickDialog.value = true;
             }
 
             const currentSalesOrderCarConfig = computed(() =>
@@ -4413,14 +4965,16 @@
                 if (!matched) return;
                 newOrder.car_type = matched.car_type || newOrder.car_type;
                 newOrder.plate_number = matched.plate_number || newOrder.plate_number;
-                if (matched.is_new) newOrder.is_new = matched.is_new;
-                if (matched.vehicle_category) newOrder.vehicle_category = matched.vehicle_category;
-                if (matched.vehicle_cab) newOrder.vehicle_cab = matched.vehicle_cab;
-                if (matched.vehicle_engine_battery) newOrder.vehicle_engine_battery = matched.vehicle_engine_battery;
-                if (matched.vehicle_power_battery) newOrder.vehicle_power_battery = matched.vehicle_power_battery;
-                if (matched.vehicle_gearbox) newOrder.vehicle_gearbox = matched.vehicle_gearbox;
+                if (matched.condition || matched.is_new) newOrder.is_new = matched.condition || matched.is_new;
+                if (matched.brand) newOrder.vehicle_brand = matched.brand;
+                if (matched.fuel_form || matched.vehicle_category) newOrder.vehicle_category = fuelFormToCategory(matched.fuel_form) || matched.vehicle_category;
+                if (matched.cab_type || matched.cab_style || matched.vehicle_cab) newOrder.vehicle_cab = matched.cab_type || matched.cab_style || matched.vehicle_cab;
+                if (matched.battery_brand || matched.engine_spec || matched.vehicle_engine_battery) newOrder.vehicle_engine_battery = matched.battery_brand || matched.engine_spec || matched.vehicle_engine_battery;
+                if (matched.battery_capacity || matched.horsepower || matched.vehicle_power_battery) newOrder.vehicle_power_battery = matched.battery_capacity || matched.horsepower || matched.vehicle_power_battery;
+                if (matched.gear_position || matched.gearbox_spec || matched.vehicle_gearbox) newOrder.vehicle_gearbox = matched.gear_position || matched.gearbox_spec || matched.vehicle_gearbox;
                 if (matched.vehicle_color) newOrder.vehicle_color = matched.vehicle_color;
-                if (matched.vehicle_box_type) newOrder.vehicle_box_type = matched.vehicle_box_type;
+                if (matched.box_type || matched.vehicle_box_type) newOrder.vehicle_box_type = matched.box_type || matched.vehicle_box_type;
+                newOrder.tail_plate = normalizeOrderTailgate(matched.tailgate || matched.tail_plate);
                 if (!newOrder.sales_advisor && currentUser.value) newOrder.sales_advisor = currentUser.value.display_name || '';
             });
             const eligibleInitialPaymentContracts = computed(() =>
@@ -4686,7 +5240,9 @@
                 return { '在库': 'badge-gray', '经营租赁': 'badge-blue', '租赁中': 'badge-blue', '以租代售': 'badge-purple', '已过户': 'badge-green', '已结清': 'badge-green', '以租代购': 'badge-purple', '已锁车': 'badge-red', '转租': 'badge-blue' }[s] || 'badge-gray';
             }
             function repayClass(s) {
-                return { '已还款': 'badge-green', '待还款': 'badge-gray', '逾期': 'badge-red' }[s] || 'badge-gray';
+                // T-3 黄色预警：临近还款按流程图 4.1 以黄色标识
+                return { '已还款': 'badge-green', '待还款': 'badge-gray', '临近还款': 'badge-yellow', '还款日': 'badge-orange', '逾期': 'badge-red' }[s]
+                    || (String(s).startsWith('逾期') ? 'badge-red' : 'badge-gray');
             }
             function calcOverdueDays(d) { return Math.max(0, Math.floor((Date.now() - new Date(d).getTime()) / 86400000)); }
             // PRD: 多级预警 红黄绿三色标识
@@ -4885,7 +5441,7 @@
                     .filter(item => item.updated_at)
                     .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))[0];
                 if (!latest || !latest.updated_at || latest.updated_at <= lastModelGuidanceNoticeAt.value) return;
-                const content = `${latest.car_type} 指导价已更新：整车价${numberFormat(latest.sale_total_price || latest.guidance_price || 0)}${latest.updated_by ? '，修改人：' + latest.updated_by : ''}`;
+                const content = `${latest.car_type} 指导价已更新：租赁月租${numberFormat(latest.lease_installment_price || latest.guidance_price || 0)}${latest.updated_by ? '，修改人：' + latest.updated_by : ''}`;
                 if (ElementPlus.ElNotification) {
                     ElementPlus.ElNotification({
                         title: '指导价更新提示',
@@ -4906,7 +5462,6 @@
                 if (existing) {
                     modelGuidanceForm.is_new = existing.is_new || '新车';
                     modelGuidanceForm.guidance_price = Number(existing.guidance_price || 0);
-                    modelGuidanceForm.sale_total_price = Number(existing.sale_total_price || 0);
                     modelGuidanceForm.remark = existing.remark || '';
                     modelGuidanceForm.lease_deposit_guidance = Number(existing.lease_deposit_guidance || 0);
                     modelGuidanceForm.box_standard_price = Number(existing.box_standard_price || 0);
@@ -4931,10 +5486,8 @@
                     car_type: row.car_type,
                     is_new: row.is_new || '新车',
                     guidance_price: Number(row.guidance_price || 0),
-                    sale_total_price: Number(row.sale_total_price || 0),
                     remark: row.remark || '',
                     chassis_base_price_wan: row.chassis_base_price ? +(row.chassis_base_price / 10000).toFixed(2) : 0,
-                    sale_total_price_wan: row.sale_total_price ? +(row.sale_total_price / 10000).toFixed(2) : 0,
                     landing_price_wan: row.landing_price ? +(row.landing_price / 10000).toFixed(2) : 0,
                     interest_free_plan: row.interest_free_plan || '',
                     rent_to_buy_plan: row.rent_to_buy_plan || '',
@@ -4954,24 +5507,18 @@
             }
             function focusGuidanceAlert(row) {
                 currentPage.value = 'settings';
-                Object.assign(modelGuidanceForm, {
-                    car_type: row.car_type || '',
-                    is_new: row.condition || '新车',
-                    guidance_price: Number(row.purchase_price || 0),
-                    sale_total_price: Number(row.purchase_price || 0),
-                    remark: `补充${row.condition || '新车'}指导价：${row.car_type || ''}`
-                });
+                guidanceWorkbenchCarType.value = normalizeBaseCarType(row.car_type || '');
+                guidanceTab.value = 'lease';
+                loadGuidanceWorkbench();
                 fetchModelGuidancePrices();
                 fetchMissingGuidanceAlerts();
-                showGuidanceEditDialog.value = true;
                 window.scrollTo({ top: 0, behavior: 'smooth' });
             }
             async function submitModelGuidancePrice() {
                 if (!modelGuidanceForm.car_type) return ElementPlus.ElMessage.warning('请选择或填写车型');
                 const payload = {
                     ...modelGuidanceForm,
-                    guidance_price: Number(modelGuidanceForm.sale_total_price || modelGuidanceForm.guidance_price || 0),
-                    sale_total_price: modelGuidanceForm.sale_total_price_wan * 10000 || modelGuidanceForm.sale_total_price,
+                    guidance_price: Number(modelGuidanceForm.guidance_price || 0),
                     chassis_base_price: (modelGuidanceForm.chassis_base_price_wan || 0) * 10000,
                     landing_price: (modelGuidanceForm.landing_price_wan || 0) * 10000,
                 };
@@ -4984,7 +5531,7 @@
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '车型指导口径保存失败');
                 ElementPlus.ElMessage.success(data.message || '车型指导口径已保存');
                 showGuidanceEditDialog.value = false;
-                Object.assign(modelGuidanceForm, { car_type: '', guidance_price: 0, sale_total_price: 0, remark: '' });
+                Object.assign(modelGuidanceForm, { car_type: '', guidance_price: 0, remark: '' });
                 fetchModelGuidancePrices();
                 fetchMissingGuidanceAlerts();
                 fetchAll();
@@ -5453,7 +6000,7 @@
                     vin: '', car_type: '', vehicle_category: '', vehicle_cab: '', vehicle_engine_battery: '',
                     vehicle_power_battery: '', vehicle_gearbox: '', vehicle_color: '', vehicle_box_type: '',
                     box_type_remark: '', plate_number: '', tail_plate: '', lease_term: '', cargo_length: '',
-                    sale_total_price: 0, payment_category: '', car_purchase_amount: 0, vehicle_rent_amount: 0,
+                    payment_category: '', car_purchase_amount: 0, vehicle_rent_amount: 0,
                     receiving_company: '陕西金聚源汽车服务有限公司', wechat_interest: 0, wechat_registration_fee: 0,
                     wechat_purchase_tax: 0, sales_advisor: '', full_package: false, wechat_private_fee: 0,
                     gifted_items: '', deposit_amount: 0, remark: '',
@@ -5486,7 +6033,6 @@
                     tail_plate: row.tail_plate || '',
                     lease_term: normalizeLeaseTerm(row.lease_term),
                     cargo_length: row.cargo_length || '',
-                    sale_total_price: Number(row.sale_total_price || 0),
                     payment_category: row.payment_category || defaultPaymentCategory(row.sales_mode || ''),
                     car_purchase_amount: Number(row.car_purchase_amount || 0),
                     vehicle_rent_amount: Number(row.vehicle_rent_amount || 0),
@@ -5571,7 +6117,22 @@
                 fetchSalesOrders();
             }
             async function activateOrder(row) {
-                const res = await fetch(`/api/sales-orders/${row.id}/activate`, { method: 'POST' });
+                const { value: bankSerial } = await ElementPlus.ElMessageBox.prompt(
+                    '请输入公司到账银行流水号（至少 4 位）',
+                    '确认报单',
+                    {
+                        confirmButtonText: '确认',
+                        cancelButtonText: '取消',
+                        inputPattern: /^.{4,}$/,
+                        inputErrorMessage: '银行流水号至少 4 位'
+                    }
+                ).catch(() => ({ value: '' }));
+                if (!bankSerial) return;
+                const res = await fetch(`/api/sales-orders/${row.id}/activate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ bank_serial: bankSerial.trim() })
+                });
                 const data = await res.json();
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '报单确认失败');
                 ElementPlus.ElMessage.success(data.message || '报单已激活');
@@ -6211,6 +6772,25 @@
                         fetchApprovalReminders();
                     }).catch(() => {});
             }
+            async function onUrgeEvidenceUpload(row, res) {
+                if (!res.success || !res.url) return ElementPlus.ElMessage.error('催收证据上传失败');
+                const { value: result } = await ElementPlus.ElMessageBox.prompt(
+                    '填写本次催收结果',
+                    '提交催收闭环',
+                    { confirmButtonText: '提交', cancelButtonText: '取消', inputValue: '已联系，待跟进' }
+                ).catch(() => ({ value: '' }));
+                if (!result) return;
+                const apiRes = await fetch(`/api/repayments/${row.id}/urge`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ evidence_path: res.url, result: result.trim() })
+                });
+                const data = await apiRes.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '催收提交失败');
+                ElementPlus.ElMessage.success(data.message || '催收已完成');
+                fetchBills();
+                fetchApprovals();
+            }
 
             // ===== 出库 =====
             function openDeliveryDialog(row) {
@@ -6523,6 +7103,49 @@
                 showReturnDialog.value = false;
                 fetchReturns(); fetchApprovals(); fetchApprovalReminders();
             }
+            async function submitReturnBossReject(row) {
+                const { value: reason } = await ElementPlus.ElMessageBox.prompt(
+                    `填写驳回 ${row.plate_number || row.customer_name} 退车单的原因`,
+                    '驳回退车单',
+                    { confirmButtonText: '确认驳回', cancelButtonText: '取消', inputType: 'textarea' }
+                ).catch(() => ({ value: '' }));
+                if (!reason || !reason.trim()) return;
+                const res = await fetch(`/api/return-inspections/${row.id}/boss-reject`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: reason.trim() })
+                });
+                const data = await res.json();
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '退车单驳回失败');
+                ElementPlus.ElMessage.success(data.message || '已驳回退车单');
+                showReturnDialog.value = false;
+                fetchReturns(); fetchApprovals(); fetchApprovalReminders(); fetchAll();
+            }
+            async function resubmitReturnInspection(row) {
+                const { value: note } = await ElementPlus.ElMessageBox.prompt(
+                    '填写本次修改说明',
+                    '重新提交退车单',
+                    { confirmButtonText: '重新提交', cancelButtonText: '取消', inputType: 'textarea' }
+                ).catch(() => ({ value: '' }));
+                if (!note || !note.trim()) return;
+                submitting.value = true;
+                const res = await fetch(`/api/return-inspections/${row.id}/resubmit`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        return_reason: row.return_reason,
+                        sales_advisor: row.sales_advisor,
+                        remark: row.remark,
+                        resubmit_note: note.trim()
+                    })
+                });
+                const data = await res.json();
+                submitting.value = false;
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '退车单重提失败');
+                ElementPlus.ElMessage.success(data.message || '已重新提交');
+                showReturnDialog.value = false;
+                fetchReturns(); fetchApprovals(); fetchApprovalReminders(); fetchAll();
+            }
             async function submitReturnPay(row) {
                 const { value: serial } = await ElementPlus.ElMessageBox.prompt(
                     `请输入银行流水号（退还 ${row.plate_number || row.customer_name} 押金）`,
@@ -6610,6 +7233,7 @@
                 approvalList, approvalReminders, approvalFilter, visibleApprovalFilters, lockRequests,
                 missingGuidanceAlerts,
                 modelGuidancePrices, modelGuidanceSearch, filteredModelGuidancePrices, modelGuidanceForm, modelGuidanceCarTypeOptions, guidanceHistoryCache, PRICE_KIND_LABELS, loadGuidanceHistory,
+                guidanceWorkbenchCarType, guidanceWorkbenchRows, guidanceWorkbenchPlans, guidanceWorkbenchPlanRows, guidanceWorkbenchLegacyPlans, guidanceWorkbenchSummary, guidanceWorkbenchLoading, guidanceSavingKey,
                 guidancePriceForCarType,
                 fetchApprovals, fetchApprovalReminders, fetchLockRequests, fetchFeeItems,
                 doApprove, doReject, doResubmit, doDeliver, planText, initiateOrderRefund, executeOrderRefund, cancelOrderRefund,
@@ -6622,14 +7246,18 @@
                 initialPaymentAmount, initialPaymentType, canInitiateInitialPayment, canInitiateVehicleOrder, canInitiateVehicleReturn, canReturnFromOrder, initiateReturnFromOrder, returnNextStep, currentApprovalStepLabel, isPendingApproval, approvalCardId,
                 handleMenuSelect, handlePageAction, handleContractExpand, editPrice, deleteVehicle, restoreVehicle,
                 fetchModelGuidancePrices, fetchMissingGuidanceAlerts, onModelGuidanceCarTypeChange, editModelGuidancePrice, focusGuidanceAlert, submitModelGuidancePrice, onGuidanceImportSuccess, onGuidanceImportError, showGuidanceEditDialog, resetModelGuidanceForm,
+                loadGuidanceWorkbench, syncLeaseConditionField, saveLeaseGuidanceRow, leaseRowKey, addFinancePlanRow, removeFinancePlanDraft, saveFinancePlanRow, financePlanRowKey,
                 financePlans, financePlansForCarType, leaseGuidanceForOrder, expectedFirstPayment, firstPaymentShortage, onOrderScreenshotUpload, onFinancePlanSelect, loadFinancePlans,
                 guidanceTab, financePlanForm, openFinancePlanManager, resetFinancePlanForm, editFinancePlan, submitFinancePlan, deleteFinancePlan,
-                submitVehicle, openVehicleImport, beforeVehicleImport, onVehicleImportSuccess, onVehicleImportError, openVehicleDetail, openVehicleValidationFix, submitVehicleValidationFix, submitContract, submitSalesOrder, editSalesOrderDraft, deleteSalesOrderDraft, copySalesOrderDraft, activateOrder, createContractFromOrder, confirmRepayment, confirmFactoryRepayment, requestLock, openApprovalReminderCenter, focusApprovalItem,
+                dictCategories, dictRows, dictFilterCategory, dictSearch, dictForm, dictEnergyOptions, filteredDictRows, dictCategoryLabel, loadDictRows, resetDictForm, onDictCategoryChange, editDictRow, submitDictForm, deleteDictRow,
+                skuInventory, skuFilterCondition, skuFilterBoxType, filteredSkuInventory, dictOptionsByCategory, loadSkuInventory, showSkuPickDialog, skuPickTarget, skuPickVehicles, skuPickSelected, openSkuPickVehicle, pickSkuVehicle, pickSelectedSkuVehicles, toggleSku,
+                quickSkuId, quickSkuVehicles, quickSkuOptions, skuLabel, onQuickSkuSelect, openSkuPickFromOrder,
+                submitVehicle, openVehicleImport, beforeVehicleImport, onVehicleImportSuccess, onVehicleImportError, openVehicleDetail, openVehicleValidationFix, submitVehicleValidationFix, submitContract, submitSalesOrder, editSalesOrderDraft, deleteSalesOrderDraft, copySalesOrderDraft, activateOrder, createContractFromOrder, confirmRepayment, confirmFactoryRepayment, requestLock, onUrgeEvidenceUpload, openApprovalReminderCenter, focusApprovalItem,
                 deliverVehicle, matchContractVehicle, openSalesOrderFromVehicle,
                 openPlanningDialog, onPlanningFactoryUpload, savePlanningContract, importPlanningFactory, confirmPlanningDifference,
                 onFactoryPlanUpload, submitFactoryImport, submitFeeItem,
                 openInitialPayment, openInitialPaymentPicker, selectInitialPaymentContract, onInitialScreenshotUpload, submitInitialPayment, onInitialReceiptUpload, onInitialReceiptSerialOnly, openDeliveryDialog, onDeliveryFileUpload, saveDeliveryFiles, submitDelivery,
-                openReturnForm, onReturnVehicleSelect, submitReturnInspection, submitReturnFleet, submitReturnOperator, submitReturnFinance, submitReturnBoss, submitReturnPay, viewReturnDetail, gotoReturnDetail, openReturnFromApproval,
+                openReturnForm, onReturnVehicleSelect, submitReturnInspection, submitReturnFleet, submitReturnOperator, submitReturnFinance, submitReturnBoss, submitReturnBossReject, resubmitReturnInspection, submitReturnPay, viewReturnDetail, gotoReturnDetail, openReturnFromApproval,
                 attachmentList, isImageAttachment, attachmentTypeLabel,
                 salesOrderContractType, isInstallmentSalesOrder, canActivateSalesOrder, salesOrderPlanActionLabel,
                 approvalSalesOrderRow, canApproveApprovalStep,

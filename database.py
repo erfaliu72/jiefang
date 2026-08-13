@@ -149,7 +149,7 @@ def _ddl(sql):
     # 进入索引/唯一约束的 TEXT 列必须有长度 -> VARCHAR(191)
     _indexed_cols = ['role', 'page_key', 'action_key', 'resource_key', 'field_key',
                      'job', 'run_date', 'status', 'customer_phone', 'customer_name',
-                     'waiver_kind', 'accrued_date']
+                     'waiver_kind', 'accrued_date', 'car_type', 'is_new']
     for col in _indexed_cols:
         s = re.sub(r'\b(' + col + r')\s+TEXT\b', r'\1 VARCHAR(191)', s, flags=re.IGNORECASE)
     # 类型映射：REAL -> DOUBLE；剩余 INTEGER -> BIGINT；TEXT 保留
@@ -176,8 +176,13 @@ def init_db():
             s = sql
             if 'CREATE TABLE' in s.upper() or 'ALTER TABLE' in s.upper():
                 s = _ddl(s)
-            if USE_MYSQL and re.search(r'CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS', s, re.IGNORECASE):
-                s = re.sub(r'CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS', 'CREATE INDEX', s, flags=re.IGNORECASE)
+            if USE_MYSQL and re.search(r'CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS', s, re.IGNORECASE):
+                s = re.sub(
+                    r'CREATE\s+(UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS',
+                    lambda m: f"CREATE {m.group(1) or ''}INDEX",
+                    s,
+                    flags=re.IGNORECASE,
+                )
             try:
                 if params is None:
                     return self._c.execute(s)
@@ -275,6 +280,8 @@ def init_db():
         boss_price_approved_at TEXT,
         finance_confirmed_by TEXT,
         finance_confirmed_at TEXT,
+        finance_bank_serial TEXT,
+        finance_bank_receipt_path TEXT,
         customer_plan_match_status TEXT DEFAULT '未生成',
         factory_plan_match_status TEXT DEFAULT '未上传',
         plan_compare_summary TEXT,
@@ -330,6 +337,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS model_guidance_price_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         car_type TEXT NOT NULL,
+        is_new TEXT DEFAULT '新车',
         price_kind TEXT DEFAULT 'legacy',
         old_price REAL DEFAULT 0,
         new_price REAL DEFAULT 0,
@@ -575,6 +583,10 @@ def init_db():
         operator_id INTEGER,
         operator_name TEXT,
         remark TEXT,
+        evidence_path TEXT,
+        promised_repay_date TEXT,
+        completed_at TEXT,
+        closed_by TEXT,
         created_at TEXT DEFAULT (datetime('now','localtime')),
         FOREIGN KEY (repayment_id) REFERENCES repayments (id)
     )
@@ -602,6 +614,12 @@ def init_db():
         boss_approved INTEGER DEFAULT 0,
         boss_approved_by TEXT,
         boss_approved_at TEXT,
+        rejected_by TEXT,
+        rejected_at TEXT,
+        reject_reason TEXT,
+        resubmitted_by TEXT,
+        resubmitted_at TEXT,
+        resubmit_note TEXT,
         finance_approved INTEGER DEFAULT 0,
         finance_approved_by TEXT,
         finance_approved_at TEXT,
@@ -927,6 +945,8 @@ def init_db():
         period_price REAL DEFAULT 0,
         periods INTEGER DEFAULT 0,
         tail_plate_price REAL DEFAULT 0,
+        condition TEXT DEFAULT '新车',
+        box_type TEXT DEFAULT '',
         status TEXT DEFAULT '启用',
         sort_order INTEGER DEFAULT 0,
         remark TEXT,
@@ -962,6 +982,54 @@ def init_db():
     )
     ''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_order_refunds_order ON order_refunds(sales_order_id, status)')
+
+    # ====== 数据字典（SKU 改造：品牌/品系/厢型/电池度数/马力/档位等维度动态化）======
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS data_dictionaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT NOT NULL,          -- 当前：brand/product_series/box_type/battery_capacity/horsepower/gear_position/battery_brand（历史兼容值可能仍存在）
+        value TEXT NOT NULL,             -- 选项值（如 解放 / J6F / 厢货 / 100度 / 锡柴180 / 六档）
+        energy_type TEXT,                -- 适用能源类型：纯电/混动/燃油车；空=通用维度
+        sort_order INTEGER DEFAULT 0,
+        status TEXT DEFAULT '启用',      -- 启用/停用
+        remark TEXT,
+        created_by TEXT,
+        updated_by TEXT,
+        updated_at TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_data_dictionaries_cat ON data_dictionaries(category, status)')
+
+    # ====== SKU 主表（SKU 改造：基准车型+成色+厢型+尾板 组合索引，用于库存聚合与销售筛选）======
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS skus (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        car_type TEXT NOT NULL,          -- 基准车型（normalize_base_car_type 后）
+        condition TEXT DEFAULT '新车',    -- 成色 新车/二手车
+        box_type TEXT,                    -- 厢型（底盘车不入 SKU）
+        tailgate TEXT DEFAULT '无',       -- 尾板 有/无
+        status TEXT DEFAULT '生效',       -- 生效/失效（老板可停用某组合）
+        created_by TEXT,
+        updated_by TEXT,
+        updated_at TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    )
+    ''')
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_skus_comb ON skus(car_type, condition, box_type, tailgate)')
+
+    # ====== 合同多车桥表（合同 → 多辆 VIN，contracts.vehicle_id 保留主车）======
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS contract_vehicles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id INTEGER NOT NULL,
+        vehicle_id INTEGER NOT NULL,
+        is_primary INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_contract_vehicles_contract ON contract_vehicles(contract_id)')
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_vehicles_uniq ON contract_vehicles(contract_id, vehicle_id)')
 
     # === 安全添加新列（如果表已存在但缺少新字段）===
     safe_alter_columns = [
@@ -1088,6 +1156,7 @@ def init_db():
         ("model_guidance_prices", "lease_plan", "TEXT"),
         ("model_guidance_prices", "is_new", "TEXT DEFAULT '新车'"),
         ("model_guidance_price_history", "price_kind", "TEXT DEFAULT 'legacy'"),
+        ("model_guidance_price_history", "is_new", "TEXT DEFAULT '新车'"),
         ("contract_initial_payments", "received_amount", "REAL DEFAULT 0"),
         ("contract_initial_payments", "shortage_amount", "REAL DEFAULT 0"),
         ("contract_initial_payments", "shortage_reason", "TEXT"),
@@ -1194,12 +1263,122 @@ def init_db():
         ("contracts", "snapshot_lease_deposit_guidance", "REAL DEFAULT 0"),
         ("contracts", "snapshot_box_monthly_guidance", "REAL DEFAULT 0"),
         ("receivables", "sales_order_id", "INTEGER"),
+        # === SKU 改造：金融方案生效/失效日期（未来生效时间 + 有效期控制）===
+        ("finance_plans", "effective_date", "TEXT"),
+        ("finance_plans", "expiry_date", "TEXT"),
+        # === 以租代售方案按新车子型号（基准车型 + 成色 + 厢型）维护 ===
+        ("finance_plans", "condition", "TEXT DEFAULT '新车'"),
+        ("finance_plans", "box_type", "TEXT DEFAULT ''"),
+        # === SKU 改造：报单多车（JSON 数组 vehicle_ids，主车仍写 vehicle_id）===
+        ("sales_orders", "vehicle_ids", "TEXT"),
+        # === 财务确认报单凭证 ===
+        ("sales_orders", "finance_bank_serial", "TEXT"),
+        ("sales_orders", "finance_bank_receipt_path", "TEXT"),
+        # === 催收闭环 ===
+        ("urge_records", "evidence_path", "TEXT"),
+        ("urge_records", "promised_repay_date", "TEXT"),
+        ("urge_records", "completed_at", "TEXT"),
+        ("urge_records", "closed_by", "TEXT"),
+        # === 退车驳回/重提闭环 ===
+        ("return_inspections", "rejected_by", "TEXT"),
+        ("return_inspections", "rejected_at", "TEXT"),
+        ("return_inspections", "reject_reason", "TEXT"),
+        ("return_inspections", "resubmitted_by", "TEXT"),
+        ("return_inspections", "resubmitted_at", "TEXT"),
+        ("return_inspections", "resubmit_note", "TEXT"),
     ]
     for table, col, col_type in safe_alter_columns:
         try:
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
         except Exception:
             pass
+
+    # 指导价 upsert 以车型和成色为自然键。旧库可能有重复/空成色数据，先归一化并去重。
+    c.execute("""
+        UPDATE model_guidance_prices
+        SET is_new='新车'
+        WHERE is_new IS NULL OR TRIM(is_new)=''
+    """)
+    c.execute("""
+        DELETE FROM model_guidance_prices
+        WHERE id NOT IN (
+            SELECT keep_id
+            FROM (
+                SELECT MAX(id) AS keep_id
+                FROM model_guidance_prices
+                GROUP BY car_type, COALESCE(is_new, '新车')
+            ) AS guidance_price_keep
+        )
+    """)
+    c.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_model_guidance_prices_car_type_is_new
+        ON model_guidance_prices(car_type, is_new)
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_finance_plans_scope
+        ON finance_plans(car_type, condition, box_type, status)
+    """)
+    c.execute("""
+        DELETE FROM urge_records
+        WHERE id NOT IN (
+            SELECT keep_id
+            FROM (
+                SELECT MAX(id) AS keep_id
+                FROM urge_records
+                GROUP BY repayment_id, urge_day
+            ) AS urge_record_keep
+        )
+    """)
+    c.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_urge_records_repayment_day
+        ON urge_records(repayment_id, urge_day)
+    """)
+
+    # 数据字典以“维度 + 值 + 适用能源类型”为自然键。早期表缺少唯一约束，
+    # 每次启动灌入种子数据都会重复新增，先规范旧数据再建立约束。
+    c.execute("""
+        UPDATE data_dictionaries
+        SET category=TRIM(category),
+            value=TRIM(value),
+            energy_type=TRIM(COALESCE(energy_type, ''))
+    """)
+    c.execute("""
+        UPDATE data_dictionaries AS keep
+        SET status=CASE
+            WHEN EXISTS (
+                SELECT 1
+                FROM data_dictionaries AS duplicate
+                WHERE duplicate.category=keep.category
+                  AND duplicate.value=keep.value
+                  AND duplicate.energy_type=keep.energy_type
+                  AND duplicate.status='启用'
+            ) THEN '启用'
+            ELSE keep.status
+        END
+        WHERE keep.id IN (
+            SELECT keep_id
+            FROM (
+                SELECT MIN(id) AS keep_id
+                FROM data_dictionaries
+                GROUP BY category, value, energy_type
+            ) AS dictionary_status_keep
+        )
+    """)
+    c.execute("""
+        DELETE FROM data_dictionaries
+        WHERE id NOT IN (
+            SELECT keep_id
+            FROM (
+                SELECT MIN(id) AS keep_id
+                FROM data_dictionaries
+                GROUP BY category, value, energy_type
+            ) AS dictionary_keep
+        )
+    """)
+    c.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_data_dictionaries_natural_key
+        ON data_dictionaries(category, value, energy_type)
+    """)
 
     if USE_MYSQL:
         _raw_c.execute("SET FOREIGN_KEY_CHECKS=1")
@@ -1287,7 +1466,7 @@ def seed_data():
                 'expected_profit_floor', 'expected_profit_ceiling', 'snapshot_guidance_price',
                 'snapshot_invoice_price',
             ],
-            'sales_orders': ['snapshot_guidance_price', 'snapshot_lease_installment_price', 'snapshot_sale_total_price'],
+            'sales_orders': ['snapshot_guidance_price', 'snapshot_lease_installment_price'],
             'factory_repayments': ['amount'],
             'vehicle_rebates': ['*'],
             'profit': ['*'],

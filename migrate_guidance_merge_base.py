@@ -35,7 +35,13 @@ def strip_condition_prefix(car_type):
     return car_type
 
 
-BOX_SUFFIX_WORDS = ('带尾板', '厢货', '宽体', '高栏', '冷藏', '平板', '底盘', '尾板')
+BOX_SUFFIX_WORDS = ('厢货', '宽体', '高栏', '冷藏', '平板', '底盘')
+TAILGATE_SUFFIXES = (
+    ('有尾板', '有尾板'),
+    ('带尾板', '有尾板'),
+    ('无尾板', '无尾板'),
+    ('尾板', '有尾板'),
+)
 
 
 def strip_box_suffix(car_type):
@@ -47,14 +53,26 @@ def strip_box_suffix(car_type):
         if len(parts) >= 2 and parts[-1] in BOX_SUFFIX_WORDS:
             return ' / '.join(parts[:-1])
         return s
+    tailgate_suffix = ''
+    for suffix, normalized in TAILGATE_SUFFIXES:
+        if s.endswith(suffix) and len(s) > len(suffix):
+            s = s[:-len(suffix)]
+            tailgate_suffix = normalized
+            break
     for w in BOX_SUFFIX_WORDS:
         if s.endswith(w) and len(s) > len(w):
-            return strip_box_suffix(s[:-len(w)])
-    return s
+            s = s[:-len(w)]
+            break
+    return s + tailgate_suffix
 
 
 def normalize_base_car_type(car_type):
-    return strip_box_suffix(strip_condition_prefix(car_type))
+    base = strip_box_suffix(strip_condition_prefix(car_type))
+    if not base:
+        return ''
+    if base.endswith(('有尾板', '无尾板')):
+        return base
+    return base + '无尾板'
 
 
 # 参与合并的金额列
