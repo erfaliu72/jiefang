@@ -3194,6 +3194,486 @@ def build_dashboard_metrics(conn):
     }
 
 
+def _dashboard_cards(*cards):
+    """组装前端统一使用的仪表盘卡片格式。"""
+    return list(cards)
+
+
+def dashboard_approval_type_label(ref_type):
+    """仪表盘使用的审批类型展示名，与审批中心保持一致。"""
+    return {
+        'price_exception': '价格特批',
+        'order_exception': '报单审批',
+        'contract_delivery': '历史合同审批',
+        'initial_payment': '首次付款',
+        'initial_payment_shortage': '不足额出库',
+        'sale_payment': '财务确认报单',
+        'lock_request': '锁车审批',
+        'return_stock': '退车入库',
+        'invoice': '发票审批',
+    }.get(ref_type, ref_type)
+
+
+def _dashboard_card(key, label, value, value_type='count', hint='', tone='blue'):
+    return {
+        'key': key,
+        'label': label,
+        'value': round(parse_money(value), 2) if value_type == 'money' else value,
+        'value_type': value_type,
+        'hint': hint,
+        'tone': tone,
+    }
+
+
+def _dashboard_rows(c, sql, params=(), limit=6):
+    c.execute(sql + "\nLIMIT ?", tuple(params) + (limit,))
+    return [dict(row) for row in c.fetchall()]
+
+
+def _dashboard_contract_scope(user, alias='c'):
+    """销售仅查看自己创建或归属给自己的报单所关联的合同。"""
+    if user['role'] != '销售':
+        return '1=1', ()
+    display_name = user['display_name']
+    return f"""
+        EXISTS (
+            SELECT 1
+            FROM sales_orders scoped_so
+            WHERE scoped_so.id={alias}.sales_order_id
+              AND (scoped_so.created_by=? OR scoped_so.sales_advisor=?)
+        )
+    """, (display_name, display_name)
+
+
+def _dashboard_order_scope(user, alias='so'):
+    if user['role'] != '销售':
+        return '1=1', ()
+    display_name = user['display_name']
+    return f"({alias}.created_by=? OR {alias}.sales_advisor=?)", (display_name, display_name)
+
+
+def _dashboard_todo(kind, title, subtitle='', status='', amount=None, due_date='', page=''):
+    item = {
+        'kind': kind,
+        'title': title,
+        'subtitle': subtitle,
+        'status': status,
+        'due_date': due_date or '',
+        'page': page,
+    }
+    if amount is not None:
+        item['amount'] = round(parse_money(amount), 2)
+    return item
+
+
+def build_role_dashboard(conn, user):
+    """按登录角色返回真实业务数据，不以客户端隐藏代替数据权限。"""
+    c = conn.cursor()
+    today = datetime.now().date()
+    today_str = today.strftime('%Y-%m-%d')
+    month_start = today.replace(day=1)
+    next_month = month_start + relativedelta(months=1)
+    month_start_str = month_start.strftime('%Y-%m-%d')
+    next_month_str = next_month.strftime('%Y-%m-%d')
+    week_end_str = (today + timedelta(days=7)).strftime('%Y-%m-%d')
+    active_bill_filter = """
+        r.period >= 1
+        AND COALESCE(c.contract_file, '')!=''
+        AND c.delivery_status='已出库'
+    """
+    money_due_expr = _money_expr('r.amount', 'r.paid_amount')
+    contract_scope, contract_scope_params = _dashboard_contract_scope(user)
+    order_scope, order_scope_params = _dashboard_order_scope(user)
+
+    workspace = {
+        'role': user['role'],
+        'display_name': user['display_name'],
+        'cards': [],
+        'todo_groups': [],
+        'data_as_of': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    if user['role'] == '销售':
+        monthly_orders = _fetch_scalar(c, f"""
+            SELECT COUNT(*)
+            FROM sales_orders so
+            WHERE {order_scope}
+              AND so.created_at >= ?
+              AND so.created_at < ?
+              AND so.order_status NOT IN ('草稿', '已作废')
+        """, order_scope_params + (month_start_str, next_month_str))
+        active_contracts = _fetch_scalar(c, f"""
+            SELECT COUNT(*)
+            FROM contracts c
+            WHERE {contract_scope}
+              AND c.contract_status='执行中'
+              AND c.delivery_status='已出库'
+        """, contract_scope_params)
+        monthly_due = _fetch_scalar(c, f"""
+            SELECT COALESCE(SUM({money_due_expr}), 0)
+            FROM repayments r
+            JOIN contracts c ON c.id=r.contract_id
+            WHERE {contract_scope}
+              AND ({active_bill_filter})
+              AND r.status NOT IN ('已还款', '预抵', '未激活')
+              AND r.due_date >= ?
+              AND r.due_date < ?
+        """, contract_scope_params + (month_start_str, next_month_str))
+        monthly_received = _fetch_scalar(c, f"""
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN COALESCE(r.paid_amount, 0)>0 THEN r.paid_amount
+                    WHEN r.status='已还款' THEN r.amount
+                    ELSE 0
+                END
+            ), 0)
+            FROM repayments r
+            JOIN contracts c ON c.id=r.contract_id
+            WHERE {contract_scope}
+              AND r.period >= 1
+              AND COALESCE(r.verified_at, r.paid_at, '') >= ?
+              AND COALESCE(r.verified_at, r.paid_at, '') < ?
+        """, contract_scope_params + (month_start_str, next_month_str))
+        collection_rate = round(parse_money(monthly_received) / parse_money(monthly_due) * 100, 1) if parse_money(monthly_due) else 0
+
+        overdue_rows = _dashboard_rows(c, f"""
+            SELECT r.id, r.due_date, r.status,
+                   {money_due_expr} AS outstanding,
+                   v.plate_number, v.vin, v.car_type,
+                   COALESCE(cu.name, '') AS customer_name
+            FROM repayments r
+            JOIN contracts c ON c.id=r.contract_id
+            JOIN vehicles v ON v.id=c.vehicle_id
+            LEFT JOIN customers cu ON cu.id=c.customer_id
+            WHERE {contract_scope}
+              AND ({active_bill_filter})
+              AND r.due_date < ?
+              AND COALESCE(r.paid_amount, 0) < COALESCE(r.amount, 0)
+              AND (r.status LIKE '逾期%' OR r.status='部分核销')
+            ORDER BY r.due_date ASC
+        """, contract_scope_params + (today_str,))
+        order_rows = _dashboard_rows(c, f"""
+            SELECT so.id, so.customer_name, so.vin, so.car_type, so.order_status, so.created_at
+            FROM sales_orders so
+            WHERE {order_scope}
+              AND so.order_status IN ('草稿', '待价格特批', '待财务确认')
+            ORDER BY so.created_at ASC
+        """, order_scope_params)
+        overdue_items = [
+            _dashboard_todo(
+                '逾期回款',
+                f"{row['customer_name'] or '未命名客户'} · {row['plate_number'] or row['vin']}",
+                f"{row['car_type'] or '-'}，应还日 {row['due_date']}",
+                row['status'],
+                row['outstanding'],
+                row['due_date'],
+                'risk',
+            ) for row in overdue_rows
+        ]
+        order_items = [
+            _dashboard_todo(
+                '报单推进',
+                f"{row['customer_name']} · {row['vin']}",
+                row['car_type'] or '-',
+                row['order_status'],
+                page='orders',
+            ) for row in order_rows
+        ]
+        workspace['cards'] = _dashboard_cards(
+            _dashboard_card('monthly_orders', '本月有效报单', monthly_orders, hint='不含草稿和已作废', tone='blue'),
+            _dashboard_card('active_contracts', '当前负责合同', active_contracts, hint='已出库且执行中', tone='green'),
+            _dashboard_card('monthly_due', '本月计划回款', monthly_due, 'money', hint='按应还日统计', tone='amber'),
+            _dashboard_card('collection_rate', '本月回款率', collection_rate, 'percent', hint=f"已核销 ¥{parse_money(monthly_received):,.2f}", tone='red' if collection_rate < 80 else 'green'),
+        )
+        workspace['todo_groups'] = [
+            {'key': 'sales-overdue', 'title': '需要催收的逾期账单', 'page': 'risk', 'items': overdue_items},
+            {'key': 'sales-orders', 'title': '需要推进的报单', 'page': 'orders', 'items': order_items},
+        ]
+        return workspace
+
+    if user['role'] == '车管':
+        inventory_count = _fetch_scalar(c, "SELECT COUNT(*) FROM vehicles WHERE status='在库' AND COALESCE(is_deleted,0)=0")
+        pending_delivery = _fetch_scalar(c, """
+            SELECT COUNT(*)
+            FROM vehicles v
+            JOIN contracts c ON c.vehicle_id=v.id
+            WHERE v.status='报单锁定中'
+              AND c.delivery_status='待出库'
+              AND COALESCE(v.is_deleted,0)=0
+        """)
+        pending_inspection = _fetch_scalar(c, "SELECT COUNT(*) FROM return_inspections WHERE status='待车管验车'")
+        repair_count = _fetch_scalar(c, "SELECT COUNT(*) FROM vehicles WHERE status IN ('待维修', '维修中') AND COALESCE(is_deleted,0)=0")
+        delivery_rows = _dashboard_rows(c, """
+            SELECT c.id AS contract_id, v.plate_number, v.vin, v.car_type, c.contract_type, c.delivery_status
+            FROM contracts c
+            JOIN vehicles v ON v.id=c.vehicle_id
+            WHERE v.status='报单锁定中'
+              AND c.delivery_status='待出库'
+              AND COALESCE(v.is_deleted,0)=0
+            ORDER BY c.created_at ASC
+        """)
+        inspection_rows = _dashboard_rows(c, """
+            SELECT ri.id, ri.plate_number, ri.vin, ri.car_type, ri.return_reason, ri.status
+            FROM return_inspections ri
+            WHERE ri.status='待车管验车'
+            ORDER BY ri.created_at ASC
+        """)
+        warning_rows = _dashboard_rows(c, """
+            SELECT id, plate_number, vin, car_type, insurance_expiry_date, annual_review_date
+            FROM vehicles
+            WHERE COALESCE(is_deleted,0)=0
+              AND (
+                  (insurance_expiry_date IS NOT NULL AND insurance_expiry_date!='' AND date(insurance_expiry_date)<=date(?, '+30 day'))
+                  OR (annual_review_date IS NOT NULL AND annual_review_date!='' AND date(annual_review_date)<=date(?, '+30 day'))
+              )
+            ORDER BY insurance_expiry_date ASC, annual_review_date ASC
+        """, (today_str, today_str))
+        workspace['cards'] = _dashboard_cards(
+            _dashboard_card('inventory_count', '在库车辆', inventory_count, hint='可供后续报单的库存', tone='blue'),
+            _dashboard_card('pending_delivery', '待出库车辆', pending_delivery, hint='合同及首款流程已完成', tone='green'),
+            _dashboard_card('pending_inspection', '待验车退车单', pending_inspection, hint='等待车管验车', tone='amber'),
+            _dashboard_card('repair_count', '待维修 / 维修中', repair_count, hint='需跟进车辆状态', tone='red' if repair_count else 'green'),
+        )
+        workspace['todo_groups'] = [
+            {'key': 'fleet-delivery', 'title': '待出库车辆', 'page': 'assets', 'items': [
+                _dashboard_todo('车辆出库', f"{row['plate_number'] or row['vin']}", f"{row['car_type'] or '-'} · {row['contract_type']}", row['delivery_status'], page='assets')
+                for row in delivery_rows
+            ]},
+            {'key': 'fleet-return', 'title': '待验车退车单', 'page': 'approvals', 'items': [
+                _dashboard_todo('退车验车', f"{row['plate_number'] or row['vin']}", row['return_reason'] or '-', row['status'], page='approvals')
+                for row in inspection_rows
+            ]},
+            {'key': 'fleet-documents', 'title': '30 天内证照到期', 'page': 'assets', 'items': [
+                _dashboard_todo('证照临期', f"{row['plate_number'] or row['vin']}", f"保险 {row['insurance_expiry_date'] or '-'} · 年检 {row['annual_review_date'] or '-'}", page='assets')
+                for row in warning_rows
+            ]},
+        ]
+        return workspace
+
+    if user['role'] == '运营':
+        active_contracts = _fetch_scalar(c, "SELECT COUNT(*) FROM contracts WHERE contract_status='执行中' AND delivery_status='已出库'")
+        upcoming_due = _fetch_scalar(c, f"""
+            SELECT COUNT(*)
+            FROM repayments r JOIN contracts c ON c.id=r.contract_id
+            WHERE ({active_bill_filter})
+              AND r.status IN ('待还款', '临近还款', '还款日')
+              AND r.due_date >= ?
+              AND r.due_date < ?
+        """, (today_str, week_end_str))
+        overdue_count = _fetch_scalar(c, f"""
+            SELECT COUNT(*)
+            FROM repayments r JOIN contracts c ON c.id=r.contract_id
+            WHERE ({active_bill_filter})
+              AND r.due_date < ?
+              AND COALESCE(r.paid_amount,0) < COALESCE(r.amount,0)
+              AND (r.status LIKE '逾期%' OR r.status='部分核销')
+        """, (today_str,))
+        pending_transfer = _fetch_scalar(c, "SELECT COUNT(*) FROM ownership_transfers WHERE status='待过户'")
+        upcoming_rows = _dashboard_rows(c, f"""
+            SELECT r.id, r.due_date, r.status, r.amount, v.plate_number, v.vin, v.car_type,
+                   COALESCE(cu.name, '') AS customer_name
+            FROM repayments r
+            JOIN contracts c ON c.id=r.contract_id
+            JOIN vehicles v ON v.id=c.vehicle_id
+            LEFT JOIN customers cu ON cu.id=c.customer_id
+            WHERE ({active_bill_filter})
+              AND r.status IN ('待还款', '临近还款', '还款日')
+              AND r.due_date >= ?
+              AND r.due_date < ?
+            ORDER BY r.due_date ASC
+        """, (today_str, week_end_str))
+        return_rows = _dashboard_rows(c, """
+            SELECT ri.id, ri.plate_number, ri.vin, ri.car_type, ri.return_reason, ri.status
+            FROM return_inspections ri
+            WHERE ri.status='待运营填写'
+            ORDER BY ri.created_at ASC
+        """)
+        transfer_rows = _dashboard_rows(c, """
+            SELECT ot.id, ot.status, v.plate_number, v.vin, v.car_type, cu.name AS customer_name
+            FROM ownership_transfers ot
+            JOIN vehicles v ON v.id=ot.vehicle_id
+            LEFT JOIN contracts c ON c.id=ot.contract_id
+            LEFT JOIN customers cu ON cu.id=c.customer_id
+            WHERE ot.status='待过户'
+            ORDER BY ot.created_at ASC
+        """)
+        workspace['cards'] = _dashboard_cards(
+            _dashboard_card('active_contracts', '执行中合同', active_contracts, hint='已出库且未结清', tone='blue'),
+            _dashboard_card('upcoming_due', '未来 7 天应还', upcoming_due, hint='需要提前提醒客户', tone='amber'),
+            _dashboard_card('overdue_count', '逾期账单', overdue_count, hint='需要跟进催收', tone='red' if overdue_count else 'green'),
+            _dashboard_card('pending_transfer', '待办理过户', pending_transfer, hint='以租代售结清后办理', tone='green'),
+        )
+        workspace['todo_groups'] = [
+            {'key': 'ops-due', 'title': '未来 7 天应还', 'page': 'reconciliation', 'items': [
+                _dashboard_todo('还款提醒', f"{row['customer_name'] or '未命名客户'} · {row['plate_number'] or row['vin']}", row['car_type'] or '-', row['status'], row['amount'], row['due_date'], 'reconciliation')
+                for row in upcoming_rows
+            ]},
+            {'key': 'ops-return', 'title': '待填写退车单', 'page': 'approvals', 'items': [
+                _dashboard_todo('退车流程', f"{row['plate_number'] or row['vin']}", row['return_reason'] or '-', row['status'], page='approvals')
+                for row in return_rows
+            ]},
+            {'key': 'ops-transfer', 'title': '待办理过户', 'page': 'dashboard', 'items': [
+                _dashboard_todo('车辆过户', f"{row['customer_name'] or '未命名客户'} · {row['plate_number'] or row['vin']}", row['car_type'] or '-', row['status'], page='dashboard')
+                for row in transfer_rows
+            ]},
+        ]
+        return workspace
+
+    if user['role'] == '财务':
+        monthly_due = _fetch_scalar(c, f"""
+            SELECT COALESCE(SUM({money_due_expr}),0)
+            FROM repayments r JOIN contracts c ON c.id=r.contract_id
+            WHERE ({active_bill_filter})
+              AND r.status NOT IN ('已还款', '预抵', '未激活')
+              AND r.due_date >= ? AND r.due_date < ?
+        """, (month_start_str, next_month_str))
+        monthly_received = _fetch_scalar(c, """
+            SELECT COALESCE(SUM(
+                CASE WHEN COALESCE(paid_amount,0)>0 THEN paid_amount
+                     WHEN status='已还款' THEN amount ELSE 0 END
+            ),0)
+            FROM repayments
+            WHERE period>=1
+              AND COALESCE(verified_at, paid_at, '') >= ?
+              AND COALESCE(verified_at, paid_at, '') < ?
+        """, (month_start_str, next_month_str))
+        monthly_initial_received = _fetch_scalar(c, """
+            SELECT COALESCE(SUM(COALESCE(received_amount, amount, 0)),0)
+            FROM contract_initial_payments
+            WHERE status='已通过'
+              AND approved_at >= ? AND approved_at < ?
+        """, (month_start_str, next_month_str))
+        monthly_factory_paid = _fetch_scalar(c, """
+            SELECT COALESCE(SUM(amount),0)
+            FROM factory_repayments
+            WHERE status='已还款' AND paid_at >= ? AND paid_at < ?
+        """, (month_start_str, next_month_str))
+        total_customer_received = _fetch_scalar(c, """
+            SELECT COALESCE(SUM(
+                CASE WHEN COALESCE(paid_amount,0)>0 THEN paid_amount
+                     WHEN status='已还款' THEN amount ELSE 0 END
+            ),0) FROM repayments WHERE period>=1
+        """)
+        total_factory_paid = _fetch_scalar(c, "SELECT COALESCE(SUM(amount),0) FROM factory_repayments WHERE status='已还款'")
+        total_rebate = _fetch_scalar(c, "SELECT COALESCE(SUM(rebate_amount),0) FROM vehicle_rebates")
+        cash_profit = parse_money(total_customer_received) - parse_money(total_factory_paid) + parse_money(total_rebate)
+        pending_orders = _dashboard_rows(c, """
+            SELECT id, customer_name, vin, car_type, order_status, created_at
+            FROM sales_orders
+            WHERE order_status='待财务确认'
+            ORDER BY created_at ASC
+        """)
+        recon_rows = _dashboard_rows(c, """
+            SELECT r.id, r.due_date, r.amount, r.status, v.plate_number, v.vin, v.car_type,
+                   COALESCE(cu.name, '') AS customer_name
+            FROM repayments r
+            JOIN contracts c ON c.id=r.contract_id
+            JOIN vehicles v ON v.id=c.vehicle_id
+            LEFT JOIN customers cu ON cu.id=c.customer_id
+            WHERE COALESCE(r.screenshot_path, '')!=''
+              AND COALESCE(r.bank_receipt_path, '')=''
+              AND r.status NOT IN ('已还款', '预抵')
+            ORDER BY r.due_date ASC
+        """)
+        receivable_rows = _dashboard_rows(c, """
+            SELECT rv.id, rv.amount, rv.paid_amount, rv.promised_repay_date, rv.status,
+                   v.plate_number, v.vin, v.car_type, COALESCE(cu.name, '') AS customer_name
+            FROM receivables rv
+            JOIN contracts c ON c.id=rv.contract_id
+            JOIN vehicles v ON v.id=c.vehicle_id
+            LEFT JOIN customers cu ON cu.id=c.customer_id
+            WHERE rv.status NOT IN ('已结清', '已取消')
+              AND rv.amount > COALESCE(rv.paid_amount,0)
+            ORDER BY rv.promised_repay_date ASC, rv.created_at ASC
+        """)
+        workspace['cards'] = _dashboard_cards(
+            _dashboard_card('monthly_due', '本月计划回款', monthly_due, 'money', hint='按应还日统计', tone='amber'),
+            _dashboard_card('monthly_received', '本月实际到账', parse_money(monthly_received) + parse_money(monthly_initial_received), 'money', hint='按财务确认时间统计', tone='green'),
+            _dashboard_card('monthly_factory_paid', '本月厂家实付', monthly_factory_paid, 'money', hint='按厂家核销时间统计', tone='blue'),
+            _dashboard_card('cash_profit', '累计现金毛利', cash_profit, 'money', hint='客户已收 - 厂家已付 + 返利', tone='green' if cash_profit >= 0 else 'red'),
+        )
+        workspace['todo_groups'] = [
+            {'key': 'finance-orders', 'title': '待财务确认报单', 'page': 'orders', 'items': [
+                _dashboard_todo('报单确认', f"{row['customer_name']} · {row['vin']}", row['car_type'] or '-', row['order_status'], page='orders')
+                for row in pending_orders
+            ]},
+            {'key': 'finance-recon', 'title': '待补财务回单的对账', 'page': 'reconciliation', 'items': [
+                _dashboard_todo('回款核销', f"{row['customer_name'] or '未命名客户'} · {row['plate_number'] or row['vin']}", row['car_type'] or '-', row['status'], row['amount'], row['due_date'], 'reconciliation')
+                for row in recon_rows
+            ]},
+            {'key': 'finance-receivable', 'title': '未结清挂账应收', 'page': 'bills', 'items': [
+                _dashboard_todo('挂账应收', f"{row['customer_name'] or '未命名客户'} · {row['plate_number'] or row['vin']}", f"承诺日 {row['promised_repay_date'] or '-'}", row['status'], parse_money(row['amount']) - parse_money(row['paid_amount']), row['promised_repay_date'], 'bills')
+                for row in receivable_rows
+            ]},
+        ]
+        return workspace
+
+    # 老板查看全量经营与风险数据。
+    metrics = build_dashboard_metrics(conn)
+    monthly_received = _fetch_scalar(c, """
+        SELECT COALESCE(SUM(
+            CASE WHEN COALESCE(paid_amount,0)>0 THEN paid_amount
+                 WHEN status='已还款' THEN amount ELSE 0 END
+        ),0)
+        FROM repayments
+        WHERE period>=1
+          AND COALESCE(verified_at, paid_at, '') >= ?
+          AND COALESCE(verified_at, paid_at, '') < ?
+    """, (month_start_str, next_month_str))
+    monthly_initial_received = _fetch_scalar(c, """
+        SELECT COALESCE(SUM(COALESCE(received_amount, amount, 0)),0)
+        FROM contract_initial_payments
+        WHERE status='已通过' AND approved_at >= ? AND approved_at < ?
+    """, (month_start_str, next_month_str))
+    monthly_overdue = _fetch_scalar(c, f"""
+        SELECT COALESCE(SUM({money_due_expr}),0)
+        FROM repayments r JOIN contracts c ON c.id=r.contract_id
+        WHERE ({active_bill_filter})
+          AND r.due_date < ?
+          AND COALESCE(r.paid_amount,0) < COALESCE(r.amount,0)
+          AND (r.status LIKE '逾期%' OR r.status='部分核销')
+    """, (today_str,))
+    approval_rows = _dashboard_rows(c, """
+        SELECT ref_type, required_role, COUNT(*) AS count
+        FROM approval_flows
+        WHERE status='待审批'
+        GROUP BY ref_type, required_role
+        ORDER BY count DESC, ref_type ASC
+    """)
+    overdue_rows = _dashboard_rows(c, f"""
+        SELECT r.id, r.due_date, r.status, {money_due_expr} AS outstanding,
+               v.plate_number, v.vin, v.car_type, COALESCE(cu.name, '') AS customer_name
+        FROM repayments r
+        JOIN contracts c ON c.id=r.contract_id
+        JOIN vehicles v ON v.id=c.vehicle_id
+        LEFT JOIN customers cu ON cu.id=c.customer_id
+        WHERE ({active_bill_filter})
+          AND r.due_date < ?
+          AND COALESCE(r.paid_amount,0) < COALESCE(r.amount,0)
+          AND (r.status LIKE '逾期%' OR r.status='部分核销')
+        ORDER BY r.due_date ASC
+    """, (today_str,))
+    workspace['cards'] = _dashboard_cards(
+        _dashboard_card('active_contract_count', '执行中合同', metrics['active_contract_count'], hint='已激活业务存量', tone='blue'),
+        _dashboard_card('monthly_due', '本月计划回款', metrics['monthly_due'], 'money', hint='按应还日统计', tone='amber'),
+        _dashboard_card('monthly_received', '本月实际到账', parse_money(monthly_received) + parse_money(monthly_initial_received), 'money', hint='按财务确认时间统计', tone='green'),
+        _dashboard_card('monthly_overdue', '当前逾期金额', monthly_overdue, 'money', hint='未结清逾期账单', tone='red' if monthly_overdue else 'green'),
+        _dashboard_card('cash_profit', '累计现金毛利', metrics['realized_cash_profit'], 'money', hint='客户已收 - 厂家已付 + 返利', tone='green' if metrics['realized_cash_profit'] >= 0 else 'red'),
+        _dashboard_card('missing_guidance', '指导价缺失车辆', unresolved_guidance_vehicle_count(conn), hint='影响后续报单', tone='red'),
+    )
+    workspace['todo_groups'] = [
+        {'key': 'boss-approvals', 'title': '待审批事项', 'page': 'approvals', 'items': [
+            _dashboard_todo('待审批', dashboard_approval_type_label(row['ref_type']), f"处理角色：{row['required_role']}", f"{row['count']} 项", page='approvals')
+            for row in approval_rows
+        ]},
+        {'key': 'boss-overdue', 'title': '逾期风险', 'page': 'risk', 'items': [
+            _dashboard_todo('逾期回款', f"{row['customer_name'] or '未命名客户'} · {row['plate_number'] or row['vin']}", f"{row['car_type'] or '-'}，应还日 {row['due_date']}", row['status'], row['outstanding'], row['due_date'], 'risk')
+            for row in overdue_rows
+        ]},
+    ]
+    return workspace
+
+
 @app.route('/api/dashboard/stats', methods=['GET'])
 @login_required
 def get_stats():
@@ -3203,7 +3683,24 @@ def get_stats():
     conn = get_db()
     metrics = build_dashboard_metrics(conn)
     conn.close()
+    # 旧接口仍供兼容页面调用。非财务角色只返回不含金额和利润的资产统计。
+    if request.current_user['role'] not in ('财务', '老板'):
+        safe_keys = {
+            'total_vehicles', 'vehicle_count', 'active_vehicles', 'expiring_insurance_count',
+            'vehicle_status_distribution', 'data_as_of',
+        }
+        metrics = {key: value for key, value in metrics.items() if key in safe_keys}
     return jsonify(metrics)
+
+
+@app.route('/api/dashboard/workspace', methods=['GET'])
+@login_required
+def get_dashboard_workspace():
+    check_overdue()
+    conn = get_db()
+    workspace = build_role_dashboard(conn, request.current_user)
+    conn.close()
+    return jsonify(workspace)
 
 
 # ======================== 车辆资产 CRUD ========================

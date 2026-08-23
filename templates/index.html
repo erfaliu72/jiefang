@@ -127,63 +127,52 @@
 
                     <!-- ================== DASHBOARD ================== -->
                     <div v-if="currentPage === 'dashboard'" class="page fade-in">
-                        <!-- Stat Cards -->
                         <div class="stat-cards">
-                            <div class="stat-card" v-for="(card, i) in statCards" :key="i">
-                                <div class="stat-card-icon" :style="{ background: card.bg, color: card.color }">
-                                    <span v-html="card.svg"></span>
+                            <div class="stat-card" v-for="card in dashboardWorkspace.cards" :key="card.key">
+                                <div class="stat-card-icon" :style="dashboardCardTone(card.tone)">
+                                    <span style="font-weight:700">{{ dashboardCardMark(card) }}</span>
                                 </div>
                                 <div class="stat-card-content">
                                     <span class="stat-label">{{ card.label }}</span>
-                                    <span class="stat-value">{{ card.value }}</span>
+                                    <span class="stat-value" :class="card.tone === 'red' ? 'text-red' : card.tone === 'green' ? 'text-green' : ''">
+                                        {{ dashboardCardValue(card) }}
+                                    </span>
+                                    <span v-if="card.hint" style="font-size:12px;color:#94a3b8;margin-top:3px">{{ card.hint }}</span>
                                 </div>
-                                <span class="stat-trend" :class="card.trendType" v-if="card.trend">{{ card.trend }}</span>
                             </div>
                         </div>
 
-                        <div v-if="currentUser.role==='老板' && bossDashboard.overview" class="card" style="margin-top:16px">
+                        <div class="card" style="margin-top:16px">
                             <div class="card-title-row">
-                                <div class="card-title">老板穿透看板</div>
-                                <span class="card-count">待办、风险、利润统一口径</span>
+                                <div class="card-title">当前待办</div>
+                                <span class="card-count">数据截至 {{ dashboardWorkspace.data_as_of || '-' }}</span>
                             </div>
-                            <div class="stat-cards four-cols" style="margin-top:12px">
-                                <div class="stat-card">
-                                    <div class="stat-card-content">
-                                        <span class="stat-label">进行中报单</span>
-                                        <span class="stat-value">{{ bossDashboard.overview.open_order_count || 0 }}</span>
+                            <div v-if="dashboardWorkspace.todo_groups.length" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px">
+                                <div v-for="group in dashboardWorkspace.todo_groups" :key="group.key" style="border:1px solid #e2e8f0;border-radius:8px;min-width:0">
+                                    <div style="padding:12px 14px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:10px">
+                                        <span style="font-size:14px;font-weight:650;color:#334155">{{ group.title }}</span>
+                                        <el-button v-if="group.page && hasPage(group.page)" text type="primary" size="small" style="margin-left:auto" @click="openDashboardTask({page: group.page})">查看</el-button>
                                     </div>
-                                </div>
-                                <div class="stat-card">
-                                    <div class="stat-card-content">
-                                        <span class="stat-label">逾期客户账单</span>
-                                        <span class="stat-value text-red">{{ bossDashboard.overview.overdue_repayment_count || 0 }}</span>
+                                    <div v-if="group.items && group.items.length">
+                                        <button v-for="(item, index) in group.items" :key="index" type="button"
+                                            @click="openDashboardTask(item)"
+                                            :style="{width:'100%',border:'none',borderTop:index ? '1px solid #f1f5f9' : 'none',background:'transparent',padding:'12px 14px',textAlign:'left',cursor:item.page && hasPage(item.page) ? 'pointer' : 'default'}">
+                                            <div style="display:flex;align-items:center;gap:8px;min-width:0">
+                                                <span style="font-size:12px;color:#64748b;white-space:nowrap">{{ item.kind }}</span>
+                                                <span style="font-size:13px;font-weight:600;color:#334155;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ item.title }}</span>
+                                                <el-tag v-if="item.status" size="small" effect="plain" :type="dashboardTaskTagType(item.status)" style="margin-left:auto;flex:0 0 auto">{{ item.status }}</el-tag>
+                                            </div>
+                                            <div style="display:flex;align-items:center;gap:8px;margin-top:5px;min-width:0">
+                                                <span style="font-size:12px;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ item.subtitle || '-' }}</span>
+                                                <span v-if="item.due_date" style="font-size:12px;color:#94a3b8;margin-left:auto;white-space:nowrap">{{ item.due_date }}</span>
+                                                <span v-if="item.amount !== undefined" class="num" style="font-size:12px;color:#334155;margin-left:auto;white-space:nowrap">¥{{ numberFormat(item.amount) }}</span>
+                                            </div>
+                                        </button>
                                     </div>
-                                </div>
-                                <div class="stat-card">
-                                    <div class="stat-card-content">
-                                        <span class="stat-label">现金利润</span>
-                                        <span class="stat-value" :class="(bossDashboard.overview.realized_cash_profit || 0) >= 0 ? 'text-green' : 'text-red'">¥{{ numberFormat(bossDashboard.overview.realized_cash_profit || 0) }}</span>
-                                    </div>
-                                </div>
-                                <div class="stat-card">
-                                    <div class="stat-card-content">
-                                        <span class="stat-label">指导价缺失</span>
-                                        <span class="stat-value text-red">{{ bossDashboard.overview.missing_guidance_count || 0 }}</span>
-                                    </div>
+                                    <div v-else style="padding:28px 14px;text-align:center;color:#94a3b8;font-size:13px">暂无待办</div>
                                 </div>
                             </div>
-                            <el-table :data="bossDashboard.todos || []" stripe style="width:100%;margin-top:12px" v-if="(bossDashboard.todos || []).length">
-                                <el-table-column prop="ref_type" label="待办类型" width="180">
-                                    <template #default="s">{{ approvalTypeLabel(s.row.ref_type) }}</template>
-                                </el-table-column>
-                                <el-table-column prop="required_role" label="处理角色" width="120"></el-table-column>
-                                <el-table-column prop="cnt" label="数量" width="100"></el-table-column>
-                            </el-table>
-                            <el-table :data="slaReminders" stripe style="width:100%;margin-top:12px" v-if="slaReminders.length">
-                                <el-table-column prop="message" label="SLA 超时提醒" min-width="260"></el-table-column>
-                                <el-table-column prop="required_role" label="角色" width="100"></el-table-column>
-                                <el-table-column prop="age_hours" label="已等待(小时)" width="130"></el-table-column>
-                            </el-table>
+                            <div v-else style="padding:36px 0;text-align:center;color:#94a3b8">暂无待办</div>
                         </div>
 
                         <div v-if="currentUser.role==='运营' && pendingOwnershipTransfers.length" class="card" style="margin-top:16px">
@@ -219,24 +208,6 @@
                             </el-table>
                         </div>
 
-                        <!-- Charts Row -->
-                        <div class="charts-row" v-if="currentUser.role!=='车管'">
-                            <div class="chart-card card">
-                                <div class="card-title">资产价值概览</div>
-                                <div class="chart-container"><canvas id="assetChart"></canvas></div>
-                            </div>
-                            <div class="chart-card card card-sm">
-                                <div class="card-title">车辆状态分布</div>
-                                <div class="chart-container-sm"><canvas id="statusChart"></canvas></div>
-                                <div class="status-legend">
-                                    <div class="legend-item" v-for="item in statusDistribution" :key="item.label">
-                                        <span class="legend-dot" :style="{background: item.color}"></span>
-                                        <span class="legend-label">{{ item.label }}</span>
-                                        <span class="legend-value">{{ item.count }} 台</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
                     </div>
 
                     <!-- ================== SALES ORDERS ================== -->
@@ -3556,6 +3527,7 @@
             };
             const opWidthInvoices = computed(() => calcOpWidth(invoiceRequests, currentUser.value?.role, _invoiceBtns));
             const stats = ref({});
+            const dashboardWorkspace = ref({ cards: [], todo_groups: [], data_as_of: '' });
             const salesOrders = ref([]);
             const overdueList = ref([]);
             const insuranceWarnings = ref([]);
@@ -4079,9 +4051,9 @@
 	                    { label: '退车中', value: countByStatus('退车中'), svg: '↩️', bg: '#fee2e2', color: '#ef4444' },
 	                ];
 	            });
-	            const statCards = computed(() => {
-	                if (currentUser.value && currentUser.value.role === '车管') return fleetStatCards.value;
-	                return [
+            const statCards = computed(() => {
+                if (currentUser.value && currentUser.value.role === '车管') return fleetStatCards.value;
+                return [
 	                { label: '车辆总数', value: stats.value.total_vehicles || 0, svg: '🚛', bg: '#dbeafe', color: '#2563eb' },
 	                { label: '活跃报单/合同', value: stats.value.active_order_contract_count || 0, svg: '📋', bg: '#d1fae5', color: '#059669', trend: `合同${stats.value.active_contract_count || 0}/报单${stats.value.open_order_count || 0}`, trendType: 'neutral' },
 	                { label: '本月应收', value: '¥' + numberFormat(stats.value.monthly_due || 0), svg: '💰', bg: '#fef3c7', color: '#d97706' },
@@ -4122,6 +4094,71 @@
 	                assetPage.value = 1;
 	                if (currentPage.value === 'dashboard') setTimeout(initCharts, 100);
 	            };
+            const fetchDashboardWorkspace = async () => {
+                if (!currentUser.value) {
+                    dashboardWorkspace.value = { cards: [], todo_groups: [], data_as_of: '' };
+                    return;
+                }
+                try {
+                    const res = await fetch('/api/dashboard/workspace');
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.message || '仪表盘加载失败');
+                    dashboardWorkspace.value = {
+                        cards: Array.isArray(data.cards) ? data.cards : [],
+                        todo_groups: Array.isArray(data.todo_groups) ? data.todo_groups : [],
+                        data_as_of: data.data_as_of || '',
+                    };
+                } catch (e) {
+                    dashboardWorkspace.value = { cards: [], todo_groups: [], data_as_of: '' };
+                    ElementPlus.ElMessage.error('仪表盘加载失败，请稍后重试');
+                }
+            };
+            function dashboardCardValue(card) {
+                if (!card) return '-';
+                if (card.value_type === 'money') return '¥' + numberFormat(card.value || 0);
+                if (card.value_type === 'percent') return `${Number(card.value || 0).toFixed(1)}%`;
+                return Number(card.value || 0).toLocaleString('zh-CN');
+            }
+            function dashboardCardTone(tone) {
+                return {
+                    blue: { background: '#dbeafe', color: '#2563eb' },
+                    green: { background: '#d1fae5', color: '#059669' },
+                    amber: { background: '#fef3c7', color: '#d97706' },
+                    red: { background: '#fee2e2', color: '#dc2626' },
+                }[tone] || { background: '#f1f5f9', color: '#64748b' };
+            }
+            function dashboardCardMark(card) {
+                return {
+                    monthly_orders: '单',
+                    active_contracts: '合',
+                    active_contract_count: '合',
+                    monthly_due: '收',
+                    monthly_received: '收',
+                    monthly_factory_paid: '付',
+                    monthly_overdue: '逾',
+                    collection_rate: '%',
+                    inventory_count: '库',
+                    pending_delivery: '出',
+                    pending_inspection: '验',
+                    repair_count: '修',
+                    upcoming_due: '期',
+                    overdue_count: '逾',
+                    pending_transfer: '户',
+                    cash_profit: '利',
+                    missing_guidance: '价',
+                }[card?.key] || '数';
+            }
+            function dashboardTaskTagType(status) {
+                const text = String(status || '');
+                if (text.includes('逾期') || text.includes('驳回') || text.includes('待维修')) return 'danger';
+                if (text.includes('临近') || text.includes('待') || text.includes('还款')) return 'warning';
+                if (text.includes('已') || text.includes('完成')) return 'success';
+                return 'info';
+            }
+            function openDashboardTask(item) {
+                const page = item && item.page;
+                if (page && hasPage(page)) currentPage.value = page;
+            }
 	            const fetchVehiclePage = async (page) => {
 	                const r = await (await fetch('/api/vehicles?page=' + page + '&page_size=20' + (showDeleted.value ? '&show_deleted=1' : ''))).json();
 	                vehiclePageData.value = r.data || [];
@@ -4249,15 +4286,9 @@
 	                slaReminders.value = data.items || [];
 	            };
 	            const refreshDashboardPanels = async () => {
-	                await fetchAll();
 	                await Promise.all([
-	                    fetchBossDashboard(),
-	                    fetchSlaReminders(),
+                        fetchDashboardWorkspace(),
 	                    fetchPendingOwnershipTransfers(),
-	                    fetchRecon(),
-	                    fetchReceivables(),
-	                    fetchInvoices(),
-	                    fetchLockRequests(),
 	                ]);
 	            };
 	            function loadInitialDataForUser() {
@@ -4276,7 +4307,6 @@
 	                fetchInvoices();
 	                fetchReturns();
 	                fetchLockRequests();
-	                fetchAll();
 	            }
 
             let assetChart = null, statusChartInst = null;
@@ -7656,7 +7686,7 @@
                 search, assetFilter, carTypeFilter, conditionFilter, boxTypeFilter, energyFilter, batteryCapacityFilter, horsepowerFilter, showDeleted, contractSearch, contractFilter,
                 hiddenColumns, toggleColumn, colVisible, ALL_COLUMNS, showColSettings, selectAllColumns, deselectAllColumns,
                 carTypeOptions, carTypeGroups, normalizeOrderBaseCarType, batteryCapacityOptions, horsepowerOptions, assetBoxTypeOptions, assetEnergyOf, assetConditionOf, salesOrderCarOptions, currentSalesOrderCarConfig, currentVehicleCarConfig, availableGearboxOptions, availableColorOptions, availableBoxOptions, availableVehicleGearboxOptions, availableVehicleColorOptions, availableVehicleBoxOptions, boxRemarkPlaceholder, vehicleBoxRemarkPlaceholder,
-                vehicles, contracts, pendingOwnershipTransfers, stats, salesOrders, overdueList, insuranceWarnings, pendingBills, feeItems, profitData, profitSummary, returnList, completionHistory, completionHistoryFilter, completionHistoryDateRange, returnableAssetRows,
+                vehicles, contracts, pendingOwnershipTransfers, stats, dashboardWorkspace, salesOrders, overdueList, insuranceWarnings, pendingBills, feeItems, profitData, profitSummary, returnList, completionHistory, completionHistoryFilter, completionHistoryDateRange, returnableAssetRows,
                 invoiceRequests, receivingCompanies, bossDashboard, slaReminders, customerBlacklist, vehicleRebates,
                 reconList, reconFilter, reconSearch, reconSummary, filteredGroupedReconList, reconExpandedKeys, reconTableRef,
                 receivablesList, showReceivableScreenshotDialog, showReceivableSettleDialog, receivableTarget, receivableScreenshotPath, receivableSettleForm, receivableOutstanding, openReceivableScreenshot, onReceivableScreenshotUpload, submitReceivableScreenshot, openReceivableSettle, submitReceivableSettle,
@@ -7682,7 +7712,7 @@
                 fetchApprovals, refreshApprovalCenter, fetchApprovalReminders, fetchLockRequests, fetchFeeItems, fetchCompletionHistory, syncCompletionHistoryDateRange, resetCompletionHistoryFilter,
                 doApprove, doReject, doResubmit, doDeliver, planText, initiateOrderRefund, executeOrderRefund, cancelOrderRefund,
                 // UI
-                statCards, statusDistribution, filteredAssetRows, pagedAssetRows, assetDisplayTotal, assetFilterActive, resetAssetFilters, filteredContracts, pendingApprovalItems, pendingApprovalCount, pendingDeliveryCount, pendingDeliveryContracts, pendingOwnershipTransferCount, assetMenuCount, pendingRepairVehicles, pendingSalesOrderCount, pendingLockActions, approvalsMenuCount, pendingReconCount, pendingReturnCount, menuActionCount, menuWarningCount,
+                statCards, statusDistribution, dashboardCardValue, dashboardCardTone, dashboardCardMark, dashboardTaskTagType, openDashboardTask, filteredAssetRows, pagedAssetRows, assetDisplayTotal, assetFilterActive, resetAssetFilters, filteredContracts, pendingApprovalItems, pendingApprovalCount, pendingDeliveryCount, pendingDeliveryContracts, pendingOwnershipTransferCount, assetMenuCount, pendingRepairVehicles, pendingSalesOrderCount, pendingLockActions, approvalsMenuCount, pendingReconCount, pendingReturnCount, menuActionCount, menuWarningCount,
                 vehiclePageTotal, vehiclePageData, assetTotalPages, assetPageSize, assetPage, fetchVehiclePage,
                 numberFormat, statusClass, repayClass, calcOverdueDays, riskLevel,
                 approvalTypeLabel, approvalTypeClass, approvalVehicleLabel, deliveryStatusClass, paymentCategoryClass, defaultPaymentCategory, assetStatusClass, returnStatusClass,
