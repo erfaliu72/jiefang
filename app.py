@@ -8259,6 +8259,7 @@ def get_overdue():
     check_overdue()
     conn = get_db()
     c = conn.cursor()
+    today_str = datetime.now().strftime('%Y-%m-%d')
     c.execute("""
         SELECT r.*, c.vehicle_id, v.vin, v.plate_number, v.car_type,
                cu.name as customer_name, cu.phone as customer_phone
@@ -8268,11 +8269,14 @@ def get_overdue():
         LEFT JOIN customers cu ON cu.id = c.customer_id
         WHERE (r.status LIKE '逾期%' OR r.status='部分核销')
           AND r.period >= 1
+          AND r.due_date IS NOT NULL
+          AND date(r.due_date) < date(?)
+          AND COALESCE(r.paid_amount, 0) < COALESCE(r.amount, 0)
           AND COALESCE(c.contract_file, '')!=''
           AND c.delivery_status='已出库'
           AND (v.is_deleted IS NULL OR v.is_deleted = 0)
         ORDER BY r.due_date ASC
-    """)
+    """, (today_str,))
     overdue = [dict(row) for row in c.fetchall()]
     conn.close()
     return jsonify(overdue)
@@ -10118,11 +10122,15 @@ def get_approvals():
                 'invoice_entity_name': row.get('invoice_entity_name', ''),
                 'invoice_entity_tax_no': row.get('invoice_entity_tax_no', ''),
                 'invoice_no': row.get('invoice_no', ''),
+                'invoice_file_path': row.get('invoice_file_path', ''),
                 'receiving_company': row.get('receiving_company', ''),
                 'applied_by': row.get('applied_by', ''),
                 'applied_at': row.get('applied_at', ''),
+                'processed_by': row.get('processed_by', ''),
                 'delivery_status': row.get('status', ''),
                 'requested_by': row.get('applied_by', ''),
+                # 老板审批完成后，发票进入财务的实际处理阶段。
+                'follow_up_role': '财务' if row.get('status') in ('待开票', '已开票', '已作废', '已红冲') else '',
             })
             return item
 

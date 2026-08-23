@@ -1059,6 +1059,62 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
             4,
         )
 
+    def test_future_partial_reconciliation_is_not_an_overdue_or_lock_candidate(self):
+        vehicle_id, _ = self.create_vehicle("未来对账隔离车型", status="租赁中")
+        today = datetime.now().date()
+        future_due_date = (today + timedelta(days=180)).strftime("%Y-%m-%d")
+        overdue_due_date = (today - timedelta(days=2)).strftime("%Y-%m-%d")
+        conn = database.get_db()
+        try:
+            conn.execute("INSERT INTO customers (name, phone) VALUES ('未来对账客户', '13800000028')")
+            customer_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute("""
+                INSERT INTO contracts
+                    (vehicle_id, customer_id, contract_type, contract_status,
+                     delivery_status, contract_file)
+                VALUES (?, ?, '租赁', '执行中', '已出库', '/uploads/signed-contract.pdf')
+            """, (vehicle_id, customer_id))
+            contract_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.executemany("""
+                INSERT INTO repayments
+                    (contract_id, period, due_date, amount, paid_amount, verified_amount, status)
+                VALUES (?, ?, ?, 5000, 500, 500, '部分核销')
+            """, [
+                (contract_id, 1, future_due_date),
+                (contract_id, 2, overdue_due_date),
+            ])
+            future_repayment_id = conn.execute(
+                "SELECT id FROM repayments WHERE contract_id=? AND period=1",
+                (contract_id,),
+            ).fetchone()[0]
+            overdue_repayment_id = conn.execute(
+                "SELECT id FROM repayments WHERE contract_id=? AND period=2",
+                (contract_id,),
+            ).fetchone()[0]
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login("sales")
+        response = self.client.get("/api/risk/overdue")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        overdue_ids = {row["id"] for row in response.get_json()}
+        self.assertNotIn(future_repayment_id, overdue_ids)
+        self.assertIn(overdue_repayment_id, overdue_ids)
+
+        lock_response = self.client.post(
+            "/api/lock-requests",
+            json={"repayment_id": future_repayment_id, "reason": "未来期次不得锁车"},
+        )
+        self.assertEqual(lock_response.status_code, 400, lock_response.get_json())
+        self.assertEqual(
+            self.db_value(
+                "SELECT COUNT(*) FROM lock_requests WHERE repayment_id=?",
+                (future_repayment_id,),
+            ),
+            0,
+        )
+
     def test_overdue_collection_lock_unlock_and_return_repair_cycle(self):
         car_type = "八月逾期退车车型"
         self.save_lease_guidance(car_type)

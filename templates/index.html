@@ -859,11 +859,14 @@
                                 <el-table-column prop="customer_name" label="客户" width="120"></el-table-column>
                                 <el-table-column label="金额" width="120"><template #default="s">¥{{ numberFormat(s.row.amount) }}</template></el-table-column>
                                 <el-table-column prop="invoice_entity_name" label="开票抬头" min-width="180"></el-table-column>
-                                
+                                <el-table-column label="发票文件" width="110"><template #default="s"><a v-if="s.row.invoice_file_path" :href="s.row.invoice_file_path" target="_blank" style="color:#409eff">下载</a><span v-else style="color:#bbb">无</span></template></el-table-column>
                                 <el-table-column prop="status" label="状态" width="100"><template #default="s"><span class="status-badge" :class="deliveryStatusClass(s.row.status)">{{ s.row.status }}</span></template></el-table-column>
-                                <el-table-column label="操作" width="120" fixed="right">
+                                <el-table-column label="操作" :width="opWidthInvoices" fixed="right">
                                     <template #default="s">
-                                        <el-button v-if="currentUser.role==='运营' && ['待审批','待开票'].includes(s.row.status)" size="small" type="danger" plain @click="cancelInvoice(s.row)">取消</el-button>
+                                        <el-button v-if="['运营','老板','财务'].includes(currentUser.role) && ['待审批','待开票'].includes(s.row.status)" size="small" type="info" plain @click="cancelInvoice(s.row)">取消</el-button>
+                                        <el-button v-if="currentUser.role==='财务' && s.row.status==='待开票'" size="small" type="success" @click="issueInvoice(s.row)">开票</el-button>
+                                        <el-button v-if="currentUser.role==='财务' && s.row.status==='已开票'" size="small" type="danger" plain @click="voidInvoice(s.row)">作废</el-button>
+                                        <el-button v-if="currentUser.role==='财务' && s.row.status==='已开票'" size="small" type="warning" plain @click="redInvoice(s.row)">红冲</el-button>
                                     </template>
                                 </el-table-column>
                             </el-table>
@@ -983,7 +986,7 @@
                                 <p>所有账单已核销完毕</p>
                             </div>
                         </div>
-                        <div class="card" style="margin-top:16px">
+                        <div v-if="currentUser.role!=='财务'" class="card" style="margin-top:16px">
                             <div class="card-title-row">
                                 <div class="card-title">发票申请</div>
                                 <el-button v-if="currentUser.role==='运营'" type="primary" plain @click="openInvoiceDialog()">新建发票申请</el-button>
@@ -1319,7 +1322,7 @@
 
                     <div v-if="currentPage === 'approvals'" class="page fade-in">
                         <!-- 车管待出库 -->
-                        <div v-if="currentUser.role==='车管' && pendingDeliveryContracts.length" class="card" style="margin-bottom:20px;padding:18px 20px;border:1px solid #fde68a;background:linear-gradient(135deg,#fffbeb 0%,#ffffff 100%)">
+                        <div id="pending-delivery-section" v-if="currentUser.role==='车管' && pendingDeliveryContracts.length" class="card" style="margin-bottom:20px;padding:18px 20px;border:1px solid #fde68a;background:linear-gradient(135deg,#fffbeb 0%,#ffffff 100%)">
                             <div class="card-title-row" style="margin-bottom:12px">
                                 <div style="display:flex;align-items:center;gap:10px">
                                     <div class="card-title">待出库车辆</div>
@@ -1338,7 +1341,7 @@
                             </div>
                         </div>
 
-                        <div v-if="currentUser.role==='车管' && pendingRepairVehicles.length" class="card" style="margin-bottom:20px;padding:18px 20px;border:1px solid #fed7aa;background:linear-gradient(135deg,#fff7ed 0%,#ffffff 100%)">
+                        <div id="pending-repair-section" v-if="currentUser.role==='车管' && pendingRepairVehicles.length" class="card" style="margin-bottom:20px;padding:18px 20px;border:1px solid #fed7aa;background:linear-gradient(135deg,#fff7ed 0%,#ffffff 100%)">
                             <div class="card-title-row" style="margin-bottom:12px">
                                 <div style="display:flex;align-items:center;gap:10px">
                                     <div class="card-title">待维修入库</div>
@@ -1402,7 +1405,10 @@
                                     <span style="font-weight:700;font-size:16px">{{ approvalVehicleLabel(item) }}</span>
                                     <span v-if="item.contract_type" class="badge badge-gray">{{ item.contract_type }}</span>
                                     <span v-if="item.ref_type==='price_exception' && item.overall_status==='已完成'" class="badge badge-green">待财务确认</span>
-                                    <span class="badge" :class="{'badge-green': item.overall_status==='已完成', 'badge-red': item.overall_status==='已驳回', 'badge-blue': item.overall_status==='审批中'}">
+                                    <span v-if="item.ref_type==='invoice'" class="badge" :class="deliveryStatusClass(item.delivery_status)">
+                                        {{ item.delivery_status }}
+                                    </span>
+                                    <span v-else class="badge" :class="{'badge-green': item.overall_status==='已完成', 'badge-red': item.overall_status==='已驳回', 'badge-blue': item.overall_status==='审批中'}">
                                         {{ item.overall_status }}
                                     </span>
                                 </div>
@@ -1411,6 +1417,7 @@
                                     <span v-else-if="item.ref_type==='price_exception'" style="font-weight:700;color:#ef4444;font-size:18px">低于指导价 ¥{{ numberFormat(item.snapshot_guidance_price || 0) }}</span>
                                     <span v-else-if="item.ref_type==='return_stock'" style="font-weight:700;color:#d97706;font-size:18px">{{ item.return_reason || '退车入库' }}</span>
                                     <span v-else-if="item.ref_type==='initial_payment'" style="font-weight:700;color:#d97706;font-size:18px">首次付款 ¥{{ numberFormat(item.initial_payment_amount) }}</span>
+                                    <span v-else-if="item.ref_type==='invoice'" style="font-weight:700;color:#d97706;font-size:18px">开票金额 ¥{{ numberFormat(item.amount) }}</span>
                                     <span v-else style="font-weight:700;color:#059669;font-size:18px">月租 ¥{{ numberFormat(item.rent) }}</span>
                                 </div>
                             </div>
@@ -1473,8 +1480,11 @@
                                         <div v-if="item.invoice_entity_tax_no"><span style="color:#9ca3af">税号：</span>{{ item.invoice_entity_tax_no }}</div>
                                         <div><span style="color:#9ca3af">收款公司：</span>{{ item.receiving_company || '-' }}</div>
                                         <div><span style="color:#9ca3af">当前状态：</span>{{ item.delivery_status || '-' }}</div>
+                                        <div v-if="item.invoice_no"><span style="color:#9ca3af">发票号：</span>{{ item.invoice_no }}</div>
+                                        <div v-if="item.processed_by"><span style="color:#9ca3af">开票人：</span>{{ item.processed_by }}</div>
                                         <div><span style="color:#9ca3af">申请人：</span>{{ item.applied_by || item.requested_by || '-' }}</div>
                                         <div><span style="color:#9ca3af">申请时间：</span>{{ item.applied_at || item.created_at || '-' }}</div>
+                                        <div v-if="item.invoice_file_path"><span style="color:#9ca3af">发票文件：</span><a :href="item.invoice_file_path" target="_blank" style="color:#2563eb">查看</a></div>
                                     </template>
                                     <template v-else-if="['initial_payment','initial_payment_shortage'].includes(item.ref_type)">
                                         <div><span style="color:#9ca3af">付款类型：</span><b>{{ item.initial_payment_type || '首次付款' }}</b></div>
@@ -1609,6 +1619,12 @@
                                     type="warning" size="small" @click="doDeliver(item)">
                                     <el-icon><Van/></el-icon> 确认出库
                                 </el-button>
+                                <template v-if="item.ref_type==='invoice' && currentUser.role==='财务'">
+                                    <el-button v-if="item.delivery_status==='待开票'" type="success" size="small" @click="issueInvoice({ id: item.ref_id })">开票</el-button>
+                                    <el-button v-if="item.delivery_status==='待开票'" type="info" size="small" plain @click="cancelInvoice({ id: item.ref_id })">取消</el-button>
+                                    <el-button v-if="item.delivery_status==='已开票'" type="danger" size="small" plain @click="voidInvoice({ id: item.ref_id })">作废</el-button>
+                                    <el-button v-if="item.delivery_status==='已开票'" type="warning" size="small" plain @click="redInvoice({ id: item.ref_id })">红冲</el-button>
+                                </template>
                                 <!-- 报单驳回退款闭环（20260804） -->
                                 <el-button v-if="item.ref_type==='order_exception' && item.overall_status==='已驳回' && !item.refund_id && currentUser.role==='老板'"
                                     type="warning" size="small" @click="initiateOrderRefund(item)">
@@ -1665,36 +1681,7 @@
 
                     <!-- ================== RISK / LOCK ================== -->
                     <div v-if="currentPage === 'risk'" class="page fade-in">
-                        <div class="workflow-card card">
-                            <div class="card-title">锁车审批流程</div>
-                            <div class="workflow-steps">
-                                <div class="wf-step">
-                                    <div class="wf-icon">📝</div>
-                                    <div class="wf-label">销售发起申请</div>
-                                    <div class="wf-desc">严重逾期超7天</div>
-                                </div>
-                                <div class="wf-arrow">→</div>
-                                <div class="wf-step">
-                                    <div class="wf-icon">👔</div>
-                                    <div class="wf-label">运营审核</div>
-                                    <div class="wf-desc">审核锁车必要性</div>
-                                </div>
-                                <div class="wf-arrow">→</div>
-                                <div class="wf-step">
-                                    <div class="wf-icon">🔒</div>
-                                    <div class="wf-label">老板审批</div>
-                                    <div class="wf-desc">终审确认锁车</div>
-                                </div>
-                                <div class="wf-arrow">→</div>
-                                <div class="wf-step done">
-                                    <div class="wf-icon">📷</div>
-                                    <div class="wf-label">销售确认执行</div>
-                                    <div class="wf-desc">第三方平台执行后闭环</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div v-if="pendingLockActions.length" class="card" style="margin-top:16px">
+                        <div v-if="pendingLockActions.length" class="card">
                             <div class="card-title-row">
                                 <div class="card-title">待处理锁车事项</div>
                                 <span class="card-count">{{ pendingLockActions.length }} 项需要您处理</span>
@@ -4035,7 +4022,7 @@
                 orders: { title: '销售报单', desc: '销售录单锁车、财务确认客户意向，驱动后续线下合同上传', action: '新建报单' },
                 assets: { title: '车辆管理', desc: '上传经销商买断库存 Excel 批量入库，按表格维度展示车辆信息', action: '上传入库' },
                 completion_history: { title: '历史完结', desc: '已完成退车入库与以租代售过户记录', action: '' },
-                approvals: { title: '审批中心', desc: '合同上传 · 锁车审批 · 退车入库与退还押金', action: '' },
+                approvals: { title: '审批中心', desc: '报单确认 · 合同上传 · 发票处理 · 锁车审批 · 退车入库与退还押金', action: '' },
                 bills: { title: '账单管理', desc: '查看、核销和管理所有财务账单', action: '' },
                 invoice: { title: '发票申请', desc: '运营发起开票申请，财务审核开具', action: '' },
                 reconciliation: { title: '对账单', desc: '按客户查看待核销款项、已核销记录与处理进度', action: '' },
@@ -4343,7 +4330,7 @@
                 if (page === 'orders') { fetchSalesOrders(); loadFinancePlans(); }
                 if (page === 'assets') { fetchAll(); fetchContracts(); loadSkuInventory(); }
                 if (page === 'completion_history') { fetchCompletionHistory(); fetchReturns(); }
-                if (page === 'approvals') refreshApprovalCenter();
+                if (page === 'approvals' && !navigatingToPendingApproval) refreshApprovalCenter();
                 if (page === 'risk') { fetchOverdue(); fetchInsuranceWarnings(); fetchLockRequests(); }
                 if (page === 'bills') { fetchBills(); fetchContracts(); fetchInvoices(); fetchReceivingCompanies(); }
                 if (page === 'invoice') fetchInvoices();
@@ -5280,6 +5267,11 @@
             const pendingApprovalItems = computed(() => {
                 if (!currentUser.value) return [];
                 return approvalReminders.value.filter(item => {
+                    if (currentUser.value.role === '财务'
+                        && item.ref_type === 'invoice'
+                        && item.delivery_status === '待开票') {
+                        return true;
+                    }
                     const currentStep = (item.steps || []).find(step =>
                         step.status === '待审批' && step.step_order === item.current_step
                     );
@@ -5338,7 +5330,6 @@
             // 审批中心左栏红点：当前角色实际可处理的审批和作业项
             const approvalsMenuCount = computed(() =>
                 pendingApprovalCount.value
-                + pendingReturnCount.value
                 + pendingDeliveryCount.value
                 + pendingRepairVehicles.value.length
             );
@@ -5600,6 +5591,11 @@
             }
             function approvalVehicleLabel(item) {
                 if (!item) return '未关联车辆';
+                if (item.ref_type === 'invoice') {
+                    return item.customer_name
+                        ? `${item.customer_name} / 合同${item.contract_id || '-'}`
+                        : `合同${item.contract_id || '-'}`;
+                }
                 const vin = (item.vin || '').trim();
                 const plate = (item.plate_number || '').trim();
                 if (vin && plate) return `${vin} / ${plate}`;
@@ -5686,6 +5682,10 @@
                 }[row.status] || row.status || '';
             }
             function currentApprovalStepLabel(item) {
+                if (item.ref_type === 'invoice' && item.delivery_status === '待开票'
+                    && currentUser.value && currentUser.value.role === '财务') {
+                    return '财务待处理: 开票';
+                }
                 if (item.ref_type === 'price_exception' && item.overall_status === '已完成' && currentUser.value && currentUser.value.role === '运营') {
                     return '运营待处理: 发起合同';
                 }
@@ -5697,6 +5697,11 @@
             }
             function isPendingApproval(item) {
                 if (!currentUser.value) return false;
+                if (currentUser.value.role === '财务'
+                    && item.ref_type === 'invoice'
+                    && item.delivery_status === '待开票') {
+                    return true;
+                }
                 const step = (item.steps || []).find(x => x.status === '待审批' && x.step_order === item.current_step);
                 if (!step) return false;
                 return currentUser.value.role === step.required_role;
@@ -5704,14 +5709,48 @@
             function approvalCardId(item) {
                 return `approval-card-${item.ref_type}-${item.ref_id}`;
             }
+            async function scrollToApprovalTarget(targetId) {
+                await nextTick();
+                const el = document.getElementById(targetId);
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
             async function focusApprovalItem(item) {
                 approvalFilter.value = item.ref_type;  // 切到对应标签，确保该项可见
                 currentPage.value = 'approvals';
                 await Promise.all([fetchApprovals(), fetchApprovalReminders()]);
-                nextTick(() => {
-                    const el = document.getElementById(approvalCardId(item));
-                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                });
+                await scrollToApprovalTarget(approvalCardId(item));
+            }
+            let navigatingToPendingApproval = false;
+            async function openNextPendingApproval() {
+                navigatingToPendingApproval = true;
+                currentPage.value = 'approvals';
+                try {
+                    await refreshApprovalCenter();
+                    const nextApproval = pendingApprovalItems.value[0];
+                    if (nextApproval) {
+                        approvalFilter.value = nextApproval.ref_type;
+                        const loaded = await fetchApprovals();
+                        if (!loaded) {
+                            ElementPlus.ElMessage.error('待处理审批加载失败，请稍后重试');
+                            return;
+                        }
+                        await scrollToApprovalTarget(approvalCardId(nextApproval));
+                        return;
+                    }
+                    if (pendingDeliveryContracts.value.length) {
+                        await scrollToApprovalTarget('pending-delivery-section');
+                        return;
+                    }
+                    if (pendingRepairVehicles.value.length) {
+                        await scrollToApprovalTarget('pending-repair-section');
+                        return;
+                    }
+                    approvalFilter.value = preferredApprovalFilter();
+                    await fetchApprovals();
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                } finally {
+                    navigatingToPendingApproval = false;
+                }
             }
             function openApprovalReminderCenter() {
                 if (missingGuidanceAlerts.value.length && currentUser.value && currentUser.value.role === '老板') {
@@ -5922,7 +5961,7 @@
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '开票失败');
                 ElementPlus.ElMessage.success(data.message || '发票已开具');
                 showIssueInvoiceDialog.value = false;
-                fetchInvoices();
+                await Promise.all([fetchInvoices(), fetchApprovals(), fetchApprovalReminders()]);
             }
             function onInvoiceFileUpload(res) {
                 if (res && res.success) {
@@ -5940,8 +5979,7 @@
                 const data = await res.json();
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '取消失败');
                 ElementPlus.ElMessage.success(data.message || '发票申请已取消');
-                fetchInvoices();
-                fetchApprovals();
+                await Promise.all([fetchInvoices(), fetchApprovals(), fetchApprovalReminders()]);
             }
             async function voidInvoice(row) {
                 const { value } = await ElementPlus.ElMessageBox.prompt('请输入作废原因', '发票作废', { confirmButtonText: '作废', cancelButtonText: '取消' }).catch(() => ({ value: null }));
@@ -5953,7 +5991,7 @@
                 const data = await res.json();
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '作废失败');
                 ElementPlus.ElMessage.success(data.message || '发票已作废');
-                fetchInvoices();
+                await Promise.all([fetchInvoices(), fetchApprovals(), fetchApprovalReminders()]);
             }
             async function redInvoice(row) {
                 const { value } = await ElementPlus.ElMessageBox.prompt('请输入红字发票号', '发票红冲', { confirmButtonText: '红冲', cancelButtonText: '取消' }).catch(() => ({ value: null }));
@@ -5965,7 +6003,7 @@
                 const data = await res.json();
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '红冲失败');
                 ElementPlus.ElMessage.success(data.message || '红冲完成');
-                fetchInvoices();
+                await Promise.all([fetchInvoices(), fetchApprovals(), fetchApprovalReminders()]);
             }
             function openTransferDialog(row) {
                 Object.assign(transferForm, { contract_id: row.contract_id || row.id, new_owner_name: row.customer_name || '', new_owner_id_card: '', transfer_date: todayString(), transfer_doc_path: '' });
@@ -6060,7 +6098,13 @@
             }
 
             // ===== Actions =====
-            function handleMenuSelect(key) { currentPage.value = key; }
+            async function handleMenuSelect(key) {
+                if (key === 'approvals' && menuActionCount('approvals')) {
+                    await openNextPendingApproval();
+                    return;
+                }
+                currentPage.value = key;
+            }
             function handlePageAction() {
                 if (currentPage.value === 'orders') { resetOrderForm(); showOrderDialog.value = true; }
                 if (currentPage.value === 'assets') openVehicleImport();

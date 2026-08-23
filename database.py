@@ -1514,6 +1514,8 @@ def seed_data():
     for role, pages in role_pages.items():
         for page in pages:
             c.execute("INSERT OR IGNORE INTO role_pages (role, page_key) VALUES (?, ?)", (role, page))
+    # 发票由财务在审批中心的“发票审批”处理，不保留独立导航入口。
+    c.execute("DELETE FROM role_pages WHERE role='财务' AND page_key='invoice'")
     for role, actions in role_actions.items():
         for action in actions:
             c.execute("INSERT OR IGNORE INTO role_actions (role, action_key) VALUES (?, ?)", (role, action))
