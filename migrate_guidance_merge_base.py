@@ -59,6 +59,10 @@ def strip_box_suffix(car_type):
             s = s[:-len(suffix)]
             tailgate_suffix = normalized
             break
+    if tailgate_suffix == '无尾板' and s.endswith('无'):
+        s = s[:-1]
+    elif tailgate_suffix == '有尾板' and s.endswith('有'):
+        s = s[:-1]
     for w in BOX_SUFFIX_WORDS:
         if s.endswith(w) and len(s) > len(w):
             s = s[:-len(w)]
@@ -72,6 +76,10 @@ def normalize_base_car_type(car_type):
         return ''
     if base.endswith(('有尾板', '无尾板')):
         return base
+    if base.endswith('有'):
+        return base[:-1] + '有尾板'
+    if base.endswith('无'):
+        return base[:-1] + '无尾板'
     return base + '无尾板'
 
 

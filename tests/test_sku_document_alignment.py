@@ -90,6 +90,45 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
         self.assertEqual(status, "启用")
         self.assertEqual(totals["total"], totals["unique_total"])
 
+    def test_sales_vehicle_list_classifies_legacy_electric_vehicle_and_seeds_its_capacity(self):
+        """历史导入车缺燃料形式时，销售端四维筛选仍应可识别为纯电。"""
+        legacy_vin = "LEGACYFILTER000001"
+        conn = database.get_db()
+        try:
+            conn.execute(
+                """
+                INSERT INTO vehicles
+                    (vin, plate_number, car_type, condition, status, box_type,
+                     battery_brand, battery_capacity)
+                VALUES (?, '陕筛134度', '二手车零米110kw快递版134度冷藏',
+                        '二手车', '在库', '冷藏', '宁德', '134度')
+                """,
+                (legacy_vin,),
+            )
+            conn.commit()
+            app_module.seed_data_dictionaries(conn)
+            dict_row = conn.execute(
+                """
+                SELECT value, energy_type
+                FROM data_dictionaries
+                WHERE category='battery_capacity' AND value='134度'
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+
+        self.assertIsNotNone(dict_row)
+        self.assertEqual(dict_row["energy_type"], "纯电")
+
+        self.login("sales")
+        response = self.client.get("/api/vehicles/list")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        row = next(item for item in response.get_json() if item["vin"] == legacy_vin)
+        self.assertEqual(row["condition"], "二手车")
+        self.assertEqual(row["box_type"], "冷藏")
+        self.assertEqual(row["battery_capacity"], "134度")
+        self.assertEqual(row["energy_type"], "纯电")
+
     def test_guidance_workbench_lists_complete_submodels_and_scoped_finance_plans(self):
         base_type = "解放J6F锡柴170"
         self.login("boss")

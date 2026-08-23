@@ -193,6 +193,74 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
         self.assertEqual(persisted["finance_bank_receipt_path"], "/uploads/lease-bank-receipt.pdf")
         self.assertEqual(order_vehicle_id > 0, True)
 
+    def test_approval_center_finance_confirm_persists_sales_order_receipt(self):
+        car_type = "审批中心财务确认车型"
+        self.login("boss")
+        guidance = self.client.post(
+            "/api/model-guidance-prices",
+            json={
+                "car_type": car_type,
+                "is_new": "新车",
+                "lease_deposit_guidance": 2000,
+                "box_standard_price": 3000,
+            },
+        )
+        self.assertEqual(guidance.status_code, 200, guidance.get_json())
+        _, vin = self.create_vehicle(car_type)
+        self.login("sales")
+        order = self.client.post(
+            "/api/sales-orders",
+            json={
+                "payment_date": "2026-08-22",
+                "customer_name": "审批中心财务客户",
+                "customer_phone": "13800000008",
+                "sales_mode": "租赁",
+                "vin": vin,
+                "car_type": car_type,
+                "vehicle_box_type": "厢货",
+                "lease_term": "3期",
+                "deposit_amount": 2000,
+                "vehicle_rent_amount": 3000,
+                "customer_screenshot_path": "/uploads/approval-center-payment.jpg",
+                "first_payment_received_amount": 5000,
+            },
+        )
+        self.assertEqual(order.status_code, 200, order.get_json())
+        order_id = order.get_json()["id"]
+        flow = self.db_row(
+            """
+            SELECT id FROM approval_flows
+            WHERE ref_type='sale_payment' AND ref_id=? AND status='待审批'
+            """,
+            (order_id,),
+        )
+        self.assertIsNotNone(flow)
+
+        self.login("fin")
+        approved = self.client.post(
+            f"/api/approvals/{flow['id']}/approve",
+            json={
+                "comment": "审批中心确认到账",
+                "bank_serial": "APPROVAL20260822",
+                "bank_receipt_path": "/uploads/approval-center-receipt.pdf",
+            },
+        )
+        self.assertEqual(approved.status_code, 200, approved.get_json())
+        order_row = self.db_row(
+            """
+            SELECT order_status, finance_bank_serial, finance_bank_receipt_path
+            FROM sales_orders WHERE id=?
+            """,
+            (order_id,),
+        )
+        self.assertEqual(order_row["order_status"], "已激活")
+        self.assertEqual(order_row["finance_bank_serial"], "APPROVAL20260822")
+        self.assertEqual(order_row["finance_bank_receipt_path"], "/uploads/approval-center-receipt.pdf")
+        self.assertEqual(
+            self.db_value("SELECT status FROM approval_flows WHERE id=?", (flow["id"],)),
+            "已通过",
+        )
+
     def test_manual_contract_requires_initial_payment_before_delivery(self):
         vehicle_id, _ = self.create_vehicle("八月手工首次付款车型")
         self.login("ops")
@@ -313,6 +381,7 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
         self.assertEqual(contract["loan_periods"], 36)
         self.assertEqual(contract["rent"], 3600)
         self.assertEqual(contract["down_payment"], 18000)
+
         self.assertEqual(
             self.db_value(
                 "SELECT COUNT(*) FROM repayments WHERE contract_id=? AND period>=1",
@@ -356,6 +425,81 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
         self.assertEqual(uploaded_contract["loan_periods"], 36)
         self.assertEqual(uploaded_contract["rent"], 3600)
         self.assertEqual(uploaded_contract["down_payment"], 18000)
+
+    def test_finance_plan_only_vehicle_can_submit_rent_to_buy_order(self):
+        car_type = "八月仅方案车型"
+        self.login("boss")
+        plan_response = self.client.post(
+            "/api/finance-plans",
+            json={
+                "car_type": car_type,
+                "plan_name": "八月冷藏方案",
+                "down_payment": 18000,
+                "period_price": 3600,
+                "periods": 36,
+                "condition": "新车",
+                "box_type": "冷藏",
+            },
+        )
+        self.assertEqual(plan_response.status_code, 200, plan_response.get_json())
+        plan_id = plan_response.get_json()["id"]
+
+        vehicle_id, vin = self.create_vehicle(car_type)
+        conn = database.get_db()
+        try:
+            vehicle = {
+                "car_type": car_type,
+                "condition": "新车",
+                "box_type": "冷藏",
+                "vehicle_box_type": "冷藏",
+            }
+            validation_status, validation_message = app_module.validate_vehicle_dict(
+                conn, car_type, vehicle
+            )
+            self.assertEqual(validation_status, "warning")
+            self.assertIn("仅支持按已维护的以租代售方案报单", validation_message)
+            conn.execute(
+                """UPDATE vehicles
+                   SET box_type='冷藏', vehicle_box_type='冷藏',
+                       validation_status=?, validation_message=?
+                   WHERE id=?""",
+                (validation_status, validation_message, vehicle_id),
+            )
+            no_plan_status, _ = app_module.validate_vehicle_dict(
+                conn,
+                "八月无方案车型",
+                {
+                    "car_type": "八月无方案车型",
+                    "condition": "新车",
+                    "box_type": "冷藏",
+                    "vehicle_box_type": "冷藏",
+                },
+            )
+            self.assertEqual(no_plan_status, "invalid")
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login("sales")
+        order_response = self.client.post(
+            "/api/sales-orders",
+            json={
+                "payment_date": "2026-08-22",
+                "customer_name": "仅方案以租代售客户",
+                "customer_phone": "13800000023",
+                "sales_mode": "以租代售",
+                "vin": vin,
+                "car_type": car_type,
+                "finance_plan_id": plan_id,
+                "vehicle_box_type": "冷藏",
+                "lease_term": "36期",
+                "deposit_amount": 18000,
+                "vehicle_rent_amount": 3600,
+                "customer_screenshot_path": "/uploads/plan-only-first-payment.jpg",
+                "first_payment_received_amount": 18000,
+            },
+        )
+        self.assertEqual(order_response.status_code, 200, order_response.get_json())
 
     def test_t3_due_soon_reminder_text_generated(self):
         """流程图 4.1：T-3 还款日前 3 天，系统生成黄色预警提醒文案（幂等）。"""
@@ -481,15 +625,35 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
         return_id = created.get_json()["id"]
 
         self.login("fleet")
-        fleet = self.client.post(
+        empty_fleet = self.client.post(
             f"/api/return-inspections/{return_id}/fleet",
             json={"needs_repair": True, "repair_reason": "轮胎磨损", "tool_triangle": True},
         )
+        self.assertEqual(empty_fleet.status_code, 400, empty_fleet.get_json())
+        self.assertIn("公里数记录", empty_fleet.get_json()["message"])
+        fleet = self.client.post(
+            f"/api/return-inspections/{return_id}/fleet",
+            json={
+                "needs_repair": True, "repair_reason": "轮胎磨损", "tool_triangle": True,
+                "mileage": "30000", "body_tire_clean": "已清理", "accident_info": "无出险",
+                "insurance_surcharge": "无", "violation_info": "无违章", "etc_info": "已注销",
+                "maintenance_info": "正常",
+            },
+        )
         self.assertEqual(fleet.status_code, 200, fleet.get_json())
+        queued_returns = self.client.get("/api/return-inspections")
+        self.assertEqual(queued_returns.status_code, 200, queued_returns.get_json())
+        queued_row = next(row for row in queued_returns.get_json() if row["id"] == return_id)
+        self.assertEqual(queued_row["vehicle_status"], "退车中")
+        self.assertEqual(queued_row["repair_queue_status"], "待运营填写")
+        self.assertFalse(queued_row["repair_queue_actionable"])
         self.login("ops")
         operator = self.client.post(
             f"/api/return-inspections/{return_id}/operator",
-            json={"deposit_paid": 2000, "total_deduction": 500, "actual_refund": 1500},
+            json={
+                "rent_late_fee": 0, "return_late_fee": 0, "deposit_rent_receivable": 0,
+                "deposit_paid": 2000, "total_deduction": 500, "actual_refund": 1500,
+            },
         )
         self.assertEqual(operator.status_code, 200, operator.get_json())
         self.login("fin")
@@ -526,7 +690,12 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
         self.assertEqual(
             self.client.post(
                 f"/api/return-inspections/{return_id}/fleet",
-                json={"needs_repair": True, "repair_reason": "轮胎磨损"},
+                json={
+                    "needs_repair": True, "repair_reason": "轮胎磨损",
+                    "mileage": "30000", "body_tire_clean": "已清理", "accident_info": "无出险",
+                    "insurance_surcharge": "无", "violation_info": "无违章", "etc_info": "已注销",
+                    "maintenance_info": "正常",
+                },
             ).status_code,
             200,
         )
@@ -534,7 +703,10 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
         self.assertEqual(
             self.client.post(
                 f"/api/return-inspections/{return_id}/operator",
-                json={"deposit_paid": 2000, "total_deduction": 500, "actual_refund": 1500},
+                json={
+                    "rent_late_fee": 0, "return_late_fee": 0, "deposit_rent_receivable": 0,
+                    "deposit_paid": 2000, "total_deduction": 500, "actual_refund": 1500,
+                },
             ).status_code,
             200,
         )
@@ -562,9 +734,22 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
             "待维修",
         )
         self.assertEqual(
+            self.db_value("SELECT condition FROM vehicles WHERE id=?", (vehicle_id,)),
+            "二手车",
+        )
+        self.assertEqual(
             self.db_value("SELECT status FROM return_inspections WHERE id=?", (return_id,)),
             "已完成",
         )
+        history = self.client.get("/api/completion-history?source_type=rental_return")
+        self.assertEqual(history.status_code, 200, history.get_json())
+        record = next((row for row in history.get_json() if row["source_id"] == return_id), None)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["completion_type"], "租赁退车入库")
+        self.assertIn("二手车", record["completion_result"])
+        self.assertEqual(record["amount_value"], 1500)
+        self.assertEqual(record["bank_serial"], "REFUND202608001")
+        self.assertEqual(record["handled_by"], "张财务")
 
 
 if __name__ == "__main__":

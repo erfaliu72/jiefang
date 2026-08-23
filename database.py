@@ -838,6 +838,8 @@ def init_db():
         idempotency_key TEXT UNIQUE,
         created_by TEXT,
         created_at TEXT DEFAULT (datetime('now','localtime')),
+        completed_by TEXT,
+        completed_at TEXT,
         FOREIGN KEY (contract_id) REFERENCES contracts (id)
     )
     ''')
@@ -1286,12 +1288,48 @@ def init_db():
         ("return_inspections", "resubmitted_by", "TEXT"),
         ("return_inspections", "resubmitted_at", "TEXT"),
         ("return_inspections", "resubmit_note", "TEXT"),
+        # === 退车维修完工留痕 ===
+        ("return_inspections", "repair_completed_by", "TEXT"),
+        ("return_inspections", "repair_completed_at", "TEXT"),
+        ("return_inspections", "repair_completion_note", "TEXT"),
+        ("return_inspections", "repair_cost", "REAL DEFAULT 0"),
+        ("ownership_transfers", "completed_by", "TEXT"),
+        ("ownership_transfers", "completed_at", "TEXT"),
     ]
     for table, col, col_type in safe_alter_columns:
         try:
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
         except Exception:
             pass
+
+    # 历史退车单此前只把车辆状态改回在库/待维修，遗漏了成色变更。
+    # 租赁车辆完成退车后再次入库一律按二手车管理；兼容旧库中的“已入库”状态。
+    c.execute("""
+        UPDATE vehicles
+        SET condition='二手车'
+        WHERE id IN (
+            SELECT DISTINCT vehicle_id
+            FROM return_inspections
+            WHERE vehicle_id IS NOT NULL
+              AND status IN ('已完成', '已入库')
+        )
+          AND COALESCE(condition, '') <> '二手车'
+    """)
+
+    # 旧流程在车管验车阶段就把需维修车辆改为“待维修”，导致退车尚未结算
+    # 就从资产视图中脱离退车流程。未完结退车单应保持“退车中”。
+    c.execute("""
+        UPDATE vehicles
+        SET status='退车中'
+        WHERE status='待维修'
+          AND id IN (
+              SELECT DISTINCT vehicle_id
+              FROM return_inspections
+              WHERE vehicle_id IS NOT NULL
+                AND needs_repair=1
+                AND status NOT IN ('已完成', '已入库')
+          )
+    """)
 
     # 指导价 upsert 以车型和成色为自然键。旧库可能有重复/空成色数据，先归一化并去重。
     c.execute("""
@@ -1413,11 +1451,11 @@ def seed_data():
     conn.commit()
 
     role_pages = {
-        '老板': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'risk', 'profit', 'settings'],
-        '运营': ['dashboard', 'orders', 'assets', 'approvals', 'reconciliation', 'risk', 'invoice'],
-        '财务': ['dashboard', 'orders', 'assets', 'approvals', 'bills', 'reconciliation', 'profit'],
-        '车管': ['dashboard', 'assets', 'approvals'],
-        '销售': ['dashboard', 'orders', 'assets', 'approvals', 'risk'],
+        '老板': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'reconciliation', 'risk', 'profit', 'settings'],
+        '运营': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'reconciliation', 'risk', 'invoice'],
+        '财务': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'reconciliation', 'profit'],
+        '车管': ['dashboard', 'assets', 'completion_history', 'approvals'],
+        '销售': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'risk'],
     }
     role_actions = {
         '老板': ['*'],

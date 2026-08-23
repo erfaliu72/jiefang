@@ -41,6 +41,20 @@ class TestStripBoxSuffix(unittest.TestCase):
         self.assertEqual(normalize_base_car_type('新车解放J6F锡柴150冷藏'), '解放J6F锡柴150无尾板')
         self.assertEqual(normalize_base_car_type('二手车解放J6F全柴190LNG高栏'), '解放J6F全柴190LNG无尾板')
 
+    def test_tailgate_suffix_and_legacy_duplicate_are_canonicalized(self):
+        self.assertEqual(
+            normalize_base_car_type('解放虎6G宁德140度无尾板冷藏'),
+            '解放虎6G宁德140度无尾板'
+        )
+        self.assertEqual(
+            normalize_base_car_type('解放虎6G宁德140度无无尾板'),
+            '解放虎6G宁德140度无尾板'
+        )
+        self.assertEqual(
+            normalize_base_car_type('解放虎6G宁德140度有有尾板'),
+            '解放虎6G宁德140度有尾板'
+        )
+
     def test_empty(self):
         self.assertEqual(strip_box_suffix(''), '')
         self.assertEqual(strip_box_suffix(None), '')
