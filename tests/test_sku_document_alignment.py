@@ -129,6 +129,80 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
         self.assertEqual(row["battery_capacity"], "134度")
         self.assertEqual(row["energy_type"], "纯电")
 
+    def test_missing_guidance_is_warning_and_sales_can_submit_for_owner_approval(self):
+        """新导入库存车缺指导价时仍可通过报单流进入老板审批。"""
+        vin = "GUIDANCEWARN00001"
+        car_type = "解放虎6G宁德140度无尾板"
+        conn = database.get_db()
+        try:
+            conn.execute(
+                """
+                INSERT INTO vehicles
+                    (vin, plate_number, car_type, condition, status, box_type, tailgate,
+                     brand, product_series, fuel_form, battery_brand, battery_capacity,
+                     validation_status, validation_message)
+                VALUES (?, '陕A指导价', ?, '新车', '在库', '冷藏', '无',
+                        '解放', '虎6G', '纯电', '宁德', '140度',
+                        'invalid', '历史校验状态')
+                """,
+                (vin, car_type),
+            )
+            app_module.ensure_sku_for_vehicle(
+                conn,
+                {
+                    "car_type": car_type,
+                    "condition": "新车",
+                    "box_type": "冷藏",
+                    "tailgate": "无",
+                },
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login("fleet")
+        response = self.client.post("/api/vehicles/revalidate-all")
+        self.assertEqual(response.status_code, 200, response.get_json())
+
+        row = self.db_row(
+            "SELECT validation_status, validation_message FROM vehicles WHERE vin=?",
+            (vin,),
+        )
+        self.assertEqual(row["validation_status"], "warning")
+        self.assertIn("未维护租赁指导价", row["validation_message"])
+
+        sku = next(
+            item for item in self.client.get("/api/skus/inventory").get_json()
+            if item["car_type"] == car_type and item["box_type"] == "冷藏"
+        )
+        sku_vehicles = self.client.get(f"/api/skus/{sku['sku_id']}/vehicles").get_json()
+        self.assertEqual([item["vin"] for item in sku_vehicles], [vin])
+        self.assertEqual(sku_vehicles[0]["validation_status"], "warning")
+
+        self.login("sales")
+        response = self.client.post(
+            "/api/sales-orders",
+            json={
+                "vin": vin,
+                "sales_mode": "经营租赁",
+                "customer_name": "指导价待审批客户",
+                "customer_phone": "13800138000",
+                "customer_screenshot_path": "/uploads/initial-payment.png",
+                "deposit_amount": 0,
+                "vehicle_rent_amount": 0,
+                "first_payment_received_amount": 0,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["success"])
+
+        order = self.db_row(
+            "SELECT order_status, order_exception_reason FROM sales_orders WHERE vin=?",
+            (vin,),
+        )
+        self.assertEqual(order["order_status"], "待老板审批")
+        self.assertIn("缺少租赁指导价", order["order_exception_reason"])
+
     def test_guidance_workbench_lists_complete_submodels_and_scoped_finance_plans(self):
         base_type = "解放J6F锡柴170"
         self.login("boss")
@@ -266,7 +340,7 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
         )
         self.assertEqual(guidance.status_code, 200, guidance.get_json())
 
-        self.login("fleet")
+        self.login("ops")
         created = self.client.post(
             "/api/vehicles",
             json={
@@ -322,7 +396,7 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
         )
         self.assertEqual(guidance.status_code, 200, guidance.get_json())
 
-        self.login("fleet")
+        self.login("ops")
         created = self.client.post(
             "/api/vehicles",
             json={
@@ -354,7 +428,10 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
                 "lease_term": "12期",
                 "deposit_amount": 2000,
                 "vehicle_rent_amount": 3000,
-                "customer_screenshot_path": "/uploads/sku-first-payment.jpg",
+                "customer_screenshot_path": (
+                    "/uploads/sku-first-payment.jpg, /uploads/sku-second-payment.pdf, "
+                    "/uploads/sku-first-payment.jpg"
+                ),
                 "first_payment_received_amount": 5000,
             },
         )
@@ -362,7 +439,8 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
 
         order = self.db_row(
             """
-            SELECT car_type, vehicle_box_type, tail_plate, order_status, price_exception_reason
+            SELECT car_type, vehicle_box_type, tail_plate, order_status, price_exception_reason,
+                   customer_screenshot_path
             FROM sales_orders WHERE id=?
             """,
             (order_response.get_json()["id"],),
@@ -372,6 +450,43 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
         self.assertEqual(order["tail_plate"], "有")
         self.assertEqual(order["order_status"], "待老板审批")
         self.assertIn("指导月供 ¥3800.0", order["price_exception_reason"])
+        self.assertEqual(
+            order["customer_screenshot_path"],
+            "/uploads/sku-first-payment.jpg,/uploads/sku-second-payment.pdf",
+        )
+
+    def test_sales_order_draft_keeps_multiple_payment_vouchers_on_update(self):
+        self.login("sales")
+        created = self.client.post(
+            "/api/sales-orders",
+            json={
+                "save_as_draft": True,
+                "sales_mode": "租赁",
+                "customer_screenshot_path": "/uploads/draft-first-payment.jpg",
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.get_json())
+
+        order_id = created.get_json()["id"]
+        updated = self.client.put(
+            f"/api/sales-orders/{order_id}",
+            json={
+                "customer_screenshot_path": (
+                    "/uploads/draft-first-payment.jpg, /uploads/draft-second-payment.png, "
+                    "/uploads/draft-first-payment.jpg"
+                ),
+            },
+        )
+        self.assertEqual(updated.status_code, 200, updated.get_json())
+
+        order = self.db_row(
+            "SELECT customer_screenshot_path FROM sales_orders WHERE id=?",
+            (order_id,),
+        )
+        self.assertEqual(
+            order["customer_screenshot_path"],
+            "/uploads/draft-first-payment.jpg,/uploads/draft-second-payment.png",
+        )
 
     def test_base_model_fields_follow_energy_type_and_exclude_child_dimensions(self):
         electric = {
@@ -499,7 +614,7 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
         self.assertFalse(any(row["category"] in hidden_categories for row in rows))
 
     def test_manual_vehicle_rejects_cross_energy_base_fields(self):
-        self.login("fleet")
+        self.login("ops")
         pure_electric_with_fuel_fields = self.client.post(
             "/api/vehicles",
             json={

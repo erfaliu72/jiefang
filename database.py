@@ -31,7 +31,31 @@ if USE_MYSQL:
         re.IGNORECASE
     )
 
+    def _quote_mysql_identifiers(sql):
+        """Quote MySQL reserved identifiers used by the SQLite-first schema."""
+        return re.sub(
+            r"(?<![`'\w])condition(?![`'\w])",
+            '`condition`',
+            sql,
+            flags=re.IGNORECASE,
+        )
+
     def _translate_sql(sql, has_params):
+        sql = _quote_mysql_identifiers(sql)
+        # SQLite uses || for concatenation; MySQL treats it as logical OR unless a
+        # server mode changes it. Translate the two production SQL patterns only.
+        sql = re.sub(
+            r"'sale_payment_'\s*\|\|\s*so\.id\s*\|\|\s*'_seed'",
+            "CONCAT('sale_payment_', so.id, '_seed')",
+            sql,
+            flags=re.IGNORECASE,
+        )
+        sql = re.sub(
+            r"remark\s*\|\|\s*'；'\s*\|\|\s*\?",
+            "CONCAT(remark, '；', ?)",
+            sql,
+            flags=re.IGNORECASE,
+        )
         # datetime('now','localtime') -> NOW()
         sql = _RE_DATETIME_NOW.sub('NOW()', sql)
         sql = _RE_DATETIME_NOW2.sub('NOW()', sql)
@@ -58,15 +82,24 @@ if USE_MYSQL:
         else:
             # 无参数时 pymysql 不做格式化，% 原样保留
             sql = sql.replace('?', '%s')
-        # SQLite 标量 MIN(a,b) -> MySQL LEAST(a,b)。匹配两参数模式避免误伤聚合 MIN(col)。
+        # SQLite 标量 MIN(a,b) / MAX(a,b) -> MySQL LEAST(a,b) / GREATEST(a,b)。
+        # 匹配两参数模式，避免误伤聚合 MIN(col) / MAX(col)。
         if has_params:
             sql = re.sub(r'\bMIN\s*\(([^,)]+)\s*,\s*([^,)]+)\s*\)', r'LEAST(\1, \2)', sql, flags=re.IGNORECASE)
+            sql = re.sub(
+                r'\bMAX\s*\(\s*(COALESCE\s*\([^()]*\))\s*,\s*([^()]+)\s*\)',
+                r'GREATEST(\1, \2)',
+                sql,
+                flags=re.IGNORECASE,
+            )
+            sql = re.sub(r'\bMAX\s*\(([^,)]+)\s*,\s*([^,)]+)\s*\)', r'GREATEST(\1, \2)', sql, flags=re.IGNORECASE)
         return sql
 
     class _Cursor:
         """包装 pymysql DictCursor，提供与 sqlite3 一致的接口。"""
-        def __init__(self, raw):
+        def __init__(self, raw, connection):
             self._raw = raw
+            self.connection = connection
 
         def execute(self, sql, params=None):
             sql2 = _translate_sql(sql, params is not None and (not hasattr(params, '__len__') or len(params) > 0))
@@ -75,6 +108,15 @@ if USE_MYSQL:
             else:
                 self._raw.execute(sql2, params)
             return self  # 返回 self 以支持链式调用：c.execute(sql).fetchone()
+
+        def executemany(self, sql, seq_of_params):
+            """批量执行时保持 execute 的 SQL 方言与占位符兼容行为。"""
+            params_list = list(seq_of_params)
+            if not params_list:
+                return self
+            sql2 = _translate_sql(sql, True)
+            self._raw.executemany(sql2, params_list)
+            return self
 
         def fetchone(self):
             return self._raw.fetchone()
@@ -99,7 +141,7 @@ if USE_MYSQL:
             self._raw = raw
 
         def cursor(self):
-            return _Cursor(self._raw.cursor())
+            return _Cursor(self._raw.cursor(), self)
 
         def execute(self, sql, params=None):
             cur = self.cursor()
@@ -134,7 +176,7 @@ def _ddl(sql):
     """建表 DDL：SQLite 原样执行；MySQL 时翻译方言。"""
     if not USE_MYSQL:
         return sql
-    s = sql
+    s = _quote_mysql_identifiers(sql)
     # 主键自增
     s = re.sub(r'INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT', 'BIGINT AUTO_INCREMENT PRIMARY KEY', s, flags=re.IGNORECASE)
     # 唯一文本列需指定长度（TEXT 不能做唯一键）
@@ -144,18 +186,56 @@ def _ddl(sql):
                'DATETIME DEFAULT CURRENT_TIMESTAMP', s, flags=re.IGNORECASE)
     # 其余裸的 DEFAULT (datetime(...)) -> DEFAULT CURRENT_TIMESTAMP
     s = re.sub(r"DEFAULT\s*\(\s*datetime\(\s*'now'\s*,\s*'localtime'\s*\)\s*\)", 'DEFAULT CURRENT_TIMESTAMP', s, flags=re.IGNORECASE)
-    # MySQL 的 TEXT 列不能有默认值：TEXT DEFAULT 'x' -> VARCHAR(255) DEFAULT 'x'
-    s = re.sub(r"\bTEXT\s+DEFAULT\b", 'VARCHAR(255) DEFAULT', s, flags=re.IGNORECASE)
     # 进入索引/唯一约束的 TEXT 列必须有长度 -> VARCHAR(191)
     _indexed_cols = ['role', 'page_key', 'action_key', 'resource_key', 'field_key',
                      'job', 'run_date', 'status', 'customer_phone', 'customer_name',
-                     'waiver_kind', 'accrued_date', 'car_type', 'is_new']
+                     'waiver_kind', 'accrued_date', 'car_type', 'is_new', 'condition',
+                     'box_type', 'tailgate', 'category', 'value', 'energy_type',
+                     'legacy_source', 'legacy_contract_key', 'migration_status',
+                     'assignment_role', 'batch_code', 'due_date']
     for col in _indexed_cols:
         s = re.sub(r'\b(' + col + r')\s+TEXT\b', r'\1 VARCHAR(191)', s, flags=re.IGNORECASE)
+    # MySQL 的 TEXT 列不能有默认值：TEXT DEFAULT 'x' -> VARCHAR(255) DEFAULT 'x'
+    s = re.sub(r"\bTEXT\s+DEFAULT\b", 'VARCHAR(255) DEFAULT', s, flags=re.IGNORECASE)
     # 类型映射：REAL -> DOUBLE；剩余 INTEGER -> BIGINT；TEXT 保留
     s = re.sub(r'\bREAL\b', 'DOUBLE', s, flags=re.IGNORECASE)
     s = re.sub(r'\bINTEGER\b', 'BIGINT', s, flags=re.IGNORECASE)
     return s
+
+
+def drop_legacy_model_guidance_price_unique_indexes(cursor):
+    """Remove the pre-2026-08-07 one-column unique key from MySQL deployments."""
+    if not USE_MYSQL:
+        return []
+
+    rows = cursor.execute("SHOW INDEX FROM model_guidance_prices").fetchall()
+    indexes = {}
+    for row in rows:
+        key_name = row["Key_name"]
+        indexes.setdefault(key_name, {
+            "non_unique": row["Non_unique"],
+            "columns": [],
+        })["columns"].append((
+            int(row["Seq_in_index"]),
+            row["Column_name"],
+        ))
+
+    dropped = []
+    for key_name, index in indexes.items():
+        columns = [
+            column_name
+            for _, column_name in sorted(index["columns"], key=lambda item: item[0])
+        ]
+        is_unique = str(index["non_unique"]) == "0"
+        if key_name == "PRIMARY" or not is_unique or columns != ["car_type"]:
+            continue
+        quoted_name = key_name.replace("`", "``")
+        cursor.execute(
+            f"DROP INDEX `{quoted_name}` ON `model_guidance_prices`"
+        )
+        dropped.append(key_name)
+    return dropped
+
 
 # ================================================================
 #  安全建表 — 仅在表不存在时创建，不会删除已有数据
@@ -174,6 +254,8 @@ def init_db():
             self._c = cur
         def execute(self, sql, params=None):
             s = sql
+            if USE_MYSQL:
+                s = _quote_mysql_identifiers(s)
             if 'CREATE TABLE' in s.upper() or 'ALTER TABLE' in s.upper():
                 s = _ddl(s)
             if USE_MYSQL and re.search(r'CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS', s, re.IGNORECASE):
@@ -188,8 +270,16 @@ def init_db():
                     return self._c.execute(s)
                 return self._c.execute(s, params)
             except Exception as e:
-                # MySQL 重复建索引/加列会报错，建表用 IF NOT EXISTS 不会
-                if USE_MYSQL and ('CREATE INDEX' in s.upper() or 'ALTER TABLE' in s.upper()):
+                # MySQL 无 IF NOT EXISTS 的索引/列需要忽略真正的重复错误；
+                # 其他 DDL 错误必须暴露，避免迁移在半途静默中断。
+                error_code = e.args[0] if getattr(e, 'args', None) else None
+                if USE_MYSQL and error_code == 1061 and re.search(
+                    r'CREATE\s+(?:UNIQUE\s+)?INDEX\b', s, re.IGNORECASE
+                ):
+                    return None
+                if USE_MYSQL and error_code == 1060 and re.search(
+                    r'ALTER\s+TABLE\b.*\bADD\s+COLUMN\b', s, re.IGNORECASE | re.DOTALL
+                ):
                     return None
                 raise
         def fetchone(self): return self._c.fetchone()
@@ -381,6 +471,10 @@ def init_db():
         deposit_status TEXT DEFAULT '待收',
         delivery_status TEXT DEFAULT '待出库',
         delivery_date TEXT,
+        actual_delivery_date TEXT,
+        billing_start_date TEXT,
+        billing_cycle TEXT DEFAULT '按月',
+        rental_days INTEGER DEFAULT 0,
         delivery_photo_path TEXT,
         delivery_document_path TEXT,
         paid_principal REAL DEFAULT 0,
@@ -395,6 +489,7 @@ def init_db():
         plan_compare_summary TEXT,
         expected_profit_floor REAL DEFAULT 0,
         expected_profit_ceiling REAL,
+        contract_number TEXT,
         contract_file TEXT,
         remark TEXT,
         loan_remark TEXT,
@@ -585,6 +680,10 @@ def init_db():
         remark TEXT,
         evidence_path TEXT,
         promised_repay_date TEXT,
+        contact_name TEXT,
+        contact_method TEXT,
+        contacted_at TEXT,
+        next_contact_date TEXT,
         completed_at TEXT,
         closed_by TEXT,
         created_at TEXT DEFAULT (datetime('now','localtime')),
@@ -652,6 +751,12 @@ def init_db():
         -- 事故
         accident_info TEXT,
         insurance_surcharge TEXT,
+        appearance_photos TEXT,
+        mileage_photos TEXT,
+        tools_photos TEXT,
+        repair_appearance_photos TEXT,
+        repair_mileage_photos TEXT,
+        repair_tools_photos TEXT,
         -- 违章
         violation_info TEXT,
         -- ETC
@@ -665,6 +770,8 @@ def init_db():
         deposit_paid REAL DEFAULT 0,
         total_deduction REAL DEFAULT 0,
         actual_refund REAL DEFAULT 0,
+        prorated_rent_amount REAL DEFAULT 0,
+        proration_detail TEXT,
         -- 备注
         remark TEXT,
         -- 流程状态
@@ -774,6 +881,14 @@ def init_db():
         sales_applied_at TEXT,
         boss_approved_by TEXT,
         boss_approved_at TEXT,
+        approved_waive_amount REAL DEFAULT 0,
+        bad_debt_amount REAL DEFAULT 0,
+        carryover_remaining REAL DEFAULT 0,
+        carryover_start_period INTEGER,
+        deposit_deduction REAL DEFAULT 0,
+        operations_note TEXT,
+        operations_filled_by TEXT,
+        operations_filled_at TEXT,
         finance_reviewed_by TEXT,
         finance_reviewed_at TEXT,
         revoke_reason TEXT,
@@ -784,6 +899,77 @@ def init_db():
     c.execute('CREATE INDEX IF NOT EXISTS idx_waivers_contract ON waivers(contract_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_waivers_status ON waivers(status)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_waivers_contract_kind_status ON waivers(contract_id, waiver_kind, status)')
+
+    # ====== 续租申请（原合同到期前申请，车辆不回库，账单连续生成）======
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS renewal_applications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        original_contract_id INTEGER NOT NULL,
+        renewal_contract_id INTEGER,
+        vehicle_id INTEGER NOT NULL,
+        customer_id INTEGER,
+        new_start_date TEXT NOT NULL,
+        new_end_date TEXT NOT NULL,
+        billing_cycle TEXT DEFAULT '按月',
+        loan_periods INTEGER DEFAULT 0,
+        monthly_rent REAL DEFAULT 0,
+        deposit_required REAL DEFAULT 0,
+        deposit_balance REAL DEFAULT 0,
+        deposit_topup_amount REAL DEFAULT 0,
+        deposit_topup_confirmed INTEGER DEFAULT 0,
+        status TEXT DEFAULT '待老板审批',
+        application_note TEXT,
+        contract_file TEXT,
+        contract_number TEXT,
+        requested_by TEXT,
+        requested_at TEXT,
+        boss_approved_by TEXT,
+        boss_approved_at TEXT,
+        rejected_by TEXT,
+        rejected_at TEXT,
+        reject_reason TEXT,
+        operations_filled_by TEXT,
+        operations_filled_at TEXT,
+        activated_at TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        FOREIGN KEY (original_contract_id) REFERENCES contracts (id),
+        FOREIGN KEY (renewal_contract_id) REFERENCES contracts (id),
+        FOREIGN KEY (vehicle_id) REFERENCES vehicles (id),
+        FOREIGN KEY (customer_id) REFERENCES customers (id)
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_renewal_original_contract ON renewal_applications(original_contract_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_renewal_vehicle_status ON renewal_applications(vehicle_id, status)')
+
+    # ====== 车辆整备库（与退车维修单联动）======
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS refurbishment_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        vehicle_id INTEGER NOT NULL,
+        return_inspection_id INTEGER,
+        status TEXT DEFAULT '待整备',
+        source_status TEXT,
+        available_for TEXT DEFAULT '可租/可售',
+        condition TEXT DEFAULT '二手车',
+        repair_reason TEXT,
+        repair_note TEXT,
+        completion_note TEXT,
+        appearance_photos TEXT,
+        mileage_photos TEXT,
+        tools_photos TEXT,
+        cost REAL DEFAULT 0,
+        created_by TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        started_by TEXT,
+        started_at TEXT,
+        completed_by TEXT,
+        completed_at TEXT,
+        FOREIGN KEY (vehicle_id) REFERENCES vehicles (id),
+        FOREIGN KEY (return_inspection_id) REFERENCES return_inspections (id)
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_refurbishment_vehicle ON refurbishment_records(vehicle_id, status)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_refurbishment_return ON refurbishment_records(return_inspection_id)')
 
     # ====== 滞纳金每日计提台账 (J1) ======
     c.execute('''
@@ -874,6 +1060,7 @@ def init_db():
         invoice_entity_name TEXT,
         invoice_entity_tax_no TEXT,
         invoice_no TEXT,
+        invoice_date TEXT,
         invoiced_at TEXT,
         invoice_file_path TEXT,
         status TEXT DEFAULT '待开票',
@@ -980,6 +1167,13 @@ def init_db():
         bank_name TEXT,
         bank_card_no TEXT,
         remark TEXT,
+        cancellation_reason TEXT,
+        previous_order_status TEXT,
+        boss_approved_by TEXT,
+        boss_approved_at TEXT,
+        rejected_by TEXT,
+        rejected_at TEXT,
+        reject_reason TEXT,
         created_at TEXT DEFAULT (datetime('now','localtime'))
     )
     ''')
@@ -1001,6 +1195,13 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now','localtime'))
     )
     ''')
+    if USE_MYSQL:
+        c.execute('''
+            ALTER TABLE data_dictionaries
+            MODIFY COLUMN category VARCHAR(191) NOT NULL,
+            MODIFY COLUMN value VARCHAR(191) NOT NULL,
+            MODIFY COLUMN energy_type VARCHAR(191)
+        ''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_data_dictionaries_cat ON data_dictionaries(category, status)')
 
     # ====== SKU 主表（SKU 改造：基准车型+成色+厢型+尾板 组合索引，用于库存聚合与销售筛选）======
@@ -1018,6 +1219,14 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now','localtime'))
     )
     ''')
+    if USE_MYSQL:
+        c.execute('''
+            ALTER TABLE skus
+            MODIFY COLUMN car_type VARCHAR(191) NOT NULL,
+            MODIFY COLUMN `condition` VARCHAR(191) DEFAULT '新车',
+            MODIFY COLUMN box_type VARCHAR(191),
+            MODIFY COLUMN tailgate VARCHAR(191) DEFAULT '无'
+        ''')
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_skus_comb ON skus(car_type, condition, box_type, tailgate)')
 
     # ====== 合同多车桥表（合同 → 多辆 VIN，contracts.vehicle_id 保留主车）======
@@ -1032,6 +1241,129 @@ def init_db():
     ''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_contract_vehicles_contract ON contract_vehicles(contract_id)')
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_vehicles_uniq ON contract_vehicles(contract_id, vehicle_id)')
+
+    # ====== 历史履约迁移：原始台账、角色归属与外部融资还款独立留痕 ======
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS legacy_import_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_code TEXT UNIQUE NOT NULL,
+        batch_name TEXT NOT NULL,
+        source_file_name TEXT,
+        source_file_path TEXT,
+        cutover_date TEXT NOT NULL,
+        status TEXT DEFAULT '已完成',
+        total_count INTEGER DEFAULT 0,
+        imported_count INTEGER DEFAULT 0,
+        skipped_count INTEGER DEFAULT 0,
+        summary_json TEXT,
+        created_by TEXT,
+        confirmed_by TEXT,
+        confirmed_at TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_legacy_batches_status ON legacy_import_batches(status)')
+
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS legacy_contract_migrations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id INTEGER NOT NULL,
+        batch_id INTEGER NOT NULL,
+        legacy_source TEXT NOT NULL,
+        legacy_sheet TEXT,
+        legacy_row_number INTEGER,
+        legacy_contract_key TEXT NOT NULL,
+        original_contract_number TEXT,
+        cutover_date TEXT NOT NULL,
+        late_fee_start_date TEXT NOT NULL,
+        migration_status TEXT DEFAULT '已导入',
+        raw_json TEXT,
+        created_by TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        UNIQUE(legacy_source, legacy_contract_key),
+        FOREIGN KEY (contract_id) REFERENCES contracts (id),
+        FOREIGN KEY (batch_id) REFERENCES legacy_import_batches (id)
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_legacy_migration_contract ON legacy_contract_migrations(contract_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_legacy_migration_batch ON legacy_contract_migrations(batch_id)')
+
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS contract_role_assignments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id INTEGER NOT NULL,
+        assignment_role TEXT NOT NULL,
+        user_id INTEGER,
+        source_name TEXT,
+        active_from TEXT,
+        active_to TEXT,
+        status TEXT DEFAULT '启用',
+        assigned_by TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        FOREIGN KEY (contract_id) REFERENCES contracts (id),
+        FOREIGN KEY (user_id) REFERENCES users (id)
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_contract_role_contract ON contract_role_assignments(contract_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_contract_role_user ON contract_role_assignments(user_id, assignment_role, status)')
+
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS contract_commission_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id INTEGER NOT NULL,
+        batch_id INTEGER,
+        user_id INTEGER,
+        role_snapshot TEXT,
+        amount REAL DEFAULT 0,
+        performance_amount REAL DEFAULT 0,
+        source_description TEXT,
+        settled_at TEXT,
+        remark TEXT,
+        created_by TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        FOREIGN KEY (contract_id) REFERENCES contracts (id),
+        FOREIGN KEY (batch_id) REFERENCES legacy_import_batches (id),
+        FOREIGN KEY (user_id) REFERENCES users (id)
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_contract_commission_contract ON contract_commission_records(contract_id)')
+
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS external_finance_repayments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id INTEGER NOT NULL,
+        period INTEGER NOT NULL,
+        due_date TEXT,
+        amount REAL DEFAULT 0,
+        payer_name TEXT,
+        payee_name TEXT DEFAULT '一汽金融',
+        status TEXT DEFAULT '待还款',
+        paid_at TEXT,
+        payment_reference TEXT,
+        remark TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        FOREIGN KEY (contract_id) REFERENCES contracts (id)
+    )
+    ''')
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_external_finance_period ON external_finance_repayments(contract_id, period, due_date)')
+
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS legacy_contract_corrections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        old_contract_id INTEGER NOT NULL,
+        replacement_contract_id INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT DEFAULT '已确认',
+        created_by TEXT,
+        confirmed_by TEXT,
+        confirmed_at TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        UNIQUE(old_contract_id, replacement_contract_id),
+        FOREIGN KEY (old_contract_id) REFERENCES contracts (id),
+        FOREIGN KEY (replacement_contract_id) REFERENCES contracts (id)
+    )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_legacy_correction_replacement ON legacy_contract_corrections(replacement_contract_id)')
 
     # === 安全添加新列（如果表已存在但缺少新字段）===
     safe_alter_columns = [
@@ -1057,6 +1389,10 @@ def init_db():
         ("contracts", "deposit_status", "TEXT DEFAULT '待收'"),
         ("contracts", "delivery_status", "TEXT DEFAULT '待出库'"),
         ("contracts", "delivery_date", "TEXT"),
+        ("contracts", "actual_delivery_date", "TEXT"),
+        ("contracts", "billing_start_date", "TEXT"),
+        ("contracts", "billing_cycle", "TEXT DEFAULT '按月'"),
+        ("contracts", "rental_days", "INTEGER DEFAULT 0"),
         ("contracts", "delivery_photo_path", "TEXT"),
         ("contracts", "delivery_document_path", "TEXT"),
         ("contracts", "early_settlement_amount", "REAL DEFAULT 0"),
@@ -1081,6 +1417,10 @@ def init_db():
         ("contracts", "lease_bank_name", "TEXT"),
         ("contracts", "lease_bank_card_no", "TEXT"),
         ("contracts", "created_by", "TEXT"),
+        ("contracts", "contract_origin", "TEXT DEFAULT 'normal'"),
+        ("contracts", "legacy_cutover_date", "TEXT"),
+        ("contracts", "late_fee_accrual_start_date", "TEXT"),
+        ("contracts", "legacy_visibility_status", "TEXT DEFAULT '已启用'"),
         ("return_inspections", "sales_status", "TEXT DEFAULT '待登记'"),
         ("return_inspections", "fleet_status", "TEXT DEFAULT '待填写'"),
         ("return_inspections", "operator_status", "TEXT DEFAULT '待填写'"),
@@ -1102,6 +1442,18 @@ def init_db():
         ("return_inspections", "lease_bank_name", "TEXT"),
         ("return_inspections", "lease_bank_card_no", "TEXT"),
         ("return_inspections", "leader_remark", "TEXT"),
+        ("return_inspections", "appearance_photos", "TEXT"),
+        ("return_inspections", "mileage_photos", "TEXT"),
+        ("return_inspections", "tools_photos", "TEXT"),
+        ("return_inspections", "repair_appearance_photos", "TEXT"),
+        ("return_inspections", "repair_mileage_photos", "TEXT"),
+        ("return_inspections", "repair_tools_photos", "TEXT"),
+        ("refurbishment_records", "completion_note", "TEXT"),
+        ("refurbishment_records", "appearance_photos", "TEXT"),
+        ("refurbishment_records", "mileage_photos", "TEXT"),
+        ("refurbishment_records", "tools_photos", "TEXT"),
+        ("return_inspections", "prorated_rent_amount", "REAL DEFAULT 0"),
+        ("return_inspections", "proration_detail", "TEXT"),
         ("sales_orders", "is_new", "TEXT DEFAULT '新车'"),
         ("sales_orders", "vehicle_brand", "TEXT"),
         ("sales_orders", "lease_start_date", "TEXT"),
@@ -1254,6 +1606,16 @@ def init_db():
         ("sales_orders", "snapshot_lease_deposit_guidance", "REAL DEFAULT 0"),
         ("sales_orders", "snapshot_box_monthly_guidance", "REAL DEFAULT 0"),
         ("sales_orders", "refund_id", "INTEGER"),
+        ("sales_orders", "blacklist_hit", "INTEGER DEFAULT 0"),
+        ("sales_orders", "blacklist_reason", "TEXT"),
+        ("sales_orders", "blacklist_marked_at", "TEXT"),
+        ("order_refunds", "cancellation_reason", "TEXT"),
+        ("order_refunds", "boss_approved_by", "TEXT"),
+        ("order_refunds", "boss_approved_at", "TEXT"),
+        ("order_refunds", "rejected_by", "TEXT"),
+        ("order_refunds", "rejected_at", "TEXT"),
+        ("order_refunds", "reject_reason", "TEXT"),
+        ("order_refunds", "previous_order_status", "TEXT"),
         ("model_guidance_prices", "lease_deposit_guidance", "REAL DEFAULT 0"),
         ("model_guidance_prices", "box_standard_price", "REAL DEFAULT 0"),
         ("model_guidance_prices", "box_wide_price", "REAL DEFAULT 0"),
@@ -1264,6 +1626,7 @@ def init_db():
         ("contracts", "snapshot_finance_plan", "TEXT"),
         ("contracts", "snapshot_lease_deposit_guidance", "REAL DEFAULT 0"),
         ("contracts", "snapshot_box_monthly_guidance", "REAL DEFAULT 0"),
+        ("contracts", "contract_number", "TEXT"),
         ("receivables", "sales_order_id", "INTEGER"),
         # === SKU 改造：金融方案生效/失效日期（未来生效时间 + 有效期控制）===
         ("finance_plans", "effective_date", "TEXT"),
@@ -1279,8 +1642,20 @@ def init_db():
         # === 催收闭环 ===
         ("urge_records", "evidence_path", "TEXT"),
         ("urge_records", "promised_repay_date", "TEXT"),
+        ("urge_records", "contact_name", "TEXT"),
+        ("urge_records", "contact_method", "TEXT"),
+        ("urge_records", "contacted_at", "TEXT"),
+        ("urge_records", "next_contact_date", "TEXT"),
         ("urge_records", "completed_at", "TEXT"),
         ("urge_records", "closed_by", "TEXT"),
+        ("waivers", "approved_waive_amount", "REAL DEFAULT 0"),
+        ("waivers", "bad_debt_amount", "REAL DEFAULT 0"),
+        ("waivers", "carryover_remaining", "REAL DEFAULT 0"),
+        ("waivers", "carryover_start_period", "INTEGER"),
+        ("waivers", "deposit_deduction", "REAL DEFAULT 0"),
+        ("waivers", "operations_note", "TEXT"),
+        ("waivers", "operations_filled_by", "TEXT"),
+        ("waivers", "operations_filled_at", "TEXT"),
         # === 退车驳回/重提闭环 ===
         ("return_inspections", "rejected_by", "TEXT"),
         ("return_inspections", "rejected_at", "TEXT"),
@@ -1295,6 +1670,9 @@ def init_db():
         ("return_inspections", "repair_cost", "REAL DEFAULT 0"),
         ("ownership_transfers", "completed_by", "TEXT"),
         ("ownership_transfers", "completed_at", "TEXT"),
+        # === 发票实际开具日期（与系统操作时间 invoiced_at 分开保存）===
+        ("invoice_requests", "invoice_date", "TEXT"),
+        ("renewal_applications", "billing_cycle", "TEXT DEFAULT '按月'"),
     ]
     for table, col, col_type in safe_alter_columns:
         try:
@@ -1348,10 +1726,19 @@ def init_db():
             ) AS guidance_price_keep
         )
     """)
+    drop_legacy_model_guidance_price_unique_indexes(c)
     c.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_model_guidance_prices_car_type_is_new
         ON model_guidance_prices(car_type, is_new)
     """)
+    if USE_MYSQL:
+        c.execute("""
+            ALTER TABLE finance_plans
+            MODIFY COLUMN car_type VARCHAR(191),
+            MODIFY COLUMN `condition` VARCHAR(191) DEFAULT '新车',
+            MODIFY COLUMN box_type VARCHAR(191) DEFAULT '',
+            MODIFY COLUMN status VARCHAR(191)
+        """)
     c.execute("""
         CREATE INDEX IF NOT EXISTS idx_finance_plans_scope
         ON finance_plans(car_type, condition, box_type, status)
@@ -1380,28 +1767,47 @@ def init_db():
             value=TRIM(value),
             energy_type=TRIM(COALESCE(energy_type, ''))
     """)
-    c.execute("""
-        UPDATE data_dictionaries AS keep
-        SET status=CASE
-            WHEN EXISTS (
-                SELECT 1
-                FROM data_dictionaries AS duplicate
-                WHERE duplicate.category=keep.category
-                  AND duplicate.value=keep.value
-                  AND duplicate.energy_type=keep.energy_type
-                  AND duplicate.status='启用'
-            ) THEN '启用'
-            ELSE keep.status
-        END
-        WHERE keep.id IN (
-            SELECT keep_id
-            FROM (
-                SELECT MIN(id) AS keep_id
-                FROM data_dictionaries
-                GROUP BY category, value, energy_type
-            ) AS dictionary_status_keep
-        )
-    """)
+    if USE_MYSQL:
+        # MySQL 不能在 UPDATE 的子查询中再次读取目标表（ERROR 1093）。
+        # 用自连接找出每组最早记录；只要该组存在启用项，就保留其启用状态。
+        c.execute("""
+            UPDATE data_dictionaries AS keep_row
+            JOIN data_dictionaries AS enabled_row
+              ON enabled_row.category=keep_row.category
+             AND enabled_row.value=keep_row.value
+             AND enabled_row.energy_type=keep_row.energy_type
+             AND enabled_row.status='启用'
+            LEFT JOIN data_dictionaries AS earlier_row
+              ON earlier_row.category=keep_row.category
+             AND earlier_row.value=keep_row.value
+             AND earlier_row.energy_type=keep_row.energy_type
+             AND earlier_row.id < keep_row.id
+            SET keep_row.status='启用'
+            WHERE earlier_row.id IS NULL
+        """)
+    else:
+        c.execute("""
+            UPDATE data_dictionaries AS keep
+            SET status=CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM data_dictionaries AS duplicate
+                    WHERE duplicate.category=keep.category
+                      AND duplicate.value=keep.value
+                      AND duplicate.energy_type=keep.energy_type
+                      AND duplicate.status='启用'
+                ) THEN '启用'
+                ELSE keep.status
+            END
+            WHERE keep.id IN (
+                SELECT keep_id
+                FROM (
+                    SELECT MIN(id) AS keep_id
+                    FROM data_dictionaries
+                    GROUP BY category, value, energy_type
+                ) AS dictionary_status_keep
+            )
+        """)
     c.execute("""
         DELETE FROM data_dictionaries
         WHERE id NOT IN (
@@ -1451,11 +1857,11 @@ def seed_data():
     conn.commit()
 
     role_pages = {
-        '老板': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'reconciliation', 'risk', 'profit', 'settings'],
-        '运营': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'reconciliation', 'risk', 'invoice'],
-        '财务': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'reconciliation', 'profit'],
-        '车管': ['dashboard', 'assets', 'completion_history', 'approvals'],
-        '销售': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'risk'],
+        '老板': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'receiving_companies', 'reconciliation', 'risk', 'profit', 'settings'],
+        '运营': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'reconciliation', 'risk', 'invoice'],
+        '财务': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'receiving_companies', 'reconciliation', 'profit'],
+        '车管': ['dashboard', 'guidance_board', 'assets', 'completion_history', 'approvals'],
+        '销售': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'risk'],
     }
     role_actions = {
         '老板': ['*'],

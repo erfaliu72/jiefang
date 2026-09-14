@@ -210,6 +210,87 @@
 
                     </div>
 
+                    <!-- ================== GUIDANCE BOARD ================== -->
+                    <div v-if="currentPage === 'guidance_board'" class="page fade-in">
+                        <div class="stat-cards three-cols">
+                            <div class="stat-card">
+                                <div class="stat-card-icon" style="background:#dbeafe;color:#2563eb"><span style="font-weight:700">租</span></div>
+                                <div class="stat-card-content">
+                                    <span class="stat-label">租赁指导价</span>
+                                    <span class="stat-value">{{ filteredGuidanceLeasePrices.length }}</span>
+                                    <span style="font-size:12px;color:#94a3b8;margin-top:3px">车型成色组合</span>
+                                </div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-card-icon" style="background:#d1fae5;color:#059669"><span style="font-weight:700">售</span></div>
+                                <div class="stat-card-content">
+                                    <span class="stat-label">当前生效方案</span>
+                                    <span class="stat-value text-green">{{ filteredGuidanceFinancePlans.length }}</span>
+                                    <span style="font-size:12px;color:#94a3b8;margin-top:3px">以租代售价格方案</span>
+                                </div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-card-icon" style="background:#fef3c7;color:#d97706"><span style="font-weight:700">日</span></div>
+                                <div class="stat-card-content">
+                                    <span class="stat-label">数据口径日期</span>
+                                    <span class="stat-value" style="font-size:22px">{{ guidanceBoard.as_of || '-' }}</span>
+                                    <span style="font-size:12px;color:#94a3b8;margin-top:3px">展示老板最新维护结果</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card" style="margin-top:16px">
+                            <div class="card-title-row">
+                                <div>
+                                    <div class="card-title">租赁指导价</div>
+                                    <div style="font-size:12px;color:#6b7280;margin-top:4px">按基准车型和成色展示当前价格。</div>
+                                </div>
+                                <div style="display:flex;gap:8px;align-items:center">
+                                    <el-input v-model="guidanceBoardSearch" placeholder="搜索车型或方案" clearable :prefix-icon="Search" style="width:220px"></el-input>
+                                    <el-button circle title="刷新看板" @click="loadGuidanceBoard" :loading="guidanceBoardLoading"><el-icon><Refresh/></el-icon></el-button>
+                                </div>
+                            </div>
+                            <el-table v-loading="guidanceBoardLoading" :data="filteredGuidanceLeasePrices" stripe style="width:100%;margin-top:14px" max-height="420">
+                                <el-table-column prop="car_type" label="基准车型" min-width="210"></el-table-column>
+                                <el-table-column label="成色" width="88"><template #default="s"><el-tag :type="s.row.is_new === '二手车' ? 'warning' : 'primary'" size="small">{{ s.row.is_new }}</el-tag></template></el-table-column>
+                                <el-table-column label="押金" min-width="110"><template #default="s"><span class="num">¥{{ numberFormat(s.row.lease_deposit_guidance) }}</span></template></el-table-column>
+                                <el-table-column label="厢货月供" min-width="118"><template #default="s"><span class="num">¥{{ numberFormat(s.row.box_standard_price) }}</span></template></el-table-column>
+                                <el-table-column label="宽体月供" min-width="118"><template #default="s"><span class="num">¥{{ numberFormat(s.row.box_wide_price) }}</span></template></el-table-column>
+                                <el-table-column label="高栏月供" min-width="118"><template #default="s"><span class="num">¥{{ numberFormat(s.row.box_high_rail_price) }}</span></template></el-table-column>
+                                <el-table-column label="冷藏月供" min-width="118"><template #default="s"><span class="num">¥{{ numberFormat(s.row.box_refrigerated_price) }}</span></template></el-table-column>
+                                <el-table-column label="平板月供" min-width="118"><template #default="s"><span class="num">¥{{ numberFormat(s.row.box_flatbed_price) }}</span></template></el-table-column>
+                                <el-table-column label="尾板加价" min-width="112"><template #default="s"><span class="num">¥{{ numberFormat(s.row.tail_plate_price) }}</span></template></el-table-column>
+                                <el-table-column prop="remark" label="备注" min-width="160" show-overflow-tooltip></el-table-column>
+                                <el-table-column prop="updated_at" label="最近更新" width="160"></el-table-column>
+                                <el-table-column prop="updated_by" label="更新人" width="100"></el-table-column>
+                            </el-table>
+                            <el-empty v-if="!guidanceBoardLoading && !filteredGuidanceLeasePrices.length" description="暂无租赁指导价"></el-empty>
+                        </div>
+
+                        <div class="card" style="margin-top:16px">
+                            <div class="card-title-row">
+                                <div>
+                                    <div class="card-title">以租代售指导方案</div>
+                                    <div style="font-size:12px;color:#6b7280;margin-top:4px">仅展示已启用且在当前日期生效的方案。</div>
+                                </div>
+                                <span class="card-count">当前生效 {{ filteredGuidanceFinancePlans.length }} 条</span>
+                            </div>
+                            <el-table v-loading="guidanceBoardLoading" :data="filteredGuidanceFinancePlans" stripe style="width:100%;margin-top:14px" max-height="420">
+                                <el-table-column prop="car_type" label="基准车型" min-width="210"></el-table-column>
+                                <el-table-column prop="box_type" label="厢型" width="88"></el-table-column>
+                                <el-table-column prop="plan_name" label="方案名" min-width="180"></el-table-column>
+                                <el-table-column label="首付款" min-width="118"><template #default="s"><span class="num">¥{{ numberFormat(s.row.down_payment) }}</span></template></el-table-column>
+                                <el-table-column label="每期价格" min-width="118"><template #default="s"><span class="num">¥{{ numberFormat(s.row.period_price) }}</span></template></el-table-column>
+                                <el-table-column label="期数" width="82"><template #default="s">{{ s.row.periods }} 期</template></el-table-column>
+                                <el-table-column label="生效期" min-width="190"><template #default="s">{{ s.row.effective_date || '即日生效' }} 至 {{ s.row.expiry_date || '长期有效' }}</template></el-table-column>
+                                <el-table-column prop="remark" label="备注" min-width="160" show-overflow-tooltip></el-table-column>
+                                <el-table-column prop="updated_at" label="最近更新" width="160"></el-table-column>
+                                <el-table-column prop="updated_by" label="更新人" width="100"></el-table-column>
+                            </el-table>
+                            <el-empty v-if="!guidanceBoardLoading && !filteredGuidanceFinancePlans.length" description="暂无当前生效的以租代售方案"></el-empty>
+                        </div>
+                    </div>
+
                     <!-- ================== SALES ORDERS ================== -->
                     <div v-if="currentPage === 'orders'" class="page fade-in">
                         <div class="stat-cards three-cols">
@@ -239,6 +320,17 @@
                         <div class="card-title-row">
                             <div class="card-title">销售报单台账</div>
                             <span class="card-count">按交款、车辆、收款三段留痕，支持后续上传线下合同</span>
+                        </div>
+                        <div style="display:flex;gap:10px;flex-wrap:wrap;margin:0 0 14px">
+                            <el-input v-model="orderFilters.plate_number" placeholder="车牌号（模糊搜索）" clearable style="width:180px" @keyup.enter="fetchSalesOrders"></el-input>
+                            <el-select v-model="orderFilters.order_status" placeholder="订单状态" clearable style="width:150px">
+                                <el-option v-for="status in ['草稿','待价格特批','待财务确认','已激活','已作废']" :key="status" :label="status" :value="status"></el-option>
+                            </el-select>
+                            <el-input v-model="orderFilters.customer" placeholder="客户" clearable style="width:150px" @keyup.enter="fetchSalesOrders"></el-input>
+                            <el-input v-model="orderFilters.car_type" placeholder="车型" clearable style="width:170px" @keyup.enter="fetchSalesOrders"></el-input>
+                            <el-input v-model="orderFilters.salesperson" placeholder="销售员" clearable style="width:140px" @keyup.enter="fetchSalesOrders"></el-input>
+                            <el-button type="primary" plain @click="fetchSalesOrders">查询</el-button>
+                            <el-button plain @click="resetOrderFilters">重置</el-button>
                         </div>
                         <el-table :data="salesOrders" style="width:100%" stripe row-key="id">
                                 <el-table-column label="交款日期" width="110">
@@ -322,6 +414,7 @@
                                         <el-button v-if="currentUser.role==='销售' && s.row.order_status==='草稿'" type="danger" size="small" plain round @click="deleteSalesOrderDraft(s.row)">删除</el-button>
                                         <el-button v-if="currentUser.role==='销售' && s.row.order_status==='已作废'" type="warning" size="small" plain round @click="copySalesOrderDraft(s.row)">复制草稿</el-button>
                                         <el-button v-if="canReturnFromOrder(s.row)" type="success" size="small" round @click="initiateReturnFromOrder(s.row)">发起退车</el-button>
+                                        <el-button v-if="canRenewFromOrder(s.row)" type="warning" size="small" round @click="openRenewalDialog(s.row)">发起续租</el-button>
                                         <el-button v-if="currentUser.role==='财务' && s.row.order_status==='待财务确认' && isInstallmentSalesOrder(s.row)" type="primary" size="small" plain round @click="openPlanningDialog(s.row)">{{ salesOrderPlanActionLabel(s.row) }}</el-button>
                                         <el-button v-if="currentUser.role==='财务' && s.row.order_status==='待财务确认' && canActivateSalesOrder(s.row)" type="success" size="small" round @click="activateOrder(s.row)">确认报单</el-button>
                                         <el-button v-if="currentUser.role==='运营' && s.row.order_status==='已激活'" :type="salesOrderHasContract(s.row) ? 'warning' : 'primary'" size="small" round @click="createContractFromOrder(s.row)">{{ salesOrderContractActionLabel(s.row) }}</el-button>
@@ -435,9 +528,10 @@
                                                 <el-radio-group v-model="repaymentTab" size="small">
                                                     <el-radio-button label="customer">客户还款（客户→公司）</el-radio-button>
                                                     <el-radio-button label="factory">厂家月供（公司→解放）</el-radio-button>
+                                                    <el-radio-button v-if="currentExternalFinanceRepayments.length" label="external">一汽直还（客户→一汽金融）</el-radio-button>
                                                 </el-radio-group>
                                             </div>
-                                            <el-table :data="repaymentTab==='customer' ? currentRepayments : currentFactoryRepayments" size="small" max-height="300">
+                                            <el-table :data="repaymentTab==='customer' ? currentRepayments : (repaymentTab==='factory' ? currentFactoryRepayments : currentExternalFinanceRepayments)" size="small" max-height="300">
                                                 <el-table-column prop="period" label="期数" width="70"></el-table-column>
                                                 <el-table-column prop="due_date" label="应还日期" width="120"></el-table-column>
                                                 <el-table-column label="应还金额" width="120">
@@ -453,7 +547,7 @@
                                                 </el-table-column>
                                                 <el-table-column label="操作" width="100">
                                                     <template #default="s">
-                                                        <el-button v-if="s.row.status !== '已还款'" type="primary" size="small" round @click="repaymentTab==='customer' ? confirmRepayment(s.row) : confirmFactoryRepayment(s.row)">核销</el-button>
+                                                        <el-button v-if="repaymentTab !== 'external' && s.row.status !== '已还款'" type="primary" size="small" round @click="repaymentTab==='customer' ? confirmRepayment(s.row) : confirmFactoryRepayment(s.row)">核销</el-button>
                                                     </template>
                                                 </el-table-column>
                                             </el-table>
@@ -668,12 +762,11 @@
                     <template #default="s">
                         <el-button type="info" size="small" plain round @click="openVehicleDetail(s.row)">详情</el-button>
                         <el-button v-if="!s.row.is_deleted && (currentUser.role==='老板' || currentUser.role==='运营')" type="primary" size="small" plain round @click="openVehicleEdit(s.row)">编辑</el-button>
-                        <el-button v-if="!s.row.is_deleted && s.row.validation_status==='invalid'" type="danger" size="small" plain round @click="openVehicleValidationFix(s.row)">修正</el-button>
                         <el-button v-if="!s.row.is_deleted && canInitiateVehicleOrder(s.row)" type="warning" size="small" plain round @click="openSalesOrderFromVehicle(s.row)">发起报单</el-button>
                         <el-button v-if="!s.row.is_deleted && currentUser.role==='运营' && s.row.contract_type==='以租代售'" type="success" size="small" plain round @click="openTransferDialog(s.row)">过户</el-button>
                         <el-button v-if="!s.row.is_deleted && canInitiateVehicleReturn(s.row)" type="success" size="small" round @click="openReturnForm(s.row)">发起退车</el-button>
-                        <el-button v-if="!s.row.is_deleted && ['运营','车管'].includes(currentUser.role) && s.row.status==='待维修'" type="warning" size="small" plain round @click="startRepair(s.row)">开始维修</el-button>
-                        <el-button v-if="!s.row.is_deleted && ['运营','车管'].includes(currentUser.role) && ['待维修','维修中'].includes(s.row.status)" type="success" size="small" round @click="openRepairCompleteDialog(s.row)">维修完成入库</el-button>
+                        <el-button v-if="!s.row.is_deleted && currentUser.role==='运营' && s.row.status==='待维修'" type="warning" size="small" plain round @click="startRepair(s.row)">开始维修</el-button>
+                        <el-button v-if="!s.row.is_deleted && currentUser.role==='运营' && ['待维修','维修中'].includes(s.row.status)" type="success" size="small" round @click="openRepairCompleteDialog(s.row)">维修完成</el-button>
                         <el-button v-if="s.row.is_deleted && currentUser.role==='老板'" type="success" size="small" round @click="restoreVehicle(s.row.id)">恢复</el-button>
                         <el-popconfirm v-if="!s.row.is_deleted && currentUser.role==='老板'" title="确认将车辆及关联数据隐藏？" confirm-button-text="隐藏" @confirm="deleteVehicle(s.row.id)">
                             <template #reference>
@@ -830,7 +923,15 @@
                                 <el-table-column prop="customer_name" label="客户" width="120"></el-table-column>
                                 <el-table-column label="金额" width="120"><template #default="s">¥{{ numberFormat(s.row.amount) }}</template></el-table-column>
                                 <el-table-column prop="invoice_entity_name" label="开票抬头" min-width="180"></el-table-column>
-                                <el-table-column label="发票文件" width="110"><template #default="s"><a v-if="s.row.invoice_file_path" :href="s.row.invoice_file_path" target="_blank" style="color:#409eff">下载</a><span v-else style="color:#bbb">无</span></template></el-table-column>
+                                <el-table-column prop="invoice_date" label="开票日期" width="120"><template #default="s">{{ s.row.invoice_date || '-' }}</template></el-table-column>
+                                <el-table-column label="发票文件" width="110">
+                                    <template #default="s">
+                                        <div v-if="s.row.invoice_file_path" style="display:flex;flex-direction:column;gap:4px">
+                                            <a v-for="(file, index) in attachmentList(s.row.invoice_file_path)" :key="file.url" :href="file.url" target="_blank" style="color:#409eff">文件{{ index + 1 }}</a>
+                                        </div>
+                                        <span v-else style="color:#bbb">无</span>
+                                    </template>
+                                </el-table-column>
                                 <el-table-column prop="status" label="状态" width="100"><template #default="s"><span class="status-badge" :class="deliveryStatusClass(s.row.status)">{{ s.row.status }}</span></template></el-table-column>
                                 <el-table-column label="操作" :width="opWidthInvoices" fixed="right">
                                     <template #default="s">
@@ -969,7 +1070,15 @@
                                     <template #default="s">¥{{ numberFormat(s.row.amount) }}</template>
                                 </el-table-column>
                                 <el-table-column prop="invoice_entity_name" label="开票抬头" min-width="180"></el-table-column>
-                                <el-table-column label="发票文件" width="110"><template #default="s"><a v-if="s.row.invoice_file_path" :href="s.row.invoice_file_path" target="_blank" style="color:#409eff">下载</a><span v-else style="color:#bbb">无</span></template></el-table-column>
+                                <el-table-column prop="invoice_date" label="开票日期" width="120"><template #default="s">{{ s.row.invoice_date || '-' }}</template></el-table-column>
+                                <el-table-column label="发票文件" width="110">
+                                    <template #default="s">
+                                        <div v-if="s.row.invoice_file_path" style="display:flex;flex-direction:column;gap:4px">
+                                            <a v-for="(file, index) in attachmentList(s.row.invoice_file_path)" :key="file.url" :href="file.url" target="_blank" style="color:#409eff">文件{{ index + 1 }}</a>
+                                        </div>
+                                        <span v-else style="color:#bbb">无</span>
+                                    </template>
+                                </el-table-column>
                                 <el-table-column prop="status" label="状态" width="100">
                                     <template #default="s"><span class="status-badge" :class="deliveryStatusClass(s.row.status)">{{ s.row.status }}</span></template>
                                 </el-table-column>
@@ -1312,32 +1421,31 @@
                             </div>
                         </div>
 
-                        <div id="pending-repair-section" v-if="currentUser.role==='车管' && pendingRepairVehicles.length" class="card" style="margin-bottom:20px;padding:18px 20px;border:1px solid #fed7aa;background:linear-gradient(135deg,#fff7ed 0%,#ffffff 100%)">
+                        <div id="pending-repair-section" v-if="currentUser.role==='运营' && pendingRepairVehicles.length" class="card" style="margin-bottom:20px;padding:18px 20px;border:1px solid #fed7aa;background:linear-gradient(135deg,#fff7ed 0%,#ffffff 100%)">
                             <div class="card-title-row" style="margin-bottom:12px">
                                 <div style="display:flex;align-items:center;gap:10px">
-                                    <div class="card-title">待维修入库</div>
+                                    <div class="card-title">车辆整备队列</div>
                                     <span class="badge badge-orange">{{ pendingRepairVehicles.length }} 台</span>
                                 </div>
-                                <span class="card-count">已报维修的退车车辆会一直保留在此；结算完成后可填写维修结果和费用入库</span>
+                                <span class="card-count">维修完成后进入待整备，整备完成才可重新入库</span>
                             </div>
                             <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">
                                 <div v-for="r in pendingRepairVehicles" :key="'repair_' + r.id"
                                     style="border:1px solid #fed7aa;border-radius:8px;padding:14px 16px;background:#ffffff">
                                     <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:6px">
-                                        <div style="font-weight:600">{{ r.plate_number || r.vehicle_plate_number || '-' }} <span style="font-size:12px;color:#9ca3af">{{ r.vehicle_car_type || r.car_type || '' }}</span></div>
-                                        <span class="badge badge-orange">{{ r.repair_queue_status || r.vehicle_status }}</span>
+                                        <div style="font-weight:600">{{ r.plate_number || '-' }} <span style="font-size:12px;color:#9ca3af">{{ r.car_type || '' }}</span></div>
+                                        <span class="badge" :class="r.status==='整备中' ? 'badge-blue' : 'badge-orange'">{{ r.status }}</span>
                                     </div>
                                     <div style="font-size:13px;color:#6b7280;margin-bottom:6px">客户：{{ r.customer_name || '-' }}</div>
                                     <div style="font-size:13px;color:#92400e;margin-bottom:12px">维修原因：{{ r.repair_reason || '未填写' }}</div>
                                     <div style="display:flex;gap:8px;flex-wrap:wrap">
-                                        <template v-if="r.repair_queue_actionable">
+                                        <template v-if="r.status==='待整备' && Number(r.needs_repair || 0)===1 && !r.repair_completed_at">
                                             <el-button v-if="r.vehicle_status==='待维修'" type="warning" size="small" plain @click="startRepair(r)">开始维修</el-button>
-                                            <el-button type="success" size="small" @click="openRepairCompleteDialog(r)">填写维修完成并入库</el-button>
+                                            <el-button v-if="r.vehicle_status==='维修中'" type="success" size="small" @click="openRepairCompleteDialog(r)">维修完成</el-button>
+                                            <span v-if="!['待维修','维修中'].includes(r.vehicle_status)" style="font-size:12px;color:#92400e;line-height:28px">等待退车流程完成后进入维修</span>
                                         </template>
-                                        <template v-else>
-                                            <span style="font-size:12px;color:#92400e;line-height:28px">退车流程当前：{{ r.repair_queue_status || r.status }}</span>
-                                            <el-button size="small" plain @click="viewReturnDetail(r)">查看退车单</el-button>
-                                        </template>
+                                        <el-button v-else-if="r.status==='待整备'" type="warning" size="small" @click="startRefurbishment(r)">开始整备</el-button>
+                                        <el-button v-else-if="r.status==='整备中'" type="success" size="small" @click="openRefurbishmentCompleteDialog(r)">完成整备</el-button>
                                     </div>
                                 </div>
                             </div>
@@ -1387,8 +1495,10 @@
                                     <span v-if="item.ref_type==='lock_request'" style="font-weight:700;color:#ef4444;font-size:18px">逾期 {{ item.overdue_days || 0 }} 天</span>
                                     <span v-else-if="item.ref_type==='price_exception'" style="font-weight:700;color:#ef4444;font-size:18px">低于指导价 ¥{{ numberFormat(item.snapshot_guidance_price || 0) }}</span>
                                     <span v-else-if="item.ref_type==='return_stock'" style="font-weight:700;color:#d97706;font-size:18px">{{ item.return_reason || '退车入库' }}</span>
+                                    <span v-else-if="item.ref_type==='order_refund'" style="font-weight:700;color:#dc2626;font-size:18px">应退 ¥{{ numberFormat(item.refund_amount || 0) }}</span>
                                     <span v-else-if="item.ref_type==='initial_payment'" style="font-weight:700;color:#d97706;font-size:18px">首次付款 ¥{{ numberFormat(item.initial_payment_amount) }}</span>
                                     <span v-else-if="item.ref_type==='invoice'" style="font-weight:700;color:#d97706;font-size:18px">开票金额 ¥{{ numberFormat(item.amount) }}</span>
+                                    <span v-else-if="item.ref_type==='renewal'" style="font-weight:700;color:#d97706;font-size:18px">续租月租 ¥{{ numberFormat(item.rent) }}</span>
                                     <span v-else style="font-weight:700;color:#059669;font-size:18px">月租 ¥{{ numberFormat(item.rent) }}</span>
                                 </div>
                             </div>
@@ -1439,9 +1549,34 @@
                                         <div style="grid-column:1/-1" v-if="item.order_exception_reason"><span style="color:#9ca3af">异常明细：</span><b style="color:#ef4444">{{ item.order_exception_reason }}</b></div>
                                         <div v-if="item.refund_status"><span style="color:#9ca3af">退款状态：</span><b :class="item.refund_status==='已退款' ? 'status-badge badge-green' : 'status-badge badge-orange'">{{ item.refund_status }}</b></div>
                                     </template>
+                                    <template v-else-if="item.ref_type==='order_refund'">
+                                        <div><span style="color:#9ca3af">业务模式：</span><b>{{ item.business_mode || '-' }}</b></div>
+                                        <div><span style="color:#9ca3af">应退押金/首付款：</span><b style="color:#dc2626">¥{{ numberFormat(item.refund_amount || 0) }}</b></div>
+                                        <div><span style="color:#9ca3af">退款状态：</span><b class="status-badge" :class="item.refund_status==='已完成' ? 'badge-green' : (item.refund_status==='已驳回' ? 'badge-red' : 'badge-orange')">{{ item.refund_status }}</b></div>
+                                        <div style="grid-column:1/-1"><span style="color:#9ca3af">取消原因：</span>{{ item.cancellation_reason || item.reason || '-' }}</div>
+                                        <div v-if="item.reject_reason" style="grid-column:1/-1"><span style="color:#9ca3af">驳回原因：</span><b style="color:#ef4444">{{ item.reject_reason }}</b></div>
+                                        <div v-if="item.refund_serial"><span style="color:#9ca3af">退款流水号：</span>{{ item.refund_serial }}</div>
+                                    </template>
                                     <template v-else-if="item.ref_type==='return_stock'">
                                         <div><span style="color:#9ca3af">退车原因：</span><b>{{ item.return_reason || '-' }}</b></div>
                                         <div><span style="color:#9ca3af">验收状态：</span>{{ item.delivery_status || '-' }}</div>
+                                    </template>
+                                    <template v-else-if="item.ref_type==='renewal'">
+                                        <div><span style="color:#9ca3af">原合同到期日：</span><b>{{ item.original_end_date || '-' }}</b></div>
+                                        <div><span style="color:#9ca3af">续租起租日：</span><b>{{ item.start_date || '-' }}</b></div>
+                                        <div><span style="color:#9ca3af">续租到期日：</span><b>{{ item.end_date || '-' }}</b></div>
+                                        <div><span style="color:#9ca3af">账单周期：</span>{{ item.billing_cycle || '按月' }}</div>
+                                        <div><span style="color:#9ca3af">续租月租：</span><b style="color:#d97706">¥{{ numberFormat(item.rent || 0) }}</b></div>
+                                        <div><span style="color:#9ca3af">{{ item.billing_cycle==='按天' ? '续租天数' : '续租期数' }}：</span>{{ item.loan_periods || 0 }}{{ item.billing_cycle==='按天' ? '天' : '个月' }}</div>
+                                        <div><span style="color:#9ca3af">标准押金：</span>¥{{ numberFormat(item.deposit || 0) }}</div>
+                                        <div><span style="color:#9ca3af">押金余额：</span>¥{{ numberFormat(item.deposit_balance || 0) }}</div>
+                                        <div><span style="color:#9ca3af">需补押金：</span><b :style="{color:Number(item.deposit_topup_amount||0)>0?'#dc2626':'#059669'}">¥{{ numberFormat(item.deposit_topup_amount || 0) }}</b></div>
+                                        <div><span style="color:#9ca3af">处理环节：</span><b>{{ item.renewal_status || item.overall_status || '-' }}</b></div>
+                                        <div v-if="item.contract_number"><span style="color:#9ca3af">续租合同编号：</span>{{ item.contract_number }}</div>
+                                        <div v-if="item.operations_filled_by"><span style="color:#9ca3af">运营处理人：</span>{{ item.operations_filled_by }}</div>
+                                        <div v-if="item.activated_at"><span style="color:#9ca3af">生效时间：</span>{{ item.activated_at }}</div>
+                                        <div style="grid-column:1/-1"><span style="color:#9ca3af">续租说明：</span>{{ item.application_note || '-' }}</div>
+                                        <div v-if="item.reject_reason" style="grid-column:1/-1"><span style="color:#9ca3af">驳回原因：</span><b style="color:#ef4444">{{ item.reject_reason }}</b></div>
                                     </template>
                                     <template v-else-if="item.ref_type==='invoice'">
                                         <div><span style="color:#9ca3af">合同：</span>{{ item.contract_id }}</div>
@@ -1452,10 +1587,14 @@
                                         <div><span style="color:#9ca3af">收款公司：</span>{{ item.receiving_company || '-' }}</div>
                                         <div><span style="color:#9ca3af">当前状态：</span>{{ item.delivery_status || '-' }}</div>
                                         <div v-if="item.invoice_no"><span style="color:#9ca3af">发票号：</span>{{ item.invoice_no }}</div>
+                                        <div v-if="item.invoice_date"><span style="color:#9ca3af">开票日期：</span>{{ item.invoice_date }}</div>
                                         <div v-if="item.processed_by"><span style="color:#9ca3af">开票人：</span>{{ item.processed_by }}</div>
                                         <div><span style="color:#9ca3af">申请人：</span>{{ item.applied_by || item.requested_by || '-' }}</div>
                                         <div><span style="color:#9ca3af">申请时间：</span>{{ item.applied_at || item.created_at || '-' }}</div>
-                                        <div v-if="item.invoice_file_path"><span style="color:#9ca3af">发票文件：</span><a :href="item.invoice_file_path" target="_blank" style="color:#2563eb">查看</a></div>
+                                        <div v-if="item.invoice_file_path" style="grid-column:1/-1">
+                                            <span style="color:#9ca3af">发票文件：</span>
+                                            <a v-for="(file, index) in attachmentList(item.invoice_file_path)" :key="file.url" :href="file.url" target="_blank" style="color:#2563eb;margin-right:10px">文件{{ index + 1 }}</a>
+                                        </div>
                                     </template>
                                     <template v-else-if="['initial_payment','initial_payment_shortage'].includes(item.ref_type)">
                                         <div><span style="color:#9ca3af">付款类型：</span><b>{{ item.initial_payment_type || '首次付款' }}</b></div>
@@ -1482,7 +1621,7 @@
                                 <div v-if="['initial_payment','initial_payment_shortage'].includes(item.ref_type)" style="margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0">
                                     <span style="color:#9ca3af;font-size:12px">付款凭证：</span>
                                     <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;align-items:center">
-                                        <a v-if="item.customer_screenshot_path" :href="item.customer_screenshot_path" target="_blank" class="badge badge-blue">客户付款截图</a>
+                                        <a v-for="(file, index) in attachmentList(item.customer_screenshot_path)" :key="file.url" :href="file.url" target="_blank" class="badge badge-blue">客户付款凭证 {{ index + 1 }}</a>
                                         <a v-if="item.bank_receipt_path" :href="item.bank_receipt_path" target="_blank" class="badge badge-green">公司收款回单</a>
                                         <el-upload v-if="currentUser.role==='财务' && item.ref_type==='initial_payment' && !item.bank_receipt_path && item.overall_status==='审批中'"
                                             action="/api/upload" :show-file-list="false" :with-credentials="true"
@@ -1517,7 +1656,9 @@
                                 </div>
                                 <div v-if="item.ref_type==='order_exception' && item.customer_screenshot_path" style="margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0">
                                     <span style="color:#9ca3af;font-size:12px">首付截图：</span>
-                                    <a :href="item.customer_screenshot_path" target="_blank" class="badge badge-blue" style="margin-left:6px">客户首付截图</a>
+                                    <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+                                        <a v-for="(file, index) in attachmentList(item.customer_screenshot_path)" :key="file.url" :href="file.url" target="_blank" class="badge badge-blue">客户首付凭证 {{ index + 1 }}</a>
+                                    </div>
                                 </div>
                             </div>
 
@@ -1566,7 +1707,7 @@
 
                             <!-- 操作按钮 -->
                             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;flex-wrap:wrap">
-                                <template v-for="step in item.steps" :key="'btn_'+item.ref_type+'_'+item.ref_id+'_'+step.step_order">
+                                <template v-for="step in (item.ref_type!=='order_refund' ? item.steps : [])" :key="'btn_'+item.ref_type+'_'+item.ref_id+'_'+step.step_order">
                                     <template v-if="step.status==='待审批' && step.step_order===item.current_step && currentUser.role===step.required_role">
                                         <!-- 退车流程：就地打开验收单弹窗完成操作 -->
                                         <el-button v-if="item.ref_type==='return_stock'" type="warning" size="small" @click="openReturnFromApproval(item)">
@@ -1585,6 +1726,10 @@
                                         </template>
                                     </template>
                                 </template>
+                                <el-button v-if="item.ref_type==='renewal' && item.renewal_status==='待运营处理' && currentUser.role==='运营'"
+                                    type="success" size="small" @click="openRenewalActivateDialog(item)">
+                                    <el-icon><Check/></el-icon> 补押金并激活续租
+                                </el-button>
                                 <!-- 车管出库按钮 -->
                                 <el-button v-if="item.delivery_status==='待出库' && ['contract_delivery','sale_payment','initial_payment'].includes(item.ref_type) && currentUser.role==='车管'"
                                     type="warning" size="small" @click="doDeliver(item)">
@@ -1609,6 +1754,21 @@
                                     type="danger" size="small" plain @click="cancelOrderRefund(item)">
                                     <el-icon><Close/></el-icon> 取消退款
                                 </el-button>
+                                <!-- 销售发起的未足额押金/首付款取消订单流程 -->
+                                <template v-if="item.ref_type==='order_refund'">
+                                    <el-button v-if="item.refund_status==='待老板审批' && currentUser.role==='老板'"
+                                        type="primary" size="small" @click="approveOrderRefund(item)">
+                                        <el-icon><Check/></el-icon> 通过
+                                    </el-button>
+                                    <el-button v-if="item.refund_status==='待老板审批' && currentUser.role==='老板'"
+                                        type="danger" size="small" plain @click="rejectOrderRefund(item)">
+                                        <el-icon><Close/></el-icon> 驳回
+                                    </el-button>
+                                    <el-button v-if="item.refund_status==='待退款' && currentUser.role==='财务'"
+                                        type="success" size="small" @click="executeOrderRefund(item)">
+                                        <el-icon><Money/></el-icon> 填写流水号并退款
+                                    </el-button>
+                                </template>
                                 <!-- 驳回后重新提交 -->
                                 <el-button v-if="item.overall_status==='已驳回' && ((['initial_payment','contract_delivery','invoice'].includes(item.ref_type) && currentUser.role==='运营') || (!['initial_payment','contract_delivery','invoice'].includes(item.ref_type) && currentUser.role==='销售'))"
                                     type="warning" size="small" plain @click="doResubmit(item.ref_id, item.ref_type)">
@@ -1713,12 +1873,8 @@
                                 </el-table-column>
                                 <el-table-column label="操作" width="200">
                                     <template #default="s">
-                                        <el-upload v-if="(currentUser.role==='运营' && calcOverdueDays(s.row.due_date)>=3 && calcOverdueDays(s.row.due_date)<7) || (currentUser.role==='销售' && calcOverdueDays(s.row.due_date)>=7)"
-                                            action="/api/upload" :show-file-list="false" :with-credentials="true"
-                                            :on-success="(res) => onUrgeEvidenceUpload(s.row, res)"
-                                            accept=".jpg,.jpeg,.png,.pdf">
-                                            <el-button type="warning" size="small" plain>上传催收证据</el-button>
-                                        </el-upload>
+                                        <el-button v-if="(currentUser.role==='运营' && calcOverdueDays(s.row.due_date)>=3 && calcOverdueDays(s.row.due_date)<7) || (currentUser.role==='销售' && calcOverdueDays(s.row.due_date)>=7)"
+                                            type="warning" size="small" plain @click="openUrgeDialog(s.row)">登记催收</el-button>
                                         <el-button v-if="calcOverdueDays(s.row.due_date)>=7" type="warning" size="small" round @click="requestLock(s.row)">申请锁车</el-button>
                                         <el-button type="primary" size="small" round @click="confirmRepayment(s.row)">核销</el-button>
                                     </template>
@@ -1822,6 +1978,37 @@
                                 </el-table-column>
                                 <el-table-column label="含资产净利" width="130">
                                     <template #default="s"><span class="num" :class="s.row.net_profit_with_asset>=0?'text-green':'text-red'">¥{{ numberFormat(s.row.net_profit_with_asset) }}</span></template>
+                                </el-table-column>
+                            </el-table>
+                        </div>
+                    </div>
+
+                    <!-- ================== RECEIVING COMPANIES ================== -->
+                    <div v-if="currentPage === 'receiving_companies'" class="page fade-in">
+                        <div class="card">
+                            <div class="card-title-row">
+                                <div class="card-title">收款公司主数据</div>
+                                <el-button type="primary" @click="submitReceivingCompany">保存收款公司</el-button>
+                            </div>
+                            <el-form :model="receivingCompanyForm" label-position="top" style="margin-top:14px">
+                                <el-row :gutter="16">
+                                    <el-col :span="6"><el-form-item label="公司名称"><el-input v-model="receivingCompanyForm.company_name"></el-input></el-form-item></el-col>
+                                    <el-col :span="5"><el-form-item label="开户行"><el-input v-model="receivingCompanyForm.bank_name"></el-input></el-form-item></el-col>
+                                    <el-col :span="5"><el-form-item label="银行账号"><el-input v-model="receivingCompanyForm.bank_account_no"></el-input></el-form-item></el-col>
+                                    <el-col :span="4"><el-form-item label="税号"><el-input v-model="receivingCompanyForm.tax_no"></el-input></el-form-item></el-col>
+                                    <el-col :span="4"><el-form-item label="状态"><el-select v-model="receivingCompanyForm.status" style="width:100%"><el-option label="启用" value="启用"></el-option><el-option label="停用" value="停用"></el-option></el-select></el-form-item></el-col>
+                                </el-row>
+                            </el-form>
+                            <el-table :data="receivingCompanies" stripe style="width:100%;margin-top:8px" max-height="600">
+                                <el-table-column prop="company_name" label="公司名称" min-width="220"></el-table-column>
+                                <el-table-column prop="bank_name" label="开户行" min-width="180"></el-table-column>
+                                <el-table-column prop="bank_account_no" label="银行账号" min-width="180"></el-table-column>
+                                <el-table-column prop="tax_no" label="税号" min-width="180"></el-table-column>
+                                <el-table-column prop="status" label="状态" width="90"></el-table-column>
+                                <el-table-column prop="updated_by" label="维护人" width="100"></el-table-column>
+                                <el-table-column prop="updated_at" label="更新时间" width="170"></el-table-column>
+                                <el-table-column label="操作" width="80" fixed="right">
+                                    <template #default="s"><el-button type="primary" link size="small" @click="editReceivingCompany(s.row)">编辑</el-button></template>
                                 </el-table-column>
                             </el-table>
                         </div>
@@ -1996,31 +2183,6 @@
                                 </el-tab-pane>
                             </el-tabs>
                         </div>
-                        <div class="card">
-                            <div class="card-title-row">
-                                <div class="card-title">收款公司主数据</div>
-                                <el-button v-if="['财务','老板'].includes(currentUser.role)" type="primary" @click="submitReceivingCompany">保存收款公司</el-button>
-                            </div>
-                            <el-form :model="receivingCompanyForm" label-position="top" style="margin-top:14px">
-                                <el-row :gutter="16">
-                                    <el-col :span="6"><el-form-item label="公司名称"><el-input v-model="receivingCompanyForm.company_name"></el-input></el-form-item></el-col>
-                                    <el-col :span="5"><el-form-item label="开户行"><el-input v-model="receivingCompanyForm.bank_name"></el-input></el-form-item></el-col>
-                                    <el-col :span="5"><el-form-item label="银行账号"><el-input v-model="receivingCompanyForm.bank_account_no"></el-input></el-form-item></el-col>
-                                    <el-col :span="4"><el-form-item label="税号"><el-input v-model="receivingCompanyForm.tax_no"></el-input></el-form-item></el-col>
-                                    <el-col :span="4"><el-form-item label="状态"><el-select v-model="receivingCompanyForm.status" style="width:100%"><el-option label="启用" value="启用"></el-option><el-option label="停用" value="停用"></el-option></el-select></el-form-item></el-col>
-                                </el-row>
-                            </el-form>
-                            <el-table :data="receivingCompanies" stripe style="width:100%;margin-top:8px" max-height="260">
-                                <el-table-column prop="company_name" label="公司名称" min-width="220"></el-table-column>
-                                <el-table-column prop="bank_name" label="开户行" width="180"></el-table-column>
-                                <el-table-column prop="bank_account_no" label="银行账号" width="180"></el-table-column>
-                                <el-table-column prop="status" label="状态" width="90"></el-table-column>
-                                <el-table-column prop="updated_by" label="维护人" width="100"></el-table-column>
-                                <el-table-column label="操作" width="80">
-                                    <template #default="s"><el-button type="primary" link size="small" @click="editReceivingCompany(s.row)">编辑</el-button></template>
-                                </el-table-column>
-                            </el-table>
-                        </div>
                         <div class="card" style="margin-top:16px">
                             <div class="card-title-row">
                                 <div class="card-title">客户黑名单</div>
@@ -2043,6 +2205,74 @@
                                 <el-table-column prop="reason" label="原因" min-width="180"></el-table-column>
                                 <el-table-column prop="created_by" label="维护人" width="100"></el-table-column>
                             </el-table>
+                        </div>
+                        <div class="card" style="margin-top: 16px">
+                            <div v-if="currentUser.role==='老板'">
+                                <div class="card-title-row">
+                                    <div>
+                                        <div class="card-title">历史履约迁移</div>
+                                        <div style="font-size:12px;color:#6b7280;margin-top:4px">切换日后的催收与滞纳金由系统接管</div>
+                                    </div>
+                                    <el-button type="primary" :disabled="!legacyImportPreview || !legacyImportPreview.summary.ready" :loading="legacyImportLoading" @click="importLegacyContracts">
+                                        <el-icon><Upload/></el-icon> 确认导入通过项
+                                    </el-button>
+                                </div>
+                                <el-row :gutter="16" style="margin-top:14px;align-items:end">
+                                    <el-col :span="10">
+                                        <el-form-item label="历史履约台账" style="margin-bottom:0">
+                                            <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" accept=".xlsx" :on-success="onLegacyImportUploadSuccess">
+                                                <el-button plain><el-icon><Upload/></el-icon> {{ legacyImportFileName || '选择台账' }}</el-button>
+                                            </el-upload>
+                                        </el-form-item>
+                                    </el-col>
+                                    <el-col :span="7">
+                                        <el-form-item label="系统接管日" style="margin-bottom:0">
+                                            <el-date-picker v-model="legacyImportCutoverDate" type="date" value-format="YYYY-MM-DD" style="width:100%"></el-date-picker>
+                                        </el-form-item>
+                                    </el-col>
+                                    <el-col :span="7">
+                                        <el-button type="primary" plain :disabled="!legacyImportFileUrl || !legacyImportCutoverDate" :loading="legacyImportLoading" @click="previewLegacyImport">
+                                            <el-icon><Search/></el-icon> 校验台账
+                                        </el-button>
+                                    </el-col>
+                                </el-row>
+                                <template v-if="legacyImportPreview">
+                                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:14px 0">
+                                        <el-tag type="info">共 {{ legacyImportPreview.summary.total }} 条</el-tag>
+                                        <el-tag type="success">可导入 {{ legacyImportPreview.summary.ready }} 条</el-tag>
+                                        <el-tag type="danger">需处理 {{ legacyImportPreview.summary.blocked }} 条</el-tag>
+                                        <el-tag type="warning">一汽直还 {{ legacyImportPreview.summary.external_finance }} 条</el-tag>
+                                        <el-tag v-if="legacyImportPreview.summary.system_corrections" type="warning">结清修正 {{ legacyImportPreview.summary.system_corrections }} 条</el-tag>
+                                    </div>
+                                    <el-table :data="legacyImportPreview.records" stripe size="small" style="width:100%" max-height="340">
+                                        <el-table-column prop="import_status" label="结果" width="84">
+                                            <template #default="s"><el-tag :type="s.row.import_status==='ready' ? 'success' : 'danger'" size="small">{{ s.row.import_status==='ready' ? '通过' : '拦截' }}</el-tag></template>
+                                        </el-table-column>
+                                        <el-table-column prop="vin" label="VIN" width="176"></el-table-column>
+                                        <el-table-column prop="contract_number" label="原合同号" min-width="130"></el-table-column>
+                                        <el-table-column prop="customer_name" label="客户" min-width="120"></el-table-column>
+                                        <el-table-column prop="sales_name" label="销售" width="100"></el-table-column>
+                                        <el-table-column label="还款归属" width="100">
+                                            <template #default="s"><el-tag :type="s.row.is_external_finance ? 'warning' : 'info'" size="small">{{ s.row.is_external_finance ? '一汽直还' : '客户回款' }}</el-tag></template>
+                                        </el-table-column>
+                                        <el-table-column label="校验信息" min-width="280">
+                                            <template #default="s">
+                                                <span v-if="s.row.errors.length" style="color:#dc2626">{{ s.row.errors.join('；') }}</span>
+                                                <span v-else-if="s.row.warnings.length" style="color:#b45309">{{ s.row.warnings.join('；') }}</span>
+                                                <span v-else style="color:#059669">可导入</span>
+                                            </template>
+                                        </el-table-column>
+                                    </el-table>
+                                </template>
+                                <el-table v-if="legacyImportBatches.length" :data="legacyImportBatches" stripe size="small" style="width:100%;margin-top:14px" max-height="220">
+                                    <el-table-column prop="batch_code" label="批次" min-width="210"></el-table-column>
+                                    <el-table-column prop="cutover_date" label="接管日" width="108"></el-table-column>
+                                    <el-table-column prop="imported_count" label="已导入" width="84"></el-table-column>
+                                    <el-table-column prop="skipped_count" label="跳过" width="76"></el-table-column>
+                                    <el-table-column prop="confirmed_by" label="确认人" width="100"></el-table-column>
+                                    <el-table-column prop="created_at" label="时间" width="166"></el-table-column>
+                                </el-table>
+                            </div>
                         </div>
                         <div class="card" style="margin-top: 16px">
                             <div class="card-title">角色与权限</div>
@@ -2210,7 +2440,7 @@
             </el-form>
             <template #footer>
                 <el-button @click="showInvoiceDialog=false">取消</el-button>
-                <el-button type="primary" @click="submitInvoiceRequest" :loading="submitting">提交申请</el-button>
+                <el-button type="primary" @click="submitInvoiceRequest" :loading="invoiceSubmitting">提交申请</el-button>
             </template>
         </el-dialog>
 
@@ -2220,11 +2450,34 @@
                 <el-form-item label="发票号">
                     <el-input v-model="issueInvoiceForm.invoice_no" placeholder="请输入发票号"></el-input>
                 </el-form-item>
-                <el-form-item label="发票文件(PDF)">
-                    <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" accept=".pdf" :on-success="onInvoiceFileUpload">
-                        <el-button plain>上传发票PDF</el-button>
+                <el-form-item label="开票日期" required>
+                    <el-date-picker v-model="issueInvoiceForm.invoice_date" type="date" value-format="YYYY-MM-DD" placeholder="选择实际开票日期" style="width:100%"></el-date-picker>
+                </el-form-item>
+                <el-form-item label="发票文件（最多10个）">
+                    <el-upload
+                        action="/api/upload"
+                        :show-file-list="false"
+                        :with-credentials="true"
+                        :data="{ upload_purpose: 'invoice' }"
+                        multiple
+                        accept=".pdf,.ofd,.xml,.jpg,.jpeg,.png,.gif,.webp,.bmp,.heic"
+                        :before-upload="beforeIssueInvoiceFileUpload"
+                        :on-success="onInvoiceFileUpload"
+                        :on-error="onInvoiceFileUploadError"
+                    >
+                        <el-button plain>上传发票文件</el-button>
                     </el-upload>
-                    <a v-if="issueInvoiceForm.invoice_file_path" :href="issueInvoiceForm.invoice_file_path" target="_blank" style="margin-left:12px;color:#409eff;">查看已上传文件</a>
+                    <div v-if="attachmentList(issueInvoiceForm.invoice_file_path).length" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+                        <div v-for="(file, index) in attachmentList(issueInvoiceForm.invoice_file_path)" :key="file.url" style="display:inline-flex;align-items:center;gap:4px">
+                            <a :href="file.url" target="_blank" class="badge badge-blue">发票文件 {{ index + 1 }}</a>
+                            <el-tooltip content="移除文件">
+                                <el-button circle size="small" type="danger" plain @click="removeIssueInvoiceFile(file.url)">
+                                    <el-icon><Close/></el-icon>
+                                </el-button>
+                            </el-tooltip>
+                        </div>
+                    </div>
+                    <div style="font-size:12px;color:#9ca3af;margin-top:8px">支持 PDF、OFD、XML、JPG、PNG、GIF、WEBP、BMP、HEIC</div>
                 </el-form-item>
             </el-form>
             <template #footer>
@@ -2586,11 +2839,11 @@
                         :with-credentials="true"
                         :on-success="onContractFileSuccess"
                         :before-upload="beforeContractFileUpload"
-                        :limit="5"
+                        :limit="10"
                         accept=".jpg,.jpeg,.png,.pdf,.doc,.docx"
                     >
                         <el-button type="primary" plain><el-icon><Upload/></el-icon> 上传附件</el-button>
-                        <template #tip><div class="el-upload__tip">支持 jpg/png/pdf/doc 格式，最多5个文件</div></template>
+                        <template #tip><div class="el-upload__tip">支持 jpg/png/pdf/doc 格式，最多10个文件</div></template>
                     </el-upload>
                     <div v-if="attachmentList(newContract.contract_file).length" class="attachment-grid">
                         <a v-for="file in attachmentList(newContract.contract_file)" :key="file.url" :href="file.url" target="_blank" class="attachment-card">
@@ -2819,12 +3072,19 @@
                 </el-row>
                 <el-row :gutter="16">
                     <el-col :span="24">
-                        <el-form-item label="客户首付截图" required>
+                        <el-form-item label="客户首付凭证（可多张）" required>
                             <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-                                <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onOrderScreenshotUpload" accept=".jpg,.jpeg,.png,.pdf">
-                                    <el-button type="warning" plain>上传首付截图</el-button>
+                                <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onOrderScreenshotUpload" multiple accept=".jpg,.jpeg,.png,.pdf">
+                                    <el-button type="warning" plain>上传付款凭证</el-button>
                                 </el-upload>
-                                <a v-if="newOrder.customer_screenshot_path" :href="newOrder.customer_screenshot_path" target="_blank" class="badge badge-blue">已上传，点击查看</a>
+                                <div v-for="(file, index) in attachmentList(newOrder.customer_screenshot_path)" :key="file.url" style="display:inline-flex;align-items:center;gap:4px">
+                                    <a :href="file.url" target="_blank" class="badge badge-blue">付款凭证 {{ index + 1 }}</a>
+                                    <el-tooltip content="移除凭证">
+                                        <el-button circle size="small" type="danger" plain @click="removeOrderScreenshot(file.url)">
+                                            <el-icon><Close/></el-icon>
+                                        </el-button>
+                                    </el-tooltip>
+                                </div>
                             </div>
                         </el-form-item>
                     </el-col>
@@ -2851,6 +3111,195 @@
                 <el-button @click="showOrderDialog = false">取消</el-button>
                 <el-button plain @click="submitSalesOrder(true)" :loading="submitting">暂存草稿</el-button>
                 <el-button type="primary" @click="submitSalesOrder(false)" :loading="submitting">提交报单</el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog v-model="showRenewalDialog" title="发起续租" width="640" :close-on-click-modal="false">
+            <div v-if="renewalTarget" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 16px;margin-bottom:16px">
+                <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px">
+                    <span>车牌：<b>{{ renewalTarget.plate_number || renewalTarget.vehicle_plate_number || '-' }}</b></span>
+                    <span>客户：<b>{{ renewalTarget.customer_name || '-' }}</b></span>
+                    <span>原到期日：<b>{{ renewalTarget.contract_end_date || '-' }}</b></span>
+                </div>
+                <div style="font-size:12px;color:#64748b;margin-top:6px">续租车辆不回库，账单从原合同到期日次日连续生成。</div>
+            </div>
+            <el-form :model="renewalForm" label-position="top">
+                <el-row :gutter="16">
+                    <el-col :span="12">
+                        <el-form-item label="续租起租日">
+                            <el-input :model-value="renewalForm.new_start_date" disabled></el-input>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="12">
+                        <el-form-item label="账单周期" required>
+                            <el-select v-model="renewalForm.billing_cycle" style="width:100%">
+                                <el-option label="按月" value="按月"></el-option>
+                                <el-option label="按天" value="按天"></el-option>
+                            </el-select>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
+                <el-row :gutter="16">
+                    <el-col :span="12">
+                        <el-form-item label="续租月租（元）" required>
+                            <el-input-number v-model="renewalForm.monthly_rent" :min="0.01" :precision="2" :step="100" style="width:100%"></el-input-number>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="12" v-if="renewalForm.billing_cycle==='按月'">
+                        <el-form-item label="续租期数（月）" required>
+                            <el-input-number v-model="renewalForm.loan_periods" :min="1" :step="1" style="width:100%"></el-input-number>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="12" v-else>
+                        <el-form-item label="续租天数" required>
+                            <el-input-number v-model="renewalForm.rental_days" :min="1" :step="1" style="width:100%"></el-input-number>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
+                <el-row :gutter="16">
+                    <el-col :span="12">
+                        <el-form-item label="续租到期日">
+                            <el-input :model-value="renewalPreviewEndDate" disabled></el-input>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="12">
+                        <el-form-item label="续租标准押金（元）" required>
+                            <el-input-number v-model="renewalForm.deposit_required" :min="0" :precision="2" :step="500" style="width:100%"></el-input-number>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
+                <el-alert v-if="Number(renewalTarget && renewalTarget.contract_deposit || 0) !== Number(renewalForm.deposit_required || 0)" type="warning" :closable="false" style="margin-bottom:14px"
+                    :title="`续租标准押金与原合同押金 ¥${numberFormat(renewalTarget && renewalTarget.contract_deposit || 0)} 不一致，运营激活时会核对差额`"></el-alert>
+                <el-form-item label="续租说明">
+                    <el-input v-model="renewalForm.application_note" type="textarea" :rows="3" placeholder="填写续租背景、租金约定或其他说明"></el-input>
+                </el-form-item>
+            </el-form>
+            <template #footer>
+                <el-button @click="showRenewalDialog = false">取消</el-button>
+                <el-button type="warning" @click="submitRenewal" :loading="submitting">提交老板审批</el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog v-model="showRenewalActivateDialog" title="运营激活续租" width="620" :close-on-click-modal="false">
+            <div v-if="renewalActivateTarget" style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px">
+                <div><b>{{ renewalActivateTarget.plate_number || renewalActivateTarget.vehicle_plate_number || '-' }}</b> · {{ renewalActivateTarget.customer_name || '-' }}</div>
+                <div style="margin-top:6px">续租：{{ renewalActivateTarget.new_start_date || renewalActivateTarget.start_date }} 至 {{ renewalActivateTarget.new_end_date || renewalActivateTarget.end_date }}</div>
+                <div style="margin-top:6px">押金标准 ¥{{ numberFormat(renewalActivateTarget.deposit_required || renewalActivateTarget.deposit || 0) }}，需补缴 <b style="color:#dc2626">¥{{ numberFormat(renewalActivateTarget.deposit_topup_amount || 0) }}</b></div>
+            </div>
+            <el-form :model="renewalActivateForm" label-position="top">
+                <el-form-item label="续租合同" required>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+                        <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onRenewalContractUpload" accept=".jpg,.jpeg,.png,.pdf,.doc,.docx">
+                            <el-button type="primary" plain><el-icon><Upload/></el-icon> 上传续租合同</el-button>
+                        </el-upload>
+                        <a v-if="renewalActivateForm.contract_file" :href="renewalActivateForm.contract_file" target="_blank" class="badge badge-green">已上传，点击查看</a>
+                    </div>
+                </el-form-item>
+                <el-form-item label="续租合同编号" required>
+                    <el-input v-model="renewalActivateForm.contract_number" placeholder="填写续租合同编号"></el-input>
+                </el-form-item>
+                <template v-if="Number(renewalActivateTarget && renewalActivateTarget.deposit_topup_amount || 0) > 0">
+                    <el-alert type="warning" :closable="false" style="margin-bottom:14px"
+                        :title="`续租生效前须补足押金 ¥${numberFormat(renewalActivateTarget.deposit_topup_amount)}`"></el-alert>
+                    <el-form-item label="押金补缴金额（元）" required>
+                        <el-input-number v-model="renewalActivateForm.deposit_topup_amount" :min="Number(renewalActivateTarget.deposit_topup_amount || 0)" :precision="2" :step="500" style="width:100%"></el-input-number>
+                    </el-form-item>
+                    <el-form-item label="押金补缴流水号">
+                        <el-input v-model="renewalActivateForm.deposit_bank_serial" placeholder="填写银行流水号"></el-input>
+                    </el-form-item>
+                    <el-form-item>
+                        <el-checkbox v-model="renewalActivateForm.deposit_topup_confirmed">确认押金差额已到账</el-checkbox>
+                    </el-form-item>
+                </template>
+            </el-form>
+            <template #footer>
+                <el-button @click="showRenewalActivateDialog = false">取消</el-button>
+                <el-button type="success" @click="submitRenewalActivation" :loading="submitting">激活续租</el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog v-model="showRefurbishmentCompleteDialog" title="完成整备" width="560" :close-on-click-modal="false">
+            <div v-if="refurbishmentTarget" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px">
+                <div>车牌：<b>{{ refurbishmentTarget.plate_number || '-' }}</b>　车型：<b>{{ refurbishmentTarget.car_type || '-' }}</b></div>
+                <div style="margin-top:6px">维修结果：{{ refurbishmentTarget.repair_note || '无' }}</div>
+            </div>
+            <el-form :model="refurbishmentCompleteForm" label-position="top">
+                <el-form-item label="整备完成情况" required>
+                    <el-input v-model="refurbishmentCompleteForm.completion_note" type="textarea" :rows="4" placeholder="填写清洁、保养、复检及最终车辆状态"></el-input>
+                </el-form-item>
+                <el-form-item label="整备完成后用途" required>
+                    <el-select v-model="refurbishmentCompleteForm.available_for" style="width:100%">
+                        <el-option label="可租/可售" value="可租/可售"></el-option>
+                        <el-option label="仅可租" value="可租"></el-option>
+                        <el-option label="仅可售" value="可售"></el-option>
+                    </el-select>
+                </el-form-item>
+            </el-form>
+            <template #footer>
+                <el-button @click="showRefurbishmentCompleteDialog = false">取消</el-button>
+                <el-button type="success" @click="submitRefurbishmentComplete" :loading="submitting">完成整备并回库</el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog v-model="showUrgeDialog" title="登记催收记录" width="640" :close-on-click-modal="false">
+            <div v-if="urgeTarget" style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px">
+                <div>车牌：<b>{{ urgeTarget.plate_number || '-' }}</b>　客户：<b>{{ urgeTarget.customer_name || '-' }}</b></div>
+                <div style="margin-top:6px">到期日：{{ urgeTarget.due_date || '-' }}　逾期金额：¥{{ numberFormat(urgeTarget.amount || 0) }}</div>
+            </div>
+            <el-form :model="urgeForm" label-position="top">
+                <el-row :gutter="16">
+                    <el-col :span="12"><el-form-item label="联系人"><el-input v-model="urgeForm.contact_name"></el-input></el-form-item></el-col>
+                    <el-col :span="12">
+                        <el-form-item label="联系方式">
+                            <el-select v-model="urgeForm.contact_method" style="width:100%">
+                                <el-option label="电话" value="电话"></el-option>
+                                <el-option label="微信" value="微信"></el-option>
+                                <el-option label="短信" value="短信"></el-option>
+                                <el-option label="上门" value="上门"></el-option>
+                                <el-option label="其他" value="其他"></el-option>
+                            </el-select>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
+                <el-row :gutter="16">
+                    <el-col :span="12">
+                        <el-form-item label="联系时间" required>
+                            <el-date-picker v-model="urgeForm.contacted_at" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" style="width:100%"></el-date-picker>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="12">
+                        <el-form-item label="下次联系日期">
+                            <el-date-picker v-model="urgeForm.next_contact_date" type="date" value-format="YYYY-MM-DD" style="width:100%"></el-date-picker>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
+                <el-row :gutter="16">
+                    <el-col :span="12">
+                        <el-form-item label="催收结果" required>
+                            <el-input v-model="urgeForm.result" placeholder="如：已联系，承诺还款"></el-input>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="12">
+                        <el-form-item label="承诺还款日期">
+                            <el-date-picker v-model="urgeForm.promised_repay_date" type="date" value-format="YYYY-MM-DD" style="width:100%"></el-date-picker>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
+                <el-form-item label="催收备注">
+                    <el-input v-model="urgeForm.remark" type="textarea" :rows="3"></el-input>
+                </el-form-item>
+                <el-form-item label="催收证据" required>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+                        <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onUrgeEvidenceDialogUpload" accept=".jpg,.jpeg,.png,.pdf">
+                            <el-button type="warning" plain><el-icon><Upload/></el-icon> 上传证据</el-button>
+                        </el-upload>
+                        <a v-if="urgeForm.evidence_path" :href="urgeForm.evidence_path" target="_blank" class="badge badge-green">已上传，点击查看</a>
+                    </div>
+                </el-form-item>
+            </el-form>
+            <template #footer>
+                <el-button @click="showUrgeDialog = false">取消</el-button>
+                <el-button type="warning" @click="submitUrge" :loading="submitting">提交催收记录</el-button>
             </template>
         </el-dialog>
 
@@ -2959,7 +3408,7 @@
             </template>
         </el-dialog>
 
-        <el-dialog v-model="showRepairCompleteDialog" title="维修完成入库" width="620" :close-on-click-modal="false">
+        <el-dialog v-model="showRepairCompleteDialog" title="维修完成" width="620" :close-on-click-modal="false">
             <div v-if="repairTarget" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 16px;margin-bottom:16px">
                 <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px">
                     <span>车牌：<b>{{ repairTarget.plate_number || '-' }}</b></span>
@@ -2971,6 +3420,8 @@
                 </div>
             </div>
             <el-form :model="repairCompleteForm" label-position="top">
+                <el-alert type="info" :closable="false" style="margin-bottom:14px"
+                    title="维修完成后车辆进入待整备，运营完成整备后才会重新入库。" />
                 <el-form-item label="维修完成日期" required>
                     <el-date-picker v-model="repairCompleteForm.repair_completed_at" type="date" value-format="YYYY-MM-DD" style="width:100%"></el-date-picker>
                 </el-form-item>
@@ -2980,10 +3431,36 @@
                 <el-form-item label="维修费用（元）">
                     <el-input-number v-model="repairCompleteForm.repair_cost" :min="0" :precision="2" :step="100" style="width:100%"></el-input-number>
                 </el-form-item>
+                <el-row :gutter="12">
+                    <el-col :span="8">
+                        <el-form-item label="维修后外观照片" required>
+                            <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" accept=".jpg,.jpeg,.png" :on-success="onRepairCompleteUpload('repair_appearance_photos')">
+                                <el-button plain>上传照片</el-button>
+                            </el-upload>
+                            <a v-if="repairCompleteForm.repair_appearance_photos" :href="repairCompleteForm.repair_appearance_photos" target="_blank" style="display:block;margin-top:6px;font-size:12px">查看已上传</a>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="8">
+                        <el-form-item label="维修后里程照片" required>
+                            <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" accept=".jpg,.jpeg,.png" :on-success="onRepairCompleteUpload('repair_mileage_photos')">
+                                <el-button plain>上传照片</el-button>
+                            </el-upload>
+                            <a v-if="repairCompleteForm.repair_mileage_photos" :href="repairCompleteForm.repair_mileage_photos" target="_blank" style="display:block;margin-top:6px;font-size:12px">查看已上传</a>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="8">
+                        <el-form-item label="维修后工具照片" required>
+                            <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" accept=".jpg,.jpeg,.png" :on-success="onRepairCompleteUpload('repair_tools_photos')">
+                                <el-button plain>上传照片</el-button>
+                            </el-upload>
+                            <a v-if="repairCompleteForm.repair_tools_photos" :href="repairCompleteForm.repair_tools_photos" target="_blank" style="display:block;margin-top:6px;font-size:12px">查看已上传</a>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
             </el-form>
             <template #footer>
                 <el-button @click="showRepairCompleteDialog = false">取消</el-button>
-                <el-button type="success" @click="submitRepairComplete" :loading="submitting">确认维修完成并入库</el-button>
+                <el-button type="success" @click="submitRepairComplete" :loading="submitting">确认维修完成</el-button>
             </template>
         </el-dialog>
 
@@ -3190,6 +3667,28 @@
                 return { '老板': '#2563eb', '运营': '#d97706', '财务': '#059669', '车管': '#ef4444', '销售': '#7c3aed' }[role] || '#6b7280';
             }
 
+            async function readApiJson(response, fallbackMessage) {
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data.success) {
+                    throw new Error(data.message || `${fallbackMessage}（接口状态 ${response.status}）`);
+                }
+                return data;
+            }
+
+            async function runSubmitting(work, fallbackMessage) {
+                if (submitting.value) return null;
+                submitting.value = true;
+                try {
+                    return await work();
+                } catch (error) {
+                    console.error(fallbackMessage, error);
+                    ElementPlus.ElMessage.error(error.message || fallbackMessage);
+                    return null;
+                } finally {
+                    submitting.value = false;
+                }
+            }
+
             async function doLogin() {
                 if (!loginForm.username || !loginForm.password) return ElementPlus.ElMessage.warning('请输入用户名和密码');
                 loginLoading.value = true;
@@ -3203,7 +3702,7 @@
                         loadInitialDataForUser();
                     } else { ElementPlus.ElMessage.error(data.message || '登录失败'); }
                 } catch (e) { ElementPlus.ElMessage.error('网络错误'); }
-                loginLoading.value = false;
+                finally { loginLoading.value = false; }
             }
 
             function quickLogin(a) {
@@ -3255,6 +3754,18 @@
                     && row.sales_mode === '租赁'
                     && ['租赁中', '经营租赁'].includes(row.vehicle_status);
             }
+            function canRenewFromOrder(row) {
+                if (!currentUser.value || !['销售', '老板'].includes(currentUser.value.role)) return false;
+                if (!row || !row.contract_id || row.order_status !== '已激活') return false;
+                if (!['租赁', '经营租赁', '以租代售', '以租代购'].includes(row.sales_mode)) return false;
+                if (['已结清', '已终止'].includes(row.contract_status)) return false;
+                if (['已结清', '已过户'].includes(row.vehicle_status)) return false;
+                if (!row.contract_end_date || row.contract_end_date < todayString()) return false;
+                return !renewals.value.some(item =>
+                    Number(item.original_contract_id) === Number(row.contract_id)
+                    && ['待老板审批', '待运营处理', '已生效'].includes(item.status)
+                );
+            }
             function initiateReturnFromOrder(row) {
                 if (!canReturnFromOrder(row)) return;
                 // 用车辆 id 在资产行里找到完整数据（含银行卡、asset_status 等），再走统一的退车表单
@@ -3286,6 +3797,32 @@
                 const m = String(d.getMonth() + 1).padStart(2, '0');
                 const day = String(d.getDate()).padStart(2, '0');
                 return `${d.getFullYear()}-${m}-${day}`;
+            }
+            function currentDateTimeString() {
+                const d = new Date();
+                const h = String(d.getHours()).padStart(2, '0');
+                const minute = String(d.getMinutes()).padStart(2, '0');
+                const second = String(d.getSeconds()).padStart(2, '0');
+                return `${todayString()} ${h}:${minute}:${second}`;
+            }
+            function addDaysToDateString(value, days) {
+                if (!value) return '';
+                const [year, month, day] = String(value).slice(0, 10).split('-').map(Number);
+                if (!year || !month || !day) return '';
+                const date = new Date(year, month - 1, day);
+                date.setDate(date.getDate() + Number(days || 0));
+                return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+            }
+            function addMonthsClampedToDateString(value, months) {
+                if (!value) return '';
+                const [year, month, day] = String(value).slice(0, 10).split('-').map(Number);
+                if (!year || !month || !day) return '';
+                const monthIndex = month - 1 + Number(months || 0);
+                const targetYear = year + Math.floor(monthIndex / 12);
+                const normalizedMonth = ((monthIndex % 12) + 12) % 12;
+                const lastDay = new Date(targetYear, normalizedMonth + 1, 0).getDate();
+                const targetDay = Math.min(day, lastDay);
+                return `${targetYear}-${String(normalizedMonth + 1).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`;
             }
             function normalizeOrderTailgate(value) {
                 const raw = String(value || '').trim();
@@ -3448,7 +3985,15 @@
             const uploadedFiles = ref([]);
             const vehicles = ref([]);
             const contracts = ref([]);
+            const renewals = ref([]);
+            const refurbishmentRecords = ref([]);
             const pendingOwnershipTransfers = ref([]);
+            const legacyImportFileUrl = ref('');
+            const legacyImportFileName = ref('');
+            const legacyImportCutoverDate = ref(new Date().toISOString().slice(0, 10));
+            const legacyImportPreview = ref(null);
+            const legacyImportBatches = ref([]);
+            const legacyImportLoading = ref(false);
             // 操作列宽度：按按钮文字+padding+间距精确计算（上限 520px）
             // Element Plus small button: border=2, padding-h=22(11*2), font=12px, gap=12
             const _tw = (s) => { let w=0; for(const c of s){w += (c>='一'&&c<='鿿')?12:7.2 } return w; };
@@ -3510,8 +4055,8 @@
                 if (!row.is_deleted && canInitiateVehicleOrder(row)) b.push(BTN.order);
                 if (!row.is_deleted && role === '运营' && row.contract_type === '以租代售') b.push(BTN.transfer);
                 if (!row.is_deleted && canInitiateVehicleReturn(row)) b.push(BTN.returnCar);
-                if (!row.is_deleted && ['运营', '车管'].includes(role) && row.status === '待维修') b.push(BTN.startRepair);
-                if (!row.is_deleted && ['运营', '车管'].includes(role) && ['待维修', '维修中'].includes(row.status)) b.push(BTN.completeRepair);
+                if (!row.is_deleted && role === '运营' && row.status === '待维修') b.push(BTN.startRepair);
+                if (!row.is_deleted && role === '运营' && ['待维修', '维修中'].includes(row.status)) b.push(BTN.completeRepair);
                 if (row.is_deleted && role === '老板') b.push(BTN.restore);
                 if (!row.is_deleted && role === '老板') b.push(BTN.del);
                 return b;
@@ -3529,6 +4074,13 @@
             const stats = ref({});
             const dashboardWorkspace = ref({ cards: [], todo_groups: [], data_as_of: '' });
             const salesOrders = ref([]);
+            const orderFilters = reactive({
+                plate_number: '',
+                order_status: '',
+                customer: '',
+                car_type: '',
+                salesperson: ''
+            });
             const overdueList = ref([]);
             const insuranceWarnings = ref([]);
             const pendingBills = ref([]);
@@ -3560,12 +4112,11 @@
             function onReceivableScreenshotUpload(res) { if (res.url) receivableScreenshotPath.value = res.url; }
             async function submitReceivableScreenshot() {
                 if (!receivableScreenshotPath.value) return ElementPlus.ElMessage.warning('请上传截图');
-                submitting.value = true;
-                const res = await fetch(`/api/receivables/${receivableTarget.value.id}/screenshot`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ screenshot_path: receivableScreenshotPath.value }) });
-                submitting.value = false;
-                const d = await res.json();
-                if (!d.success) return ElementPlus.ElMessage.error(d.message);
-                ElementPlus.ElMessage.success(d.message); showReceivableScreenshotDialog.value = false; fetchReceivables();
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/receivables/${receivableTarget.value.id}/screenshot`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ screenshot_path: receivableScreenshotPath.value }) });
+                    const data = await readApiJson(res, '上传收款凭证失败');
+                    ElementPlus.ElMessage.success(data.message); showReceivableScreenshotDialog.value = false; fetchReceivables();
+                }, '上传收款凭证失败');
             }
             function openReceivableSettle(row) {
                 receivableTarget.value = row;
@@ -3578,12 +4129,11 @@
                 const outstanding = receivableOutstanding(receivableTarget.value);
                 const amount = Number(receivableSettleForm.received_amount || 0);
                 if (amount <= 0 || amount > outstanding) return ElementPlus.ElMessage.warning(`本次实收金额应大于0且不超过¥${numberFormat(outstanding)}`);
-                submitting.value = true;
-                const res = await fetch(`/api/receivables/${receivableTarget.value.id}/settle`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bank_serial: receivableSettleForm.bank_serial, received_amount: amount }) });
-                submitting.value = false;
-                const d = await res.json();
-                if (!d.success) return ElementPlus.ElMessage.error(d.message);
-                ElementPlus.ElMessage.success(d.message); showReceivableSettleDialog.value = false; fetchReceivables();
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/receivables/${receivableTarget.value.id}/settle`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bank_serial: receivableSettleForm.bank_serial, received_amount: amount }) });
+                    const data = await readApiJson(res, '收款核销失败');
+                    ElementPlus.ElMessage.success(data.message); showReceivableSettleDialog.value = false; fetchReceivables();
+                }, '收款核销失败');
             }
             const reconSearch = ref('');
             const reconTableRef = ref(null);
@@ -3612,6 +4162,7 @@
             const reconInitiateScreenshot = ref('');
             const currentRepayments = ref([]);
             const currentFactoryRepayments = ref([]);
+            const currentExternalFinanceRepayments = ref([]);
             const repaymentTab = ref('customer');
             const repaymentLoading = ref(false);
             const showAddVehicle = ref(false);
@@ -3760,6 +4311,7 @@
             const deliveryTarget = ref(null);
             const feeContractId = ref(null);
             const submitting = ref(false);
+            const invoiceSubmitting = ref(false);
             const orderPrefillLock = ref(false);
             const currentOrderDraftId = ref(null);
             // 审批中心
@@ -3772,6 +4324,9 @@
             const modelGuidancePrices = ref([]);
             const financePlans = ref([]);
             const modelGuidanceSearch = ref('');
+            const guidanceBoard = reactive({ as_of: '', lease_prices: [], finance_plans: [] });
+            const guidanceBoardLoading = ref(false);
+            const guidanceBoardSearch = ref('');
             const guidanceHistoryCache = ref({});
             const guidanceWorkbenchCarType = ref('');
             const guidanceWorkbenchRows = ref([]);
@@ -3793,6 +4348,20 @@
                     ? modelGuidancePrices.value.filter(r => (r.car_type || '').includes(modelGuidanceSearch.value))
                     : modelGuidancePrices.value
             );
+            const filteredGuidanceLeasePrices = computed(() => {
+                const keyword = guidanceBoardSearch.value.trim();
+                if (!keyword) return guidanceBoard.lease_prices;
+                return guidanceBoard.lease_prices.filter(row =>
+                    `${row.car_type || ''} ${row.is_new || ''} ${row.remark || ''}`.includes(keyword)
+                );
+            });
+            const filteredGuidanceFinancePlans = computed(() => {
+                const keyword = guidanceBoardSearch.value.trim();
+                if (!keyword) return guidanceBoard.finance_plans;
+                return guidanceBoard.finance_plans.filter(row =>
+                    `${row.car_type || ''} ${row.box_type || ''} ${row.plan_name || ''} ${row.remark || ''}`.includes(keyword)
+                );
+            });
             const modelGuidanceForm = reactive({
                 car_type: '', guidance_price: 0, is_new: '新车',
                 remark: '',
@@ -3813,7 +4382,8 @@
             const blacklistForm = reactive({ customer_name: '', customer_phone: '', id_card: '', level: '禁止报单', reason: '', status: '生效' });
             const invoiceForm = reactive({ contract_id: null, amount: 0, period: null, receiving_company: '', title_type: '企业', invoice_entity_name: '', invoice_entity_tax_no: '' });
             const showIssueInvoiceDialog = ref(false); // 财务开票对话框
-            const issueInvoiceForm = reactive({ id: null, invoice_no: '', invoice_file_path: '' });
+            const issueInvoiceForm = reactive({ id: null, invoice_no: '', invoice_date: '', invoice_file_path: '' });
+            const issueInvoiceUploadPending = ref(0);
             const transferForm = reactive({ contract_id: null, new_owner_name: '', new_owner_id_card: '', transfer_date: '', transfer_doc_path: '' });
             const rebateForm = reactive({ vehicle_id: null, contract_id: null, rebate_amount: 0, rebate_date: '', remark: '' });
 
@@ -3962,7 +4532,62 @@
             const repairCompleteForm = reactive({
                 repair_completed_at: todayString(),
                 repair_completion_note: '',
-                repair_cost: 0
+                repair_cost: 0,
+                repair_appearance_photos: '',
+                repair_mileage_photos: '',
+                repair_tools_photos: ''
+            });
+            const showRenewalDialog = ref(false);
+            const renewalTarget = ref(null);
+            const renewalForm = reactive({
+                new_start_date: '',
+                billing_cycle: '按月',
+                monthly_rent: 0,
+                loan_periods: 1,
+                rental_days: 1,
+                deposit_required: 0,
+                application_note: ''
+            });
+            const showRenewalActivateDialog = ref(false);
+            const renewalActivateTarget = ref(null);
+            const renewalActivateForm = reactive({
+                contract_file: '',
+                contract_number: '',
+                deposit_topup_confirmed: false,
+                deposit_topup_amount: 0,
+                deposit_bank_serial: ''
+            });
+            const showRefurbishmentCompleteDialog = ref(false);
+            const refurbishmentTarget = ref(null);
+            const refurbishmentCompleteForm = reactive({
+                completion_note: '',
+                available_for: '可租/可售'
+            });
+            const showUrgeDialog = ref(false);
+            const urgeTarget = ref(null);
+            const urgeForm = reactive({
+                contact_name: '',
+                contact_method: '电话',
+                contacted_at: '',
+                next_contact_date: '',
+                result: '',
+                promised_repay_date: '',
+                remark: '',
+                evidence_path: ''
+            });
+            const renewalPreviewEndDate = computed(() => {
+                const startDate = renewalTarget.value
+                    ? addDaysToDateString(renewalTarget.value.contract_end_date, 1)
+                    : '';
+                if (!startDate) return '';
+                if (renewalForm.billing_cycle === '按天') {
+                    return Number(renewalForm.rental_days || 0) > 0
+                        ? addDaysToDateString(startDate, Number(renewalForm.rental_days) - 1)
+                        : '';
+                }
+                if (Number(renewalForm.loan_periods || 0) <= 0) return '';
+                const exclusiveEnd = addMonthsClampedToDateString(startDate, Number(renewalForm.loan_periods));
+                return addDaysToDateString(exclusiveEnd, -1);
             });
 
 
@@ -3971,11 +4596,13 @@
             // ===== Menu Items with SVGs =====
             const menuItems = [
                 { key: 'dashboard', label: '仪表盘', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>' },
+                { key: 'guidance_board', label: '指导价看板', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M7 15l4-4 3 2 4-5"/><circle cx="7" cy="15" r="1"/><circle cx="11" cy="11" r="1"/><circle cx="14" cy="13" r="1"/><circle cx="18" cy="8" r="1"/></svg>' },
                 { key: 'orders', label: '销售报单', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 17A2.5 2.5 0 014 14.5V5a2 2 0 012-2h14v14"/><path d="M8 7h8"/><path d="M8 11h8"/></svg>' },
                 { key: 'assets', label: '车辆管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-2-2.1-3.2C13.2 5.9 12.2 5.5 11.1 5.5H5c-1.1 0-2 .9-2 2v7.5c0 .6.4 1 1 1h1"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/></svg>' },
                 { key: 'completion_history', label: '历史完结', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5"/><path d="M3.6 12a8.4 8.4 0 1 0 2.1-5.6L3 8"/><path d="M12 7v5l3.5 2"/></svg>' },
                 { key: 'approvals', label: '审批中心', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
                 { key: 'bills', label: '账单管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>' },
+                { key: 'receiving_companies', label: '收款公司', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21h18"/><path d="M5 21V8l7-4 7 4v13"/><path d="M9 21v-5h6v5"/><path d="M8 11h.01"/><path d="M12 11h.01"/><path d="M16 11h.01"/></svg>' },
                 { key: 'invoice', label: '发票申请', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>' },
                 { key: 'reconciliation', label: '对账单', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22,4 12,14.01 9,11.01"/></svg>' },
                 { key: 'risk', label: '锁车管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>' },
@@ -3991,11 +4618,13 @@
 
             const pageMeta = {
                 dashboard: { title: '仪表盘', desc: '车辆资产运营数据总览', action: '' },
+                guidance_board: { title: '指导价看板', desc: '全员查看当前租赁指导价与以租代售方案', action: '' },
                 orders: { title: '销售报单', desc: '销售录单锁车、财务确认客户意向，驱动后续线下合同上传', action: '新建报单' },
                 assets: { title: '车辆管理', desc: '上传经销商买断库存 Excel 批量入库，按表格维度展示车辆信息', action: '上传入库' },
                 completion_history: { title: '历史完结', desc: '已完成退车入库与以租代售过户记录', action: '' },
                 approvals: { title: '审批中心', desc: '报单确认 · 合同上传 · 发票处理 · 锁车审批 · 退车入库与退还押金', action: '' },
                 bills: { title: '账单管理', desc: '查看、核销和管理所有财务账单', action: '' },
+                receiving_companies: { title: '收款公司', desc: '维护收款公司及账户信息', action: '' },
                 invoice: { title: '发票申请', desc: '运营发起开票申请，财务审核开具', action: '' },
                 reconciliation: { title: '对账单', desc: '按客户查看待核销款项、已核销记录与处理进度', action: '' },
                 risk: { title: '锁车管理', desc: '逾期预警与锁车审批管理', action: '' },
@@ -4165,7 +4794,46 @@
 	                vehiclePageTotal.value = r.total || 0;
 	                assetPage.value = page;
 	            };
-            const fetchSalesOrders = async () => { salesOrders.value = await (await fetch('/api/sales-orders')).json(); };
+            const fetchSalesOrders = async () => {
+                const params = new URLSearchParams();
+                Object.entries(orderFilters).forEach(([key, value]) => {
+                    if (String(value || '').trim()) params.set(key, String(value).trim());
+                });
+                const suffix = params.toString() ? '?' + params.toString() : '';
+                salesOrders.value = await (await fetch('/api/sales-orders' + suffix)).json();
+            };
+            const fetchRenewals = async () => {
+                try {
+                    const res = await fetch('/api/renewals');
+                    const data = await res.json();
+                    renewals.value = Array.isArray(data) ? data : [];
+                } catch (e) {
+                    renewals.value = [];
+                }
+            };
+            const fetchRefurbishmentRecords = async () => {
+                if (!currentUser.value || currentUser.value.role !== '运营') {
+                    refurbishmentRecords.value = [];
+                    return;
+                }
+                try {
+                    const res = await fetch('/api/refurbishment-records');
+                    const data = await res.json();
+                    refurbishmentRecords.value = Array.isArray(data) ? data : [];
+                } catch (e) {
+                    refurbishmentRecords.value = [];
+                }
+            };
+            function resetOrderFilters() {
+                Object.assign(orderFilters, {
+                    plate_number: '',
+                    order_status: '',
+                    customer: '',
+                    car_type: '',
+                    salesperson: ''
+                });
+                fetchSalesOrders();
+            }
             const fetchContracts = async () => { contracts.value = await (await fetch('/api/contracts')).json(); };
             const fetchPendingOwnershipTransfers = async () => {
                 if (!currentUser.value || currentUser.value.role !== '运营') {
@@ -4231,6 +4899,87 @@
                     missingGuidanceAlerts.value = [];
                 }
             };
+            async function loadLegacyImportBatches() {
+                if (!currentUser.value || currentUser.value.role !== '老板') {
+                    legacyImportBatches.value = [];
+                    return;
+                }
+                try {
+                    const res = await fetch('/api/legacy-import/batches');
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.message || '迁移批次加载失败');
+                    legacyImportBatches.value = Array.isArray(data) ? data : [];
+                } catch (e) {
+                    legacyImportBatches.value = [];
+                }
+            }
+            function onLegacyImportUploadSuccess(res, file) {
+                if (!res.success) {
+                    ElementPlus.ElMessage.error(res.message || '台账上传失败');
+                    return;
+                }
+                legacyImportFileUrl.value = res.url;
+                legacyImportFileName.value = file.name || res.filename || '已选择台账';
+                legacyImportPreview.value = null;
+            }
+            async function previewLegacyImport() {
+                legacyImportLoading.value = true;
+                try {
+                    const res = await fetch('/api/legacy-import/workbook-preview', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            file_url: legacyImportFileUrl.value,
+                            cutover_date: legacyImportCutoverDate.value,
+                        }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok || !data.success) throw new Error(data.message || '台账校验失败');
+                    legacyImportPreview.value = data;
+                    ElementPlus.ElMessage.success(`校验完成：${data.summary.ready || 0} 条可导入`);
+                } catch (e) {
+                    legacyImportPreview.value = null;
+                    ElementPlus.ElMessage.error(e.message || '台账校验失败');
+                } finally {
+                    legacyImportLoading.value = false;
+                }
+            }
+            async function importLegacyContracts() {
+                const ready = legacyImportPreview.value?.summary?.ready || 0;
+                if (!ready) return;
+                try {
+                    await ElementPlus.ElMessageBox.confirm(
+                        `将导入 ${ready} 条已通过校验的历史履约合同。`,
+                        '确认历史履约迁移',
+                        { type: 'warning', confirmButtonText: '确认导入', cancelButtonText: '取消' },
+                    );
+                } catch (e) {
+                    return;
+                }
+                legacyImportLoading.value = true;
+                try {
+                    const res = await fetch('/api/legacy-import/batches', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            file_url: legacyImportFileUrl.value,
+                            cutover_date: legacyImportCutoverDate.value,
+                            selected_keys: legacyImportPreview.value.records
+                                .filter(item => item.import_status === 'ready')
+                                .map(item => item.legacy_contract_key),
+                        }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok || !data.success) throw new Error(data.message || '历史履约迁移失败');
+                    ElementPlus.ElMessage.success(data.message || '历史履约迁移完成');
+                    legacyImportPreview.value = null;
+                    await Promise.all([loadLegacyImportBatches(), fetchContracts(), fetchAll()]);
+                } catch (e) {
+                    ElementPlus.ElMessage.error(e.message || '历史履约迁移失败');
+                } finally {
+                    legacyImportLoading.value = false;
+                }
+            }
             const fetchModelGuidancePrices = async () => {
                 if (!currentUser.value) {
                     modelGuidancePrices.value = [];
@@ -4239,6 +4988,29 @@
                 const list = await (await fetch('/api/model-guidance-prices')).json();
                 modelGuidancePrices.value = Array.isArray(list) ? list : [];
                 notifyGuidancePriceUpdates();
+            };
+            const loadGuidanceBoard = async () => {
+                if (!currentUser.value || !hasPage('guidance_board')) {
+                    guidanceBoard.as_of = '';
+                    guidanceBoard.lease_prices = [];
+                    guidanceBoard.finance_plans = [];
+                    return;
+                }
+                guidanceBoardLoading.value = true;
+                try {
+                    const response = await fetch('/api/guidance-board');
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.message || '加载指导价看板失败');
+                    guidanceBoard.as_of = data.as_of || '';
+                    guidanceBoard.lease_prices = Array.isArray(data.lease_prices) ? data.lease_prices : [];
+                    guidanceBoard.finance_plans = Array.isArray(data.finance_plans) ? data.finance_plans : [];
+                } catch (e) {
+                    guidanceBoard.lease_prices = [];
+                    guidanceBoard.finance_plans = [];
+                    ElementPlus.ElMessage.error(e.message || '加载指导价看板失败');
+                } finally {
+                    guidanceBoardLoading.value = false;
+                }
             };
             const fetchReceivingCompanies = async () => {
                 if (!currentUser.value) return;
@@ -4298,16 +5070,20 @@
 	                fetchCarTypes();
 	                fetchSalesOrderCarOptions();
 	                fetchModelGuidancePrices();
+	                loadGuidanceBoard();
 	                fetchApprovalReminders();
 	                fetchMissingGuidanceAlerts();
 	                fetchSalesOrders();
 	                fetchReceivingCompanies();
 	                fetchRecon();
 	                fetchReceivables();
-	                fetchInvoices();
-	                fetchReturns();
-	                fetchLockRequests();
-	            }
+                fetchInvoices();
+                fetchReturns();
+                fetchLockRequests();
+                fetchRenewals();
+                fetchRefurbishmentRecords();
+                loadLegacyImportBatches();
+            }
 
             let assetChart = null, statusChartInst = null;
             const initCharts = () => {
@@ -4357,16 +5133,18 @@
 
 	            watch(currentPage, (page) => {
 	                if (page === 'dashboard') refreshDashboardPanels();
+                if (page === 'guidance_board') loadGuidanceBoard();
                 if (page === 'orders') { fetchSalesOrders(); loadFinancePlans(); }
                 if (page === 'assets') { fetchAll(); fetchContracts(); loadSkuInventory(); }
                 if (page === 'completion_history') { fetchCompletionHistory(); fetchReturns(); }
                 if (page === 'approvals' && !navigatingToPendingApproval) refreshApprovalCenter();
                 if (page === 'risk') { fetchOverdue(); fetchInsuranceWarnings(); fetchLockRequests(); }
                 if (page === 'bills') { fetchBills(); fetchContracts(); fetchInvoices(); fetchReceivingCompanies(); }
+                if (page === 'receiving_companies') fetchReceivingCompanies();
                 if (page === 'invoice') fetchInvoices();
                 if (page === 'profit') { fetchProfit(); fetchVehicleRebates(); }
                 if (page === 'reconciliation') { fetchRecon(); fetchReceivables(); }
-                if (page === 'settings') { fetchAll(); fetchModelGuidancePrices(); fetchMissingGuidanceAlerts(); fetchReceivingCompanies(); fetchCustomerBlacklist(); loadFinancePlans(); loadDictRows(); }
+                if (page === 'settings') { fetchAll(); fetchModelGuidancePrices(); fetchMissingGuidanceAlerts(); fetchReceivingCompanies(); fetchCustomerBlacklist(); loadFinancePlans(); loadDictRows(); loadLegacyImportBatches(); }
             });
             // 车辆管理筛选选项：优先取启用数据字典，同时合并真实库存规格，
             // 防止历史导入数据尚未回填字典时无法按库存筛选。
@@ -4596,8 +5374,17 @@
             });
             function onOrderScreenshotUpload(res) {
                 if (!res.success) return ElementPlus.ElMessage.error('首付截图上传失败');
-                newOrder.customer_screenshot_path = res.url || res.path || '';
-                ElementPlus.ElMessage.success('首付截图已上传');
+                const uploadedUrl = res.url || res.path || '';
+                const urls = attachmentList(newOrder.customer_screenshot_path).map(file => file.url);
+                if (uploadedUrl && !urls.includes(uploadedUrl)) urls.push(uploadedUrl);
+                newOrder.customer_screenshot_path = urls.join(',');
+                ElementPlus.ElMessage.success('付款凭证已上传');
+            }
+            function removeOrderScreenshot(url) {
+                newOrder.customer_screenshot_path = attachmentList(newOrder.customer_screenshot_path)
+                    .map(file => file.url)
+                    .filter(item => item !== url)
+                    .join(',');
             }
             function onFinancePlanSelect(plan) {
                 if (!plan) return;
@@ -4679,7 +5466,7 @@
                     const data = await response.json();
                     if (!data.success) throw new Error(data.message || '保存失败');
                     ElementPlus.ElMessage.success('租赁指导价已保存');
-                    await Promise.all([loadGuidanceWorkbench(), fetchModelGuidancePrices(), fetchMissingGuidanceAlerts()]);
+                    await Promise.all([loadGuidanceWorkbench(), fetchModelGuidancePrices(), fetchMissingGuidanceAlerts(), loadGuidanceBoard()]);
                 } catch (e) {
                     ElementPlus.ElMessage.error(e.message || '保存失败');
                 } finally {
@@ -4740,7 +5527,7 @@
                     const data = await response.json();
                     if (!data.success) throw new Error(data.message || '保存失败');
                     ElementPlus.ElMessage.success('以租代售方案已保存');
-                    await Promise.all([loadGuidanceWorkbench(), loadFinancePlans()]);
+                    await Promise.all([loadGuidanceWorkbench(), loadFinancePlans(), loadGuidanceBoard()]);
                 } catch (e) {
                     ElementPlus.ElMessage.error(e.message || '保存失败');
                 } finally {
@@ -4936,7 +5723,8 @@
                     vehicle_box_type: boxType,
                     tail_plate: normalizeOrderTailgate(vehicle.tailgate),
                     purchase_price: vehicle.purchase_price || 0,
-                    validation_status: 'valid',
+                    validation_status: vehicle.validation_status || 'valid',
+                    validation_message: vehicle.validation_message || '',
                     vehicle_category: vehicle.vehicle_category || '',
                     vehicle_engine_battery: vehicle.vehicle_engine_battery || '',
                     vehicle_power_battery: vehicle.vehicle_power_battery || '',
@@ -5141,8 +5929,10 @@
 	                    fetchPendingOwnershipTransfers();
 	                    fetchLockRequests();
 	                    if (currentPage.value === 'dashboard') refreshDashboardPanels();
+                    if (currentPage.value === 'guidance_board') loadGuidanceBoard();
                     if (currentPage.value === 'assets') fetchAll();
                     if (currentPage.value === 'completion_history') fetchCompletionHistory();
+                    if (currentPage.value === 'receiving_companies') fetchReceivingCompanies();
                     if (currentPage.value === 'settings') { fetchAll(); fetchModelGuidancePrices(); loadFinancePlans(); }
 	                }, 15000);
 	                window.addEventListener('focus', refreshDashboardWhenVisible);
@@ -5324,11 +6114,9 @@
             });
             const assetMenuCount = computed(() => pendingOwnershipTransferCount.value);
             const pendingRepairVehicles = computed(() => {
-                if (!currentUser.value || currentUser.value.role !== '车管') return [];
-                return returnList.value.filter(r =>
-                    Number(r.needs_repair || 0) === 1
-                    && !r.repair_completed_at
-                    && !!r.repair_queue_status
+                if (!currentUser.value || currentUser.value.role !== '运营') return [];
+                return refurbishmentRecords.value.filter(r =>
+                    ['待整备', '整备中'].includes(r.status)
                 );
             });
             const pendingSalesOrderCount = computed(() => {
@@ -5438,10 +6226,12 @@
                 { value: '', label: '全部', roles: ['销售', '运营', '财务', '车管', '老板'] },
                 { value: 'price_exception', label: '价格特批', roles: ['销售', '财务', '老板'] },
                 { value: 'order_exception', label: '报单审批', roles: ['销售', '财务', '老板'] },
+                { value: 'order_refund', label: '取消订单', roles: ['销售', '财务', '老板'] },
                 { value: 'sale_payment', label: '财务确认报单', roles: ['销售', '财务'] },
                 { value: 'initial_payment', label: '首次付款', roles: ['财务', '老板'] },
                 { value: 'lock_request', label: '锁车审批', roles: ['财务'] },
                 { value: 'return_stock', label: '退车入库', roles: ['销售', '车管', '运营', '财务', '老板'] },
+                { value: 'renewal', label: '续租审批', roles: ['销售', '运营', '老板'] },
                 { value: 'invoice', label: '发票审批', roles: ['运营', '财务', '老板'] },
             ];
             const visibleApprovalFilters = computed(() => {
@@ -5597,12 +6387,14 @@
                 return {
                     price_exception: '价格特批',
                     order_exception: '报单审批',
+                    order_refund: '取消订单退款',
                     contract_delivery: '历史合同审批',
                     initial_payment: '首次付款',
                     initial_payment_shortage: '不足额出库',
                     sale_payment: '财务确认报单',
                     lock_request: '锁车审批',
                     return_stock: '退车入库',
+                    renewal: '续租审批',
                     invoice: '发票审批',
                 }[type] || type;
             }
@@ -5610,12 +6402,14 @@
                 return {
                     price_exception: 'badge-red',
                     order_exception: 'badge-red',
+                    order_refund: 'badge-red',
                     contract_delivery: 'badge-blue',
                     initial_payment: 'badge-orange',
                     initial_payment_shortage: 'badge-red',
                     sale_payment: 'badge-purple',
                     lock_request: 'badge-red',
                     return_stock: 'badge-orange',
+                    renewal: 'badge-orange',
                     invoice: 'badge-blue',
                 }[type] || 'badge-gray';
             }
@@ -5960,6 +6754,7 @@
                 fetchCustomerBlacklist();
             }
             function openInvoiceDialog() {
+                invoiceSubmitting.value = false;
                 Object.assign(invoiceForm, { contract_id: null, amount: 0, period: null, receiving_company: '', title_type: '企业', invoice_entity_name: '', invoice_entity_tax_no: '' });
                 fetchContracts();
                 fetchReceivingCompanies();
@@ -5967,25 +6762,49 @@
             }
             async function submitInvoiceRequest() {
                 if (!invoiceForm.contract_id) return ElementPlus.ElMessage.warning('请选择合同');
-                const res = await fetch(`/api/contracts/${invoiceForm.contract_id}/invoices`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(invoiceForm)
-                });
-                const data = await res.json();
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '提交失败');
-                ElementPlus.ElMessage.success(data.message || '发票申请已提交');
-                showInvoiceDialog.value = false;
-                fetchInvoices();
+                if (invoiceSubmitting.value) return;
+                invoiceSubmitting.value = true;
+                try {
+                    const res = await fetch(`/api/contracts/${invoiceForm.contract_id}/invoices`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(invoiceForm)
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok || !data.success) {
+                        ElementPlus.ElMessage.error(data.message || '提交失败');
+                        return;
+                    }
+                    ElementPlus.ElMessage.success(data.message || '发票申请已提交');
+                    showInvoiceDialog.value = false;
+                    await fetchInvoices();
+                } catch (e) {
+                    ElementPlus.ElMessage.error('提交失败，请检查网络后重试');
+                } finally {
+                    invoiceSubmitting.value = false;
+                }
             }
             function issueInvoice(row) {
-                Object.assign(issueInvoiceForm, { id: row.id, invoice_no: '', invoice_file_path: '' });
+                const now = new Date();
+                const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+                Object.assign(issueInvoiceForm, {
+                    id: row.id,
+                    invoice_no: '',
+                    invoice_date: row.invoice_date || today,
+                    invoice_file_path: ''
+                });
+                issueInvoiceUploadPending.value = 0;
                 showIssueInvoiceDialog.value = true;
             }
             async function submitIssueInvoice() {
                 if (!issueInvoiceForm.invoice_no || !issueInvoiceForm.invoice_no.trim()) return ElementPlus.ElMessage.warning('请输入发票号');
+                if (!issueInvoiceForm.invoice_date) return ElementPlus.ElMessage.warning('请选择开票日期');
                 const res = await fetch('/api/invoice-requests/' + issueInvoiceForm.id + '/issue', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ invoice_no: issueInvoiceForm.invoice_no.trim(), invoice_file_path: issueInvoiceForm.invoice_file_path || '' })
+                    body: JSON.stringify({
+                        invoice_no: issueInvoiceForm.invoice_no.trim(),
+                        invoice_date: issueInvoiceForm.invoice_date,
+                        invoice_file_path: issueInvoiceForm.invoice_file_path || ''
+                    })
                 });
                 const data = await res.json();
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '开票失败');
@@ -5994,10 +6813,31 @@
                 await Promise.all([fetchInvoices(), fetchApprovals(), fetchApprovalReminders()]);
             }
             function onInvoiceFileUpload(res) {
-                if (res && res.success) {
-                    issueInvoiceForm.invoice_file_path = res.url;
-                    ElementPlus.ElMessage.success('发票文件上传成功');
+                issueInvoiceUploadPending.value = Math.max(0, issueInvoiceUploadPending.value - 1);
+                if (!res || !res.success) return ElementPlus.ElMessage.error((res && res.message) || '发票文件上传失败');
+                const urls = attachmentList(issueInvoiceForm.invoice_file_path).map(file => file.url);
+                const uploadedUrl = res.url || res.path || '';
+                if (uploadedUrl && !urls.includes(uploadedUrl) && urls.length < 10) urls.push(uploadedUrl);
+                issueInvoiceForm.invoice_file_path = urls.join(',');
+                ElementPlus.ElMessage.success('发票文件上传成功');
+            }
+            function onInvoiceFileUploadError() {
+                issueInvoiceUploadPending.value = Math.max(0, issueInvoiceUploadPending.value - 1);
+                ElementPlus.ElMessage.error('发票文件上传失败');
+            }
+            function beforeIssueInvoiceFileUpload() {
+                if (attachmentList(issueInvoiceForm.invoice_file_path).length + issueInvoiceUploadPending.value >= 10) {
+                    ElementPlus.ElMessage.error('发票文件最多上传 10 个');
+                    return false;
                 }
+                issueInvoiceUploadPending.value += 1;
+                return true;
+            }
+            function removeIssueInvoiceFile(url) {
+                issueInvoiceForm.invoice_file_path = attachmentList(issueInvoiceForm.invoice_file_path)
+                    .map(file => file.url)
+                    .filter(item => item !== url)
+                    .join(',');
             }
             async function cancelInvoice(row) {
                 const { value } = await ElementPlus.ElMessageBox.prompt('请输入取消原因', '取消发票申请', { confirmButtonText: '确认取消', cancelButtonText: '再想想' }).catch(() => ({ value: null }));
@@ -6104,27 +6944,240 @@
                 Object.assign(repairCompleteForm, {
                     repair_completed_at: todayString(),
                     repair_completion_note: '',
-                    repair_cost: 0
+                    repair_cost: 0,
+                    repair_appearance_photos: '',
+                    repair_mileage_photos: '',
+                    repair_tools_photos: ''
                 });
                 showRepairCompleteDialog.value = true;
+            }
+            function onRepairCompleteUpload(field) {
+                return (res) => {
+                    if (!res.success || !res.url) return ElementPlus.ElMessage.error('照片上传失败');
+                    repairCompleteForm[field] = res.url;
+                    ElementPlus.ElMessage.success('照片已上传');
+                };
             }
             async function submitRepairComplete() {
                 if (!repairTarget.value) return;
                 if (!String(repairCompleteForm.repair_completion_note || '').trim()) {
                     return ElementPlus.ElMessage.warning('请填写维修完成情况');
                 }
-                submitting.value = true;
-                const res = await fetch(`/api/vehicles/${repairTarget.value.vehicle_id || repairTarget.value.id}/repair/complete`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(repairCompleteForm)
+                const missingPhotos = [
+                    ['repair_appearance_photos', '维修后外观照片'],
+                    ['repair_mileage_photos', '维修后里程照片'],
+                    ['repair_tools_photos', '维修后工具照片']
+                ].filter(([key]) => !repairCompleteForm[key]);
+                if (missingPhotos.length) {
+                    return ElementPlus.ElMessage.warning('请上传' + missingPhotos.map(item => item[1]).join('、'));
+                }
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/vehicles/${repairTarget.value.vehicle_id || repairTarget.value.id}/repair/complete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(repairCompleteForm)
+                    });
+                    const data = await readApiJson(res, '维修完成失败');
+                    ElementPlus.ElMessage.success(data.message || '维修已完成');
+                    showRepairCompleteDialog.value = false;
+                    fetchAll(); fetchReturns(); refreshApprovalCenter();
+                }, '维修完成失败');
+            }
+
+            function openRenewalDialog(row) {
+                if (!canRenewFromOrder(row)) {
+                    return ElementPlus.ElMessage.warning('该合同当前不可发起续租，请刷新后重试');
+                }
+                renewalTarget.value = row;
+                Object.assign(renewalForm, {
+                    new_start_date: addDaysToDateString(row.contract_end_date, 1),
+                    billing_cycle: row.contract_billing_cycle || '按月',
+                    monthly_rent: Number(row.contract_rent || row.vehicle_rent_amount || 0),
+                    loan_periods: 1,
+                    rental_days: 1,
+                    deposit_required: Number(row.contract_deposit || row.deposit_amount || 0),
+                    application_note: ''
                 });
-                const data = await res.json();
-                submitting.value = false;
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '维修完成失败');
-                ElementPlus.ElMessage.success(data.message || '维修已完成');
-                showRepairCompleteDialog.value = false;
-                fetchAll(); fetchReturns(); refreshApprovalCenter();
+                showRenewalDialog.value = true;
+            }
+
+            async function submitRenewal() {
+                if (!renewalTarget.value) return;
+                if (!renewalForm.new_start_date) {
+                    return ElementPlus.ElMessage.warning('原合同缺少到期日，无法发起续租');
+                }
+                if (Number(renewalForm.monthly_rent || 0) <= 0) {
+                    return ElementPlus.ElMessage.warning('请填写大于0的续租月租');
+                }
+                if (renewalForm.billing_cycle === '按月' && Number(renewalForm.loan_periods || 0) <= 0) {
+                    return ElementPlus.ElMessage.warning('请填写续租期数');
+                }
+                if (renewalForm.billing_cycle === '按天' && Number(renewalForm.rental_days || 0) <= 0) {
+                    return ElementPlus.ElMessage.warning('请填写续租天数');
+                }
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/contracts/${renewalTarget.value.contract_id}/renewals`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({...renewalForm})
+                    });
+                    const data = await readApiJson(res, '续租申请提交失败');
+                    ElementPlus.ElMessage.success(data.message || '续租申请已提交');
+                    showRenewalDialog.value = false;
+                    fetchRenewals();
+                    fetchApprovalReminders();
+                    refreshApprovalCenter();
+                }, '续租申请提交失败');
+            }
+
+            function onRenewalContractUpload(res) {
+                if (!res.success || !res.url) {
+                    return ElementPlus.ElMessage.error('续租合同上传失败');
+                }
+                renewalActivateForm.contract_file = res.url;
+                ElementPlus.ElMessage.success('续租合同已上传');
+            }
+
+            function openRenewalActivateDialog(item) {
+                if (!item || !item.ref_id) return;
+                renewalActivateTarget.value = item;
+                Object.assign(renewalActivateForm, {
+                    contract_file: item.contract_file || '',
+                    contract_number: item.contract_number || '',
+                    deposit_topup_confirmed: false,
+                    deposit_topup_amount: Number(item.deposit_topup_amount || 0),
+                    deposit_bank_serial: ''
+                });
+                showRenewalActivateDialog.value = true;
+            }
+
+            async function submitRenewalActivation() {
+                const target = renewalActivateTarget.value;
+                if (!target) return;
+                if (!renewalActivateForm.contract_file) {
+                    return ElementPlus.ElMessage.warning('请上传续租合同');
+                }
+                if (!String(renewalActivateForm.contract_number || '').trim()) {
+                    return ElementPlus.ElMessage.warning('请填写续租合同编号');
+                }
+                const topupRequired = Number(target.deposit_topup_amount || 0);
+                if (topupRequired > 0) {
+                    if (!renewalActivateForm.deposit_topup_confirmed) {
+                        return ElementPlus.ElMessage.warning('请确认押金差额已到账');
+                    }
+                    if (Number(renewalActivateForm.deposit_topup_amount || 0) < topupRequired) {
+                        return ElementPlus.ElMessage.warning(`补缴金额不得低于 ¥${numberFormat(topupRequired)}`);
+                    }
+                }
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/renewals/${target.ref_id}/activate`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({...renewalActivateForm})
+                    });
+                    const data = await readApiJson(res, '续租激活失败');
+                    ElementPlus.ElMessage.success(data.message || '续租已生效');
+                    showRenewalActivateDialog.value = false;
+                    fetchRenewals();
+                    fetchContracts();
+                    fetchBills();
+                    refreshApprovalCenter();
+                }, '续租激活失败');
+            }
+
+            async function startRefurbishment(row) {
+                if (!row || !row.id) return;
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/refurbishment-records/${row.id}/start`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    const data = await readApiJson(res, '开始整备失败');
+                    ElementPlus.ElMessage.success(data.message || '车辆已进入整备中');
+                    fetchRefurbishmentRecords();
+                    fetchAll();
+                    refreshApprovalCenter();
+                }, '开始整备失败');
+            }
+
+            function openRefurbishmentCompleteDialog(row) {
+                if (!row || !row.id) return;
+                refurbishmentTarget.value = row;
+                Object.assign(refurbishmentCompleteForm, {
+                    completion_note: '',
+                    available_for: '可租/可售'
+                });
+                showRefurbishmentCompleteDialog.value = true;
+            }
+
+            async function submitRefurbishmentComplete() {
+                if (!refurbishmentTarget.value) return;
+                if (!String(refurbishmentCompleteForm.completion_note || '').trim()) {
+                    return ElementPlus.ElMessage.warning('请填写整备完成情况');
+                }
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/refurbishment-records/${refurbishmentTarget.value.id}/complete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({...refurbishmentCompleteForm})
+                    });
+                    const data = await readApiJson(res, '完成整备失败');
+                    ElementPlus.ElMessage.success(data.message || '整备完成，车辆已入库');
+                    showRefurbishmentCompleteDialog.value = false;
+                    fetchRefurbishmentRecords();
+                    fetchAll();
+                    fetchReturns();
+                    refreshApprovalCenter();
+                }, '完成整备失败');
+            }
+
+            function openUrgeDialog(row) {
+                if (!row || !row.id) return;
+                urgeTarget.value = row;
+                Object.assign(urgeForm, {
+                    contact_name: row.customer_name || '',
+                    contact_method: '电话',
+                    contacted_at: currentDateTimeString(),
+                    next_contact_date: '',
+                    result: '',
+                    promised_repay_date: '',
+                    remark: '',
+                    evidence_path: ''
+                });
+                showUrgeDialog.value = true;
+            }
+
+            function onUrgeEvidenceDialogUpload(res) {
+                if (!res.success || !res.url) {
+                    return ElementPlus.ElMessage.error('催收证据上传失败');
+                }
+                urgeForm.evidence_path = res.url;
+                ElementPlus.ElMessage.success('催收证据已上传');
+            }
+
+            async function submitUrge() {
+                if (!urgeTarget.value) return;
+                if (!urgeForm.contacted_at) {
+                    return ElementPlus.ElMessage.warning('请选择联系时间');
+                }
+                if (!String(urgeForm.result || '').trim()) {
+                    return ElementPlus.ElMessage.warning('请填写催收结果');
+                }
+                if (!urgeForm.evidence_path) {
+                    return ElementPlus.ElMessage.warning('请上传催收证据');
+                }
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/repayments/${urgeTarget.value.id}/urge`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({...urgeForm})
+                    });
+                    const data = await readApiJson(res, '催收记录提交失败');
+                    ElementPlus.ElMessage.success(data.message || '催收记录已提交');
+                    showUrgeDialog.value = false;
+                    fetchBills();
+                    refreshApprovalCenter();
+                }, '催收记录提交失败');
             }
 
             // ===== Actions =====
@@ -6146,15 +7199,18 @@
                     repaymentLoading.value = true;
                     repaymentTab.value = 'customer';
                     try {
-                        const [cr, fr] = await Promise.all([
+                        const [cr, fr, er] = await Promise.all([
                             fetch(`/api/contracts/${contractId}/repayments`).then(r => r.json()),
-                            fetch(`/api/contracts/${contractId}/factory-repayments`).then(r => r.json())
+                            fetch(`/api/contracts/${contractId}/factory-repayments`).then(r => r.json()),
+                            fetch(`/api/contracts/${contractId}/external-finance-repayments`).then(r => r.json())
                         ]);
                         currentRepayments.value = cr;
                         currentFactoryRepayments.value = fr;
+                        currentExternalFinanceRepayments.value = er;
                     } catch (e) {
                         currentRepayments.value = [];
                         currentFactoryRepayments.value = [];
+                        currentExternalFinanceRepayments.value = [];
                     }
                     repaymentLoading.value = false;
                 }
@@ -6202,7 +7258,7 @@
                 return match ? match[1] : '';
             }
             function isImageAttachment(url) {
-                return ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(attachmentExt(url));
+                return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic'].includes(attachmentExt(url));
             }
             function attachmentTypeLabel(url) {
                 const ext = attachmentExt(url);
@@ -6234,8 +7290,10 @@
                 }
             }
             function beforeContractFileUpload(file) {
-                if (attachmentList(newContract.contract_file).length >= 5) {
-                    ElementPlus.ElMessage.error('最多上传 5 个附件');
+                const pendingFiles = attachmentList(newContract.contract_file).map(item => item.url);
+                const originalFiles = attachmentList(newContract.original_contract_file).map(item => item.url);
+                if (new Set([...originalFiles, ...pendingFiles]).size >= 10) {
+                    ElementPlus.ElMessage.error('每份合同最多上传 10 个附件');
                     return false;
                 }
                 const isOk = file.size / 1024 / 1024 < 20;
@@ -6496,24 +7554,33 @@
                     return ElementPlus.ElMessage.warning('如填写车架号，请填写17位 VIN');
                 }
                 submitting.value = true;
-                const payload = { ...newOrder };
-                if (saveDraft) payload.save_as_draft = true;
-                if (!saveDraft && currentOrderDraftId.value) payload.action = 'submit';
-                const url = currentOrderDraftId.value ? `/api/sales-orders/${currentOrderDraftId.value}` : '/api/sales-orders';
-                const res = await fetch(url, {
-                    method: currentOrderDraftId.value ? 'PUT' : 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                const data = await res.json();
-                submitting.value = false;
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '销售报单创建失败');
-                ElementPlus.ElMessage.success(data.message || (saveDraft ? '草稿已保存' : '销售报单已创建'));
-                showOrderDialog.value = false;
-                resetOrderForm();
-                fetchSalesOrders();
-                fetchApprovals();
-                fetchAll();
+                try {
+                    const payload = { ...newOrder };
+                    if (saveDraft) payload.save_as_draft = true;
+                    if (!saveDraft && currentOrderDraftId.value) payload.action = 'submit';
+                    const url = currentOrderDraftId.value ? `/api/sales-orders/${currentOrderDraftId.value}` : '/api/sales-orders';
+                    const res = await fetch(url, {
+                        method: currentOrderDraftId.value ? 'PUT' : 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const contentType = res.headers.get('content-type') || '';
+                    const data = contentType.includes('application/json') ? await res.json() : {};
+                    if (!res.ok || !data.success) {
+                        return ElementPlus.ElMessage.error(data.message || `销售报单提交失败（${res.status}）`);
+                    }
+                    ElementPlus.ElMessage.success(data.message || (saveDraft ? '草稿已保存' : '销售报单已创建'));
+                    showOrderDialog.value = false;
+                    resetOrderForm();
+                    fetchSalesOrders();
+                    fetchApprovals();
+                    fetchAll();
+                } catch (error) {
+                    console.error('销售报单提交失败', error);
+                    ElementPlus.ElMessage.error('销售报单提交失败，请检查网络连接后重试');
+                } finally {
+                    submitting.value = false;
+                }
             }
             function editSalesOrderDraft(row) {
                 currentOrderDraftId.value = row.id;
@@ -6737,35 +7804,33 @@
                 if (!factoryImportForm.contract_id || !factoryImportForm.file_url) {
                     return ElementPlus.ElMessage.warning('请先选择合同并上传厂家计划表');
                 }
-                submitting.value = true;
-                const res = await fetch(`/api/contracts/${factoryImportForm.contract_id}/factory-repayments/import`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ file_url: factoryImportForm.file_url })
-                });
-                const data = await res.json();
-                submitting.value = false;
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '导入厂家计划失败');
-                ElementPlus.ElMessage.success(data.message || '厂家计划导入成功');
-                fetchContracts();
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/contracts/${factoryImportForm.contract_id}/factory-repayments/import`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ file_url: factoryImportForm.file_url })
+                    });
+                    const data = await readApiJson(res, '导入厂家计划失败');
+                    ElementPlus.ElMessage.success(data.message || '厂家计划导入成功');
+                    fetchContracts();
+                }, '导入厂家计划失败');
             }
             async function submitFeeItem() {
                 if (!feeForm.contract_id || !feeForm.amount_due) {
                     return ElementPlus.ElMessage.warning('请选择合同并填写费用金额');
                 }
-                submitting.value = true;
-                const res = await fetch(`/api/contracts/${feeForm.contract_id}/fee-items`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(feeForm)
-                });
-                const data = await res.json();
-                submitting.value = false;
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '新增费用项失败');
-                ElementPlus.ElMessage.success(data.message || '费用项已新增');
-                showFeeDialog.value = false;
-                fetchFeeItems(feeForm.contract_id);
-                Object.assign(feeForm, { contract_id: feeForm.contract_id, fee_type: 'insurance_fee', amount_due: 0, due_date: '', description: '' });
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/contracts/${feeForm.contract_id}/fee-items`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(feeForm)
+                    });
+                    const data = await readApiJson(res, '新增费用项失败');
+                    ElementPlus.ElMessage.success(data.message || '费用项已新增');
+                    showFeeDialog.value = false;
+                    fetchFeeItems(feeForm.contract_id);
+                    Object.assign(feeForm, { contract_id: feeForm.contract_id, fee_type: 'insurance_fee', amount_due: 0, due_date: '', description: '' });
+                }, '新增费用项失败');
             }
 
             // 入库全维度展示：优先用 Excel 原始 import_raw，否则回退到映射字段
@@ -6822,37 +7887,36 @@
                     return ElementPlus.ElMessage.warning('请选择新车型');
                 }
                 vehicleValidationFixLoading.value = true;
-                const target = vehicleValidationFixTarget.value;
-                const res = await fetch(`/api/vehicles/${target.id}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ car_type: vehicleValidationFixNewCarType.value })
-                });
-                const data = await res.json();
-                vehicleValidationFixLoading.value = false;
-                if (data.success) {
+                try {
+                    const target = vehicleValidationFixTarget.value;
+                    const res = await fetch(`/api/vehicles/${target.id}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ car_type: vehicleValidationFixNewCarType.value })
+                    });
+                    await readApiJson(res, '车型修正失败');
                     ElementPlus.ElMessage.success('车型已修正，字典校验已更新');
                     showVehicleValidationFix.value = false;
                     fetchAll();
-                } else {
-                    ElementPlus.ElMessage.error(data.message || '修正失败');
+                } catch (error) {
+                    console.error('车型修正失败', error);
+                    ElementPlus.ElMessage.error(error.message || '车型修正失败');
+                } finally {
+                    vehicleValidationFixLoading.value = false;
                 }
             }
             async function revalidateAllVehicles() {
                 revalidating.value = true;
                 try {
                     const res = await fetch('/api/vehicles/revalidate-all', { method: 'POST' });
-                    const data = await res.json();
-                    if (data.success) {
-                        ElementPlus.ElMessage.success(data.message);
-                        fetchAll();
-                    } else {
-                        ElementPlus.ElMessage.error(data.message || '重新校验失败');
-                    }
+                    const data = await readApiJson(res, '重新校验失败');
+                    ElementPlus.ElMessage.success(data.message);
+                    fetchAll();
                 } catch (e) {
-                    ElementPlus.ElMessage.error('网络错误');
+                    ElementPlus.ElMessage.error(e.message || '重新校验失败');
+                } finally {
+                    revalidating.value = false;
                 }
-                revalidating.value = false;
             }
             function openVehicleImport() {
                 vehicleImportResult.value = null;
@@ -6887,17 +7951,15 @@
             async function submitVehicle() {
                 newVehicle.vin = (newVehicle.vin || '').trim().toUpperCase();
                 if (!newVehicle.vin || newVehicle.vin.length !== 17) return ElementPlus.ElMessage.warning('请填写17位VIN');
-                submitting.value = true;
-                const res = await fetch('/api/vehicles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newVehicle) });
-                const data = await res.json();
-                submitting.value = false;
-                if (data.success) {
+                await runSubmitting(async () => {
+                    const res = await fetch('/api/vehicles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newVehicle) });
+                    const data = await readApiJson(res, '车辆入库失败');
                     ElementPlus.ElMessage.success(data.message || '入库成功！');
                     showAddVehicle.value = false;
                     Object.assign(newVehicle, { vin: '', plate_number: '', car_type: '', insurance_expiry_date: '', annual_review_date: '', invoice_contract_file: '' });
                     fetchAll();
                     fetchMissingGuidanceAlerts();
-                } else { ElementPlus.ElMessage.error(data.message); }
+                }, '车辆入库失败');
             }
             async function confirmRepayment(row) {
                 const res = await fetch(`/api/repayments/${row.id}/confirm`, { method: 'POST' });
@@ -6938,16 +8000,14 @@
                 if (newContract.contract_type === '以租代售') {
                     newContract.business_mode = '以租代售';
                 }
-                submitting.value = true;
-                const res = await fetch('/api/contracts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newContract) });
-                const data = await res.json();
-                submitting.value = false;
-                if (data.success) {
+                await runSubmitting(async () => {
+                    const res = await fetch('/api/contracts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newContract) });
+                    const data = await readApiJson(res, '合同提交失败');
                     ElementPlus.ElMessage.success(data.message || '线下合同已上传');
                     showAddContract.value = false;
                     resetContractForm();
                     fetchAll(); fetchContracts(); fetchApprovals(); fetchApprovalReminders();
-                } else { ElementPlus.ElMessage.error(data.message); }
+                }, '合同提交失败');
             }
 
             async function onInitialReceiptUpload(paymentId, res) {
@@ -7029,18 +8089,16 @@
             async function submitReconInitiate() {
                 if (!reconInitiateAmount.value || reconInitiateAmount.value <= 0) return ElementPlus.ElMessage.warning('请填写客户还款金额');
                 if (!reconInitiateScreenshot.value) return ElementPlus.ElMessage.warning('请上传支付凭证图片');
-                submitting.value = true;
-                const apiRes = await fetch(`/api/reconciliation/${reconInitiateTarget.value.id}/screenshot`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ screenshot_path: reconInitiateScreenshot.value, reported_amount: reconInitiateAmount.value })
-                });
-                const data = await apiRes.json();
-                submitting.value = false;
-                if (data.success) {
-                    ElementPlus.ElMessage.success(data.message);
+                await runSubmitting(async () => {
+                    const apiRes = await fetch(`/api/reconciliation/${reconInitiateTarget.value.id}/screenshot`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ screenshot_path: reconInitiateScreenshot.value, reported_amount: reconInitiateAmount.value })
+                    });
+                    const data = await readApiJson(apiRes, '提交还款凭证失败');
+                    ElementPlus.ElMessage.success(data.message || '还款凭证已提交');
                     showReconInitiateDialog.value = false;
                     fetchRecon();
-                } else { ElementPlus.ElMessage.error(data.message); }
+                }, '提交还款凭证失败');
             }
             function toggleReconGroup(row) {
                 if (!row || !row.group_key) return;
@@ -7095,18 +8153,29 @@
                 submitting.value = true;
                 const extraPeriods = (verifyExtraPeriods.value || [])
                     .map(v => Number(v)).filter(v => v > 0);
-                const res = await fetch(`/api/reconciliation/${verifyTarget.value.id}/verify`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ bank_serial: verifySerial.value, received_amount: verifyAmount.value, extra_alloc_periods: extraPeriods, bank_receipt_path: verifyReceipt.value })
-                });
-                const data = await res.json();
-                submitting.value = false;
-                if (data.success) {
+                try {
+                    const res = await fetch(`/api/reconciliation/${verifyTarget.value.id}/verify`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ bank_serial: verifySerial.value, received_amount: verifyAmount.value, extra_alloc_periods: extraPeriods, bank_receipt_path: verifyReceipt.value })
+                    });
+                    const data = await res.json().catch(() => null);
+                    if (res.status === 401) {
+                        showVerifyDialog.value = false;
+                        currentUser.value = null;
+                        return ElementPlus.ElMessage.error('登录状态已失效，请重新登录后再核销');
+                    }
+                    if (!res.ok || !data || !data.success) {
+                        return ElementPlus.ElMessage.error((data && data.message) || '对账核销失败，请稍后重试');
+                    }
                     ElementPlus.ElMessage.success(data.message);
                     showVerifyDialog.value = false;
                     fetchRecon();
                     fetchBills();
-                } else { ElementPlus.ElMessage.error(data.message); }
+                } catch (e) {
+                    ElementPlus.ElMessage.error('网络异常，未完成核销，请检查网络后重试');
+                } finally {
+                    submitting.value = false;
+                }
             }
             function requestLock(row) {
                 ElementPlus.ElMessageBox.confirm(`确认对 ${row.plate_number} (逾期${calcOverdueDays(row.due_date)}天) 发起锁车？`, '锁车审批', { type: 'warning' })
@@ -7267,6 +8336,8 @@
                         fetchContracts(),
                         fetchReturns(),
                         fetchLockRequests(),
+                        fetchRenewals(),
+                        fetchRefurbishmentRecords(),
                     ]);
                     const approvalsLoaded = results[0].status === 'fulfilled' && results[0].value === true;
                     if (!approvalsLoaded || results.some(result => result.status === 'rejected')) {
@@ -7324,8 +8395,7 @@
                 if (bankSerial.length < 4 && !receiptPath) {
                     return ElementPlus.ElMessage.warning('请填写至少4位银行流水号或上传公司收款回单');
                 }
-                submitting.value = true;
-                try {
+                await runSubmitting(async () => {
                     const flowId = salesOrderFinanceConfirmForm.flow_id;
                     const url = flowId
                         ? `/api/approvals/${flowId}/approve`
@@ -7342,17 +8412,14 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(body)
                     });
-                    const data = await res.json();
-                    if (!data.success) return ElementPlus.ElMessage.error(data.message || '报单确认失败');
+                    const data = await readApiJson(res, '报单确认失败');
                     ElementPlus.ElMessage.success(data.message || '报单已确认');
                     showSalesOrderFinanceConfirmDialog.value = false;
                     fetchSalesOrders();
                     fetchApprovals();
                     fetchApprovalReminders();
                     fetchAll();
-                } finally {
-                    submitting.value = false;
-                }
+                }, '报单确认失败');
             }
 
             async function doReject(flowId, label) {
@@ -7393,8 +8460,8 @@
             }
             async function initiateOrderRefund(item) {
                 await ElementPlus.ElMessageBox.confirm(
-                    `确认发起退款？客户 ${item.customer_name || '-'} 已实收首付 ¥${numberFormat(item.first_payment_received_amount)}。退款完成后车辆回库。`,
-                    '发起退款', { type: 'warning' }
+                    `确认发起取消？客户 ${item.customer_name || '-'} 的押金/首付款尚未足额支付，退款完成后车辆释放。`,
+                    '发起取消', { type: 'warning' }
                 );
                 const res = await fetch('/api/order-refunds', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -7405,13 +8472,30 @@
                 ElementPlus.ElMessage.success(data.message || '退款已发起');
                 fetchApprovals(); fetchAll();
             }
+            async function initiateCancelOrder(row) {
+                const { value: reason } = await ElementPlus.ElMessageBox.prompt(
+                    `客户 ${row.customer_name || '-'} 押金/首付款未足额支付，取消原因（必填）`,
+                    '发起取消订单',
+                    { confirmButtonText: '提交老板审批', cancelButtonText: '取消', inputPlaceholder: '取消原因', type: 'warning' }
+                ).catch(() => ({ value: null }));
+                if (!reason || !String(reason).trim()) return;
+                const res = await fetch('/api/order-refunds', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sales_order_id: row.id, reason: String(reason).trim() })
+                });
+                const data = await readApiJson(res, '发起取消失败');
+                ElementPlus.ElMessage.success(data.message || '取消申请已提交');
+                fetchSalesOrders();
+                fetchApprovals();
+                fetchAll();
+            }
             async function executeOrderRefund(item) {
                 const { value: form } = await ElementPlus.ElMessageBox.prompt(
-                    `请输入退款流水号（至少4位）`, '执行退款',
+                    `应退 ¥${numberFormat(item.refund_amount || 0)}，请输入退款流水号（至少4位）`, '执行退款',
                     { confirmButtonText: '执行退款', cancelButtonText: '取消', inputPlaceholder: '银行流水号', type: 'success' }
                 ).catch(() => ({ value: null }));
                 if (!form) return;
-                const refundAmount = Number(item.first_payment_received_amount || 0);
+                const refundAmount = Number(item.refund_amount || 0);
                 const res = await fetch(`/api/order-refunds/${item.refund_id}/pay`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ refund_serial: form, refund_paid_amount: refundAmount })
@@ -7421,12 +8505,43 @@
                 ElementPlus.ElMessage.success(data.message || '退款已执行');
                 fetchApprovals(); fetchAll();
             }
+            async function approveOrderRefund(item) {
+                await ElementPlus.ElMessageBox.confirm(
+                    `确认通过 ${item.customer_name || '-'} 的取消订单申请？通过后等待财务退款。`,
+                    '老板审核', { type: 'warning' }
+                );
+                const res = await fetch(`/api/order-refunds/${item.refund_id}/approve`, { method: 'POST' });
+                const data = await readApiJson(res, '审核失败');
+                ElementPlus.ElMessage.success(data.message || '审核通过');
+                fetchApprovals(); fetchAll();
+            }
+            async function rejectOrderRefund(item) {
+                const { value: reason } = await ElementPlus.ElMessageBox.prompt(
+                    '请输入驳回原因', '驳回取消申请',
+                    { confirmButtonText: '驳回', cancelButtonText: '取消', inputPlaceholder: '驳回原因（必填）', type: 'warning' }
+                ).catch(() => ({ value: null }));
+                if (!reason || !String(reason).trim()) return;
+                const res = await fetch(`/api/order-refunds/${item.refund_id}/reject`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: String(reason).trim() })
+                });
+                const data = await readApiJson(res, '驳回失败');
+                ElementPlus.ElMessage.success(data.message || '已驳回');
+                fetchApprovals(); fetchAll();
+            }
             async function cancelOrderRefund(item) {
-                await ElementPlus.ElMessageBox.confirm('确认取消退款？车辆将直接释放回在库。', '取消退款', { type: 'warning' });
-                const res = await fetch(`/api/order-refunds/${item.refund_id}/cancel`, { method: 'POST' });
+                const { value: reason } = await ElementPlus.ElMessageBox.prompt(
+                    '请输入驳回原因', '驳回退款申请',
+                    { confirmButtonText: '驳回', cancelButtonText: '取消', inputPlaceholder: '驳回原因（必填）', type: 'warning' }
+                ).catch(() => ({ value: null }));
+                if (!reason || !String(reason).trim()) return;
+                const res = await fetch(`/api/order-refunds/${item.refund_id}/reject`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: String(reason).trim() })
+                });
                 const data = await res.json();
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '取消退款失败');
-                ElementPlus.ElMessage.success(data.message || '退款已取消');
+                if (!data.success) return ElementPlus.ElMessage.error(data.message || '驳回失败');
+                ElementPlus.ElMessage.success(data.message || '退款申请已驳回');
                 fetchApprovals(); fetchAll();
             }
 
@@ -7489,17 +8604,15 @@
                     sales_advisor: returnForm.sales_advisor,
                     remark: returnForm.remark
                 };
-                submitting.value = true;
-                const res = await fetch('/api/return-inspections', {
-                    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
-                });
-                const data = await res.json();
-                submitting.value = false;
-                if (data.success) {
+                await runSubmitting(async () => {
+                    const res = await fetch('/api/return-inspections', {
+                        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
+                    });
+                    await readApiJson(res, '退车单提交失败');
                     ElementPlus.ElMessage.success('验收单保存成功');
                     showReturnDialog.value = false;
                     fetchReturns(); fetchAll();
-                } else { ElementPlus.ElMessage.error(data.message); }
+                }, '退车单提交失败');
             }
             async function submitReturnFleet(row) {
                 const required = [
@@ -7588,23 +8701,22 @@
                     { confirmButtonText: '重新提交', cancelButtonText: '取消', inputType: 'textarea' }
                 ).catch(() => ({ value: '' }));
                 if (!note || !note.trim()) return;
-                submitting.value = true;
-                const res = await fetch(`/api/return-inspections/${row.id}/resubmit`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        return_reason: row.return_reason,
-                        sales_advisor: row.sales_advisor,
-                        remark: row.remark,
-                        resubmit_note: note.trim()
-                    })
-                });
-                const data = await res.json();
-                submitting.value = false;
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '退车单重提失败');
-                ElementPlus.ElMessage.success(data.message || '已重新提交');
-                showReturnDialog.value = false;
-                fetchReturns(); fetchApprovals(); fetchApprovalReminders(); fetchAll();
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/return-inspections/${row.id}/resubmit`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            return_reason: row.return_reason,
+                            sales_advisor: row.sales_advisor,
+                            remark: row.remark,
+                            resubmit_note: note.trim()
+                        })
+                    });
+                    const data = await readApiJson(res, '退车单重提失败');
+                    ElementPlus.ElMessage.success(data.message || '已重新提交');
+                    showReturnDialog.value = false;
+                    fetchReturns(); fetchApprovals(); fetchApprovalReminders(); fetchAll();
+                }, '退车单重提失败');
             }
             async function submitReturnPay(row) {
                 const due = Number(row.actual_refund || 0);
@@ -7686,7 +8798,7 @@
                 search, assetFilter, carTypeFilter, conditionFilter, boxTypeFilter, energyFilter, batteryCapacityFilter, horsepowerFilter, showDeleted, contractSearch, contractFilter,
                 hiddenColumns, toggleColumn, colVisible, ALL_COLUMNS, showColSettings, selectAllColumns, deselectAllColumns,
                 carTypeOptions, carTypeGroups, normalizeOrderBaseCarType, batteryCapacityOptions, horsepowerOptions, assetBoxTypeOptions, assetEnergyOf, assetConditionOf, salesOrderCarOptions, currentSalesOrderCarConfig, currentVehicleCarConfig, availableGearboxOptions, availableColorOptions, availableBoxOptions, availableVehicleGearboxOptions, availableVehicleColorOptions, availableVehicleBoxOptions, boxRemarkPlaceholder, vehicleBoxRemarkPlaceholder,
-                vehicles, contracts, pendingOwnershipTransfers, stats, dashboardWorkspace, salesOrders, overdueList, insuranceWarnings, pendingBills, feeItems, profitData, profitSummary, returnList, completionHistory, completionHistoryFilter, completionHistoryDateRange, returnableAssetRows,
+                vehicles, contracts, pendingOwnershipTransfers, stats, dashboardWorkspace, salesOrders, orderFilters, fetchSalesOrders, resetOrderFilters, overdueList, insuranceWarnings, pendingBills, feeItems, profitData, profitSummary, returnList, completionHistory, completionHistoryFilter, completionHistoryDateRange, returnableAssetRows,
                 invoiceRequests, receivingCompanies, bossDashboard, slaReminders, customerBlacklist, vehicleRebates,
                 reconList, reconFilter, reconSearch, reconSummary, filteredGroupedReconList, reconExpandedKeys, reconTableRef,
                 receivablesList, showReceivableScreenshotDialog, showReceivableSettleDialog, receivableTarget, receivableScreenshotPath, receivableSettleForm, receivableOutstanding, openReceivableScreenshot, onReceivableScreenshotUpload, submitReceivableScreenshot, openReceivableSettle, submitReceivableSettle,
@@ -7694,23 +8806,32 @@
                 showSalesOrderFinanceConfirmDialog, salesOrderFinanceConfirmTarget, salesOrderFinanceConfirmForm, openSalesOrderFinanceConfirm, onSalesOrderFinanceReceiptUpload, submitSalesOrderFinanceConfirm,
                 showReconInitiateDialog, reconInitiateTarget, reconInitiateAmount, reconInitiateScreenshot, openReconInitiate, onReconInitiateUpload, submitReconInitiate,
                 showReconDetailDialog, reconDetail, reconDetailAllocations, openReconDetail, isReconCompleted, allocTypeLabel,
-                currentRepayments, currentFactoryRepayments, repaymentTab, currentOrderDraftId,
+                currentRepayments, currentFactoryRepayments, currentExternalFinanceRepayments, repaymentTab, currentOrderDraftId,
                 repaymentLoading, showAddVehicle, vehicleImportLoading, vehicleImportResult, showVehicleDetail, vehicleDetail, vehicleDetailRows, showAddContract, showPlanningDialog, showOrderDialog, showFeeDialog, showReturnDialog,
                 showVehicleEditDialog, vehicleEditSaving, vehicleEditForm, vehicleEditHint, vehicleEditFields, openVehicleEdit, saveVehicleEdit,
                 showRepairCompleteDialog, repairTarget, repairCompleteForm,
+                renewals, refurbishmentRecords, showRenewalDialog, renewalTarget, renewalForm, renewalPreviewEndDate,
+                showRenewalActivateDialog, renewalActivateTarget, renewalActivateForm,
+                showRefurbishmentCompleteDialog, refurbishmentTarget, refurbishmentCompleteForm,
+                showUrgeDialog, urgeTarget, urgeForm, canRenewFromOrder,
+                openRenewalDialog, submitRenewal, onRenewalContractUpload,
+                openRenewalActivateDialog, submitRenewalActivation,
+                startRefurbishment, openRefurbishmentCompleteDialog, submitRefurbishmentComplete,
+                openUrgeDialog, onUrgeEvidenceDialogUpload, submitUrge,
                 showVehicleValidationFix, vehicleValidationFixTarget, vehicleValidationFixNewCarType, vehicleValidationFixLoading, modelGuidanceCarTypes,
                 showDeliveryDialog, showInvoiceDialog, showTransferDialog, showRebateDialog, deliveryTarget,
                 newVehicle, newContract, newOrder, deliveryForm, returnForm, feeForm, factoryImportForm,
                 receivingCompanyForm, blacklistForm, invoiceForm, transferForm, rebateForm,
-                planningForm, planningFactoryFileUrl, planningComparison, planningRepayments, submitting,
+                planningForm, planningFactoryFileUrl, planningComparison, planningRepayments, submitting, invoiceSubmitting,
                 // 审批中心
                 approvalList, approvalLoading, approvalReminders, approvalFilter, visibleApprovalFilters, lockRequests,
                 missingGuidanceAlerts,
                 modelGuidancePrices, modelGuidanceSearch, filteredModelGuidancePrices, modelGuidanceForm, modelGuidanceCarTypeOptions, guidanceHistoryCache, PRICE_KIND_LABELS, loadGuidanceHistory,
+                guidanceBoard, guidanceBoardLoading, guidanceBoardSearch, filteredGuidanceLeasePrices, filteredGuidanceFinancePlans, loadGuidanceBoard,
                 guidanceWorkbenchCarType, guidanceWorkbenchRows, guidanceWorkbenchPlans, guidanceWorkbenchPlanRows, guidanceWorkbenchLegacyPlans, guidanceWorkbenchSummary, guidanceWorkbenchLoading, guidanceSavingKey,
                 guidancePriceForCarType,
                 fetchApprovals, refreshApprovalCenter, fetchApprovalReminders, fetchLockRequests, fetchFeeItems, fetchCompletionHistory, syncCompletionHistoryDateRange, resetCompletionHistoryFilter,
-                doApprove, doReject, doResubmit, doDeliver, planText, initiateOrderRefund, executeOrderRefund, cancelOrderRefund,
+                doApprove, doReject, doResubmit, doDeliver, planText, initiateOrderRefund, initiateCancelOrder, executeOrderRefund, approveOrderRefund, rejectOrderRefund, cancelOrderRefund,
                 // UI
                 statCards, statusDistribution, dashboardCardValue, dashboardCardTone, dashboardCardMark, dashboardTaskTagType, openDashboardTask, filteredAssetRows, pagedAssetRows, assetDisplayTotal, assetFilterActive, resetAssetFilters, filteredContracts, pendingApprovalItems, pendingApprovalCount, pendingDeliveryCount, pendingDeliveryContracts, pendingOwnershipTransferCount, assetMenuCount, pendingRepairVehicles, pendingSalesOrderCount, pendingLockActions, approvalsMenuCount, pendingReconCount, pendingReturnCount, menuActionCount, menuWarningCount,
                 vehiclePageTotal, vehiclePageData, assetTotalPages, assetPageSize, assetPage, fetchVehiclePage,
@@ -7720,8 +8841,9 @@
                 initialPaymentAmount, canInitiateVehicleOrder, canInitiateVehicleReturn, canReturnFromOrder, initiateReturnFromOrder, returnNextStep, currentApprovalStepLabel, isPendingApproval, approvalCardId,
                 handleMenuSelect, handlePageAction, handleContractExpand, editPrice, deleteVehicle, restoreVehicle,
                 fetchModelGuidancePrices, fetchMissingGuidanceAlerts, onModelGuidanceCarTypeChange, editModelGuidancePrice, focusGuidanceAlert, submitModelGuidancePrice, onGuidanceImportSuccess, onGuidanceImportError, showGuidanceEditDialog, resetModelGuidanceForm,
+                legacyImportFileUrl, legacyImportFileName, legacyImportCutoverDate, legacyImportPreview, legacyImportBatches, legacyImportLoading, loadLegacyImportBatches, onLegacyImportUploadSuccess, previewLegacyImport, importLegacyContracts,
                 loadGuidanceWorkbench, syncLeaseConditionField, saveLeaseGuidanceRow, leaseRowKey, addFinancePlanRow, removeFinancePlanDraft, saveFinancePlanRow, financePlanRowKey,
-                financePlans, financePlansForCarType, leaseGuidanceForOrder, expectedFirstPayment, firstPaymentShortage, onOrderScreenshotUpload, onFinancePlanSelect, loadFinancePlans,
+                financePlans, financePlansForCarType, leaseGuidanceForOrder, expectedFirstPayment, firstPaymentShortage, onOrderScreenshotUpload, removeOrderScreenshot, onFinancePlanSelect, loadFinancePlans,
                 guidanceTab, financePlanForm, openFinancePlanManager, resetFinancePlanForm, editFinancePlan, submitFinancePlan, deleteFinancePlan,
                 dictCategories, dictRows, dictFilterCategory, dictSearch, dictForm, dictEnergyOptions, filteredDictRows, dictCategoryLabel, loadDictRows, resetDictForm, onDictCategoryChange, editDictRow, submitDictForm, deleteDictRow,
                 skuInventory, skuFilterCondition, skuFilterBoxType, filteredSkuInventory, dictOptionsByCategory, loadSkuInventory, showSkuPickDialog, skuPickTarget, skuPickVehicles, skuPickSelected, onSkuPickSelectionChange, openSkuPickVehicle, pickSkuVehicle, pickSelectedSkuVehicles, toggleSku,
@@ -7739,9 +8861,9 @@
                 toggleReconGroup, onReconExpandChange, reconGroupStatusClass, reconGroupStatusText, openVerifyDialog, submitVerify,
                 submitReceivingCompany, editReceivingCompany, submitBlacklist,
                 openInvoiceDialog, submitInvoiceRequest, issueInvoice, voidInvoice, redInvoice, cancelInvoice,
-                showIssueInvoiceDialog, issueInvoiceForm, submitIssueInvoice, onInvoiceFileUpload,
+                showIssueInvoiceDialog, issueInvoiceForm, submitIssueInvoice, onInvoiceFileUpload, onInvoiceFileUploadError, beforeIssueInvoiceFileUpload, removeIssueInvoiceFile,
                 fetchPendingOwnershipTransfers, openTransferDialog, submitOwnershipTransfer, openCompletionHistoryRecord,
-                openRebateDialog, submitVehicleRebate, startRepair, openRepairCompleteDialog, submitRepairComplete,
+                openRebateDialog, submitVehicleRebate, startRepair, openRepairCompleteDialog, onRepairCompleteUpload, submitRepairComplete,
                 revalidating, revalidateAllVehicles,
             };
         }

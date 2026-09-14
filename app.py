@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request, send_from_directory, session
 from flask_cors import CORS
-from database import get_db, init_db, seed_data
+from database import USE_MYSQL, get_db, init_db, seed_data
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from functools import wraps
@@ -26,11 +26,11 @@ _SCHEDULER_STARTED = False
 # ======================== PRD 角色权限矩阵 ========================
 # 每个角色可访问的页面 — 车辆列表全员可见
 ROLE_PAGES = {
-    '老板': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'reconciliation', 'risk', 'profit', 'settings'],
-    '运营': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'reconciliation', 'risk', 'invoice'],
-    '财务': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'reconciliation', 'profit'],
-    '车管': ['dashboard', 'assets', 'completion_history', 'approvals'],
-    '销售': ['dashboard', 'orders', 'assets', 'completion_history', 'approvals', 'risk'],
+    '老板': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'receiving_companies', 'reconciliation', 'risk', 'profit', 'settings'],
+    '运营': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'reconciliation', 'risk', 'invoice'],
+    '财务': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'receiving_companies', 'reconciliation', 'profit'],
+    '车管': ['dashboard', 'guidance_board', 'assets', 'completion_history', 'approvals'],
+    '销售': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'risk'],
 }
 
 # 每个角色可执行的操作
@@ -121,6 +121,9 @@ APPROVAL_CONFIGS = {
     ],
     'invoice': [
         {'step': 1, 'role': '老板', 'label': '发票审批'},
+    ],
+    'renewal': [
+        {'step': 1, 'role': '老板', 'label': '续租审批'},
     ],
 }
 
@@ -741,9 +744,9 @@ def validate_vehicle_dict(conn, car_type, vehicle=None):
     """校验车辆数据字典字段，返回 (validation_status, validation_message)。
 
     20260810 SKU 改造：
-    - car_type 不在租赁指导价字典时，若存在有效的同车型、成色、厢型以租代售方案 → warning
-    - 无租赁指导价且无有效以租代售方案 → invalid（阻塞报单）
+    - 缺少租赁指导价时返回 warning；销售仍可报单，由报单审批流提示老板补充/确认指导价
     - 品牌/品系/厢型等维度值不在 data_dictionaries → warning（不阻塞，提示老板补充字典）
+    - 仅基准车型的能源字段缺失或互斥时返回 invalid，阻塞报单
     """
     blocking_errors = []
     warnings = []
@@ -757,17 +760,9 @@ def validate_vehicle_dict(conn, car_type, vehicle=None):
             candidates
         ).fetchone()
         if not row:
-            condition = normalize_vehicle_condition(
-                vehicle.get('condition') if hasattr(vehicle, 'get') else ''
+            warnings.append(
+                f"车型「{car_type}」未维护租赁指导价，报单提交后将进入老板审批"
             )
-            box_type = (
-                (vehicle.get('vehicle_box_type') or vehicle.get('box_type') or '').strip()
-                if hasattr(vehicle, 'get') else ''
-            )
-            if has_active_finance_plan_for_vehicle(conn, car_type, condition, box_type):
-                warnings.append('租赁指导价未维护，仅支持按已维护的以租代售方案报单')
-            else:
-                blocking_errors.append(f"车型「{car_type}」不在已维护的指导价字典中，请先维护车型指导价")
 
     # 基准车型的能源维度完整性与互斥性（invalid）
     if vehicle:
@@ -1037,6 +1032,11 @@ def initial_payment_label(contract):
     return '押金及首次支付审核'
 
 
+def capped_repayment_amount_sql(column='amount'):
+    """Build the scalar minimum expression for the active database backend."""
+    return f"LEAST({column}, ?)" if USE_MYSQL else f"MIN({column}, ?)"
+
+
 def finalize_initial_payment(conn, payment_id, operator_name, now, allow_shortage=False):
     c = conn.cursor()
     c.execute("""
@@ -1088,14 +1088,15 @@ def finalize_initial_payment(conn, payment_id, operator_name, now, allow_shortag
     params.append(contract_id)
     c.execute(f"UPDATE contracts SET {', '.join(updates)} WHERE id=?", params)
 
-    c.execute("""
+    capped_amount_sql = capped_repayment_amount_sql()
+    c.execute(f"""
             UPDATE repayments
             SET status=CASE
-                    WHEN ? > 0 AND MIN(amount, ?) < amount THEN '部分核销'
+                    WHEN ? > 0 AND {capped_amount_sql} < amount THEN '部分核销'
                     ELSE '已还款'
                 END,
-                paid_amount=CASE WHEN ? > 0 THEN MIN(amount, ?) ELSE amount END,
-                verified_amount=CASE WHEN COALESCE(verified_amount, 0)=0 THEN CASE WHEN ? > 0 THEN MIN(amount, ?) ELSE amount END ELSE verified_amount END,
+                paid_amount=CASE WHEN ? > 0 THEN {capped_amount_sql} ELSE amount END,
+                verified_amount=CASE WHEN COALESCE(verified_amount, 0)=0 THEN CASE WHEN ? > 0 THEN {capped_amount_sql} ELSE amount END ELSE verified_amount END,
                 paid_at=?,
                 screenshot_path=COALESCE(screenshot_path, ?),
                 bank_receipt_path=COALESCE(bank_receipt_path, ?),
@@ -1124,14 +1125,14 @@ def finalize_initial_payment(conn, payment_id, operator_name, now, allow_shortag
         ))
 
     if payment['contract_type'] == '租赁' and rent_due > 0:
-        c.execute("""
+        c.execute(f"""
             UPDATE repayments
             SET status=CASE
-                    WHEN ? > 0 AND MIN(amount, ?) < amount THEN '部分核销'
+                    WHEN ? > 0 AND {capped_amount_sql} < amount THEN '部分核销'
                     ELSE '已还款'
                 END,
-                paid_amount=CASE WHEN ? > 0 THEN MIN(amount, ?) ELSE amount END,
-                verified_amount=CASE WHEN COALESCE(verified_amount, 0)=0 THEN CASE WHEN ? > 0 THEN MIN(amount, ?) ELSE amount END ELSE verified_amount END,
+                paid_amount=CASE WHEN ? > 0 THEN {capped_amount_sql} ELSE amount END,
+                verified_amount=CASE WHEN COALESCE(verified_amount, 0)=0 THEN CASE WHEN ? > 0 THEN {capped_amount_sql} ELSE amount END ELSE verified_amount END,
                 paid_at=?,
                 screenshot_path=COALESCE(screenshot_path, ?),
                 bank_receipt_path=COALESCE(bank_receipt_path, ?),
@@ -1280,6 +1281,10 @@ def merge_attachment_csv(*values):
     return ','.join(merged)
 
 
+def attachment_csv_count(*values):
+    return len([url for url in merge_attachment_csv(*values).split(',') if url])
+
+
 def upload_url_to_path(file_url):
     """把 /uploads/xxx 或相对路径转换为本地绝对路径。"""
     if not file_url:
@@ -1290,6 +1295,541 @@ def upload_url_to_path(file_url):
     if os.path.isabs(clean_url):
         return clean_url
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), clean_url.lstrip('/'))
+
+
+LEGACY_MIGRATION_SOURCE = 'sales_lease_ledger_v1'
+LEGACY_ACTIVE_STATUSES = {'在租', '在租（一汽还款）', '续租'}
+LEGACY_SETTLED_CONFLICT_VINS = {
+    'LFNA4LJA5TAE03127',
+    'LFNA4L4C1SAE46648',
+    'LFNA4L4C9SAE48082',
+    'LFNA4L4C6TAE07622',
+    'LFNA4L9C0TAE24652',
+    'LFNA4L9C9TAE24651',
+}
+
+
+def _legacy_text(value):
+    """历史 Excel 单元格标准化：日期、手机号与编号均保留可审计的文本形态。"""
+    if value is None:
+        return ''
+    if isinstance(value, datetime) or hasattr(value, 'strftime'):
+        try:
+            return value.strftime('%Y-%m-%d')
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def _legacy_phone(value):
+    text = _legacy_text(value)
+    if text.endswith('.0'):
+        text = text[:-2]
+    return re.sub(r'\s+', '', text)
+
+
+def _legacy_header_map(ws, header_row):
+    return {
+        _legacy_text(cell.value).replace('\n', '').strip(): index
+        for index, cell in enumerate(ws[header_row])
+        if _legacy_text(cell.value).replace('\n', '').strip()
+    }
+
+
+def _legacy_value(row, headers, *names):
+    for name in names:
+        index = headers.get(name)
+        if index is not None and index < len(row):
+            return row[index]
+    return None
+
+
+def _legacy_due_rows(workbook):
+    if '收款及逾期' not in workbook.sheetnames:
+        return {}
+    ws = workbook['收款及逾期']
+    top_headers = _legacy_header_map(ws, 3)
+    sub_headers = _legacy_header_map(ws, 4)
+    vin_index = top_headers.get('车架号')
+    if vin_index is None:
+        return {}
+
+    def value(row, top_name, sub_name=None):
+        # 双层表头中，子表头更精确。例如“回款”下同时有回款日期、回款金额。
+        index = sub_headers.get(sub_name) if sub_name else None
+        if index is None:
+            index = top_headers.get(top_name)
+        if index is None:
+            return None
+        return row[index] if index < len(row) else None
+
+    plans = {}
+    for row_number, row_cells in enumerate(
+        ws.iter_rows(min_row=5, values_only=True), start=5
+    ):
+        vin = _legacy_text(row_cells[vin_index] if vin_index < len(row_cells) else '').upper()
+        due_date = normalize_date(value(row_cells, '月供/租金', '应还款日期'))
+        amount = parse_money(value(row_cells, '', '金额'))
+        if not vin or len(vin) != 17 or not due_date or amount <= 0:
+            continue
+        paid_amount = parse_money(value(row_cells, '回款', '回款金额'))
+        paid_at = normalize_date(value(row_cells, '回款', '回款日期'))
+        late_fee = parse_money(value(row_cells, '违约金'))
+        plans.setdefault(vin, []).append({
+            'source_row_number': row_number,
+            'period_start_date': normalize_date(value(row_cells, '租赁期', '租期起')),
+            'period_end_date': normalize_date(value(row_cells, '', '租期止')),
+            'due_date': due_date,
+            'amount': round(amount, 2),
+            'paid_amount': round(min(max(paid_amount, 0), amount), 2),
+            'paid_at': paid_at,
+            'payment_kind': _legacy_text(value(row_cells, '租赁方式')),
+            'historic_late_fee': round(max(late_fee, 0), 2),
+        })
+    for rows in plans.values():
+        rows.sort(key=lambda item: (item['due_date'], item['source_row_number']))
+    return plans
+
+
+def _legacy_plans_for_contract(all_plans, start_date, end_date):
+    """按台账租期将同 VIN 的计划归回各自合同，续租不能串期。"""
+    if not start_date or not end_date:
+        return [dict(item) for item in all_plans]
+    return [
+        dict(plan)
+        for plan in all_plans
+        if (
+            (plan.get('period_start_date') or plan.get('due_date') or '') >= start_date
+            and (plan.get('period_end_date') or plan.get('due_date') or '') <= end_date
+        )
+    ]
+
+
+def _legacy_intervals_overlap(left, right):
+    """合同日期为闭区间；续租首尾相接不算重叠。"""
+    left_start, left_end = left.get('start_date') or '', left.get('end_date') or ''
+    right_start, right_end = right.get('start_date') or '', right.get('end_date') or ''
+    if not left_start or not left_end or not right_start or not right_end:
+        return True
+    return left_start <= right_end and right_start <= left_end
+
+
+def _legacy_contract_key(vin, contract_number, start_date):
+    return '|'.join([
+        LEGACY_MIGRATION_SOURCE,
+        (vin or '').upper().strip(),
+        (contract_number or '').strip(),
+        (start_date or '').strip(),
+    ])
+
+
+def _legacy_status_for_plan(plan):
+    amount = parse_money(plan.get('amount'))
+    paid_amount = parse_money(plan.get('paid_amount'))
+    if amount > 0 and paid_amount >= amount:
+        return '已还款'
+    if paid_amount > 0:
+        return '部分核销'
+    return '待还款'
+
+
+def _legacy_repayment_day(master, plans):
+    match = re.search(r'(\d{1,2})\s*号', str(master.get('repayment_text') or ''))
+    if match:
+        return max(1, min(28, int(match.group(1))))
+    if plans:
+        try:
+            return datetime.strptime(plans[0]['due_date'], '%Y-%m-%d').day
+        except (TypeError, ValueError):
+            pass
+    return 1
+
+
+def build_legacy_import_preview(local_path, cutover_date):
+    """只解析标准化历史台账；此函数从不写数据库。"""
+    try:
+        cutover_date = datetime.strptime(str(cutover_date)[:10], '%Y-%m-%d').strftime('%Y-%m-%d')
+    except (TypeError, ValueError):
+        raise ValueError('请填写有效的切换日期')
+    workbook = load_workbook(local_path, data_only=True, read_only=True)
+    if '销售台账（租赁）' not in workbook.sheetnames:
+        raise ValueError('未找到“销售台账（租赁）”页签')
+
+    ws = workbook['销售台账（租赁）']
+    headers = _legacy_header_map(ws, 2)
+    required_headers = ('车辆状态', '合同编号', '车架号', '合同开始日', '购买人/租赁人')
+    missing_headers = [name for name in required_headers if name not in headers]
+    if missing_headers:
+        raise ValueError('销售台账缺少字段：' + '、'.join(missing_headers))
+
+    due_rows_by_vin = _legacy_due_rows(workbook)
+    source_rows = []
+    for row_number, row in enumerate(ws.iter_rows(min_row=3, values_only=True), start=3):
+        status = _legacy_text(_legacy_value(row, headers, '车辆状态'))
+        if status not in LEGACY_ACTIVE_STATUSES:
+            continue
+        vin = _legacy_text(_legacy_value(row, headers, '车架号')).upper()
+        contract_number = _legacy_text(_legacy_value(row, headers, '合同编号'))
+        start_date = normalize_date(_legacy_value(row, headers, '合同开始日'))
+        end_date = normalize_date(_legacy_value(row, headers, '合同到期日'))
+        customer_name = _legacy_text(_legacy_value(row, headers, '购买人/租赁人'))
+        contract_type = _legacy_text(_legacy_value(row, headers, '租赁方式'))
+        source_rows.append({
+            'legacy_source': LEGACY_MIGRATION_SOURCE,
+            'legacy_sheet': '销售台账（租赁）',
+            'legacy_row_number': row_number,
+            'vehicle_status': status,
+            'is_external_finance': status == '在租（一汽还款）',
+            'vin': vin,
+            'contract_number': contract_number,
+            'start_date': start_date,
+            'end_date': end_date,
+            'customer_name': customer_name,
+            'customer_phone': _legacy_phone(_legacy_value(row, headers, '联系方式')),
+            'contact_name': _legacy_text(_legacy_value(row, headers, '联系人')),
+            'sales_name': _legacy_text(_legacy_value(row, headers, '销售')),
+            'company': _legacy_text(_legacy_value(row, headers, '车辆上户公司')),
+            'contract_type': '以租代售' if '购' in contract_type else '租赁',
+            'rental_method': contract_type,
+            'repayment_text': _legacy_text(_legacy_value(row, headers, '还款时间')),
+            'deposit': round(parse_money(_legacy_value(row, headers, '首付款/押金')), 2),
+            'monthly_amount': round(parse_money(_legacy_value(row, headers, '月租金额')), 2),
+            'loan_periods': int(parse_money(_legacy_value(row, headers, '租期'))),
+            'commission_amount': round(parse_money(_legacy_value(row, headers, '佣金（内勤）', '佣金\n（内勤）')), 2),
+            'plans': _legacy_plans_for_contract(
+                due_rows_by_vin.get(vin, []),
+                start_date,
+                end_date,
+            ),
+            'errors': [],
+            'warnings': [],
+        })
+
+    key_counts = {}
+    records_by_vin = {}
+    for item in source_rows:
+        key = _legacy_contract_key(item['vin'], item['contract_number'], item['start_date'])
+        item['legacy_contract_key'] = key
+        key_counts[key] = key_counts.get(key, 0) + 1
+        records_by_vin.setdefault(item['vin'], []).append(item)
+
+    # 续租是独立合同：同 VIN 可存在多条，只在合同区间重叠或边界日期缺失时拦截。
+    for vin_records in records_by_vin.values():
+        if len(vin_records) < 2:
+            continue
+        for index, item in enumerate(vin_records):
+            for other in vin_records[index + 1:]:
+                if _legacy_intervals_overlap(item, other):
+                    message = '同一VIN合同履约区间重叠或缺少到期日，请人工确认续租边界'
+                    item['errors'].append(message)
+                    other['errors'].append(message)
+
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        for item in source_rows:
+            if len(item['vin']) != 17:
+                item['errors'].append('VIN不是17位，不能自动迁移')
+            if not item['contract_number'] or item['contract_number'] == '/':
+                item['errors'].append('合同编号为空，不能建立迁移自然键')
+            if not item['start_date']:
+                item['errors'].append('合同开始日为空，不能建立迁移自然键')
+            if not item['customer_name']:
+                item['errors'].append('客户名称为空')
+            if key_counts[item['legacy_contract_key']] > 1:
+                item['errors'].append('迁移自然键重复，请人工确认')
+
+            vehicle = c.execute("""
+                SELECT id, vin, status
+                FROM vehicles
+                WHERE vin=? AND (is_deleted IS NULL OR is_deleted=0)
+                LIMIT 1
+            """, (item['vin'],)).fetchone()
+            item['vehicle_id'] = vehicle['id'] if vehicle else None
+            if not vehicle:
+                item['errors'].append('系统未找到对应车辆VIN')
+
+            migrated = c.execute("""
+                SELECT contract_id
+                FROM legacy_contract_migrations
+                WHERE legacy_source=? AND legacy_contract_key=?
+                LIMIT 1
+            """, (item['legacy_source'], item['legacy_contract_key'])).fetchone()
+            if migrated:
+                item['errors'].append(f'该自然键已迁移（合同#{migrated["contract_id"]}）')
+
+            item['legacy_correction_old_contract_ids'] = []
+            if vehicle:
+                system_contracts = c.execute("""
+                    SELECT id, contract_status, delivery_status
+                    FROM contracts
+                    WHERE vehicle_id=?
+                    ORDER BY id DESC
+                """, (vehicle['id'],)).fetchall()
+                active_contracts = [
+                    row for row in system_contracts
+                    if row['contract_status'] not in ('已结清', '已终止')
+                    and row['delivery_status'] not in ('已终止',)
+                    and row['contract_status'] != '报单计划中'
+                ]
+                if active_contracts:
+                    item['errors'].append('系统已有未结清合同，不能重复迁移')
+                if item['vin'] in LEGACY_SETTLED_CONFLICT_VINS:
+                    old_ids = [
+                        row['id'] for row in system_contracts
+                        if row['contract_status'] == '已结清'
+                    ]
+                    if not old_ids:
+                        item['warnings'].append('属于已结清冲突清单，但未找到待关联的旧系统合同')
+                    else:
+                        item['legacy_correction_old_contract_ids'] = old_ids
+                        item['warnings'].append('将建立“旧系统已结清 / 新迁移履约中”修正关联')
+
+            if not item['plans']:
+                if item['is_external_finance']:
+                    item['errors'].append('缺少一汽外部还款计划，不能自动迁移')
+                else:
+                    item['errors'].append('缺少客户回款计划，不能自动迁移')
+            if item['monthly_amount'] <= 0 and not item['plans']:
+                item['errors'].append('月租金额和还款计划均为空')
+            item['historic_late_fee'] = round(sum(
+                max(0, parse_money(plan.get('historic_late_fee')))
+                for plan in item['plans']
+            ), 2)
+            item['import_status'] = 'ready' if not item['errors'] else 'blocked'
+    finally:
+        conn.close()
+        workbook.close()
+
+    summary = {
+        'total': len(source_rows),
+        'ready': sum(1 for item in source_rows if item['import_status'] == 'ready'),
+        'blocked': sum(1 for item in source_rows if item['import_status'] != 'ready'),
+        'external_finance': sum(1 for item in source_rows if item['is_external_finance']),
+        'system_corrections': sum(1 for item in source_rows if item['legacy_correction_old_contract_ids']),
+    }
+    return {
+        'cutover_date': cutover_date,
+        'summary': summary,
+        'records': source_rows,
+    }
+
+
+def _legacy_customer_id(conn, customer_name, customer_phone):
+    c = conn.cursor()
+    row = c.execute("""
+        SELECT id
+        FROM customers
+        WHERE name=? AND COALESCE(phone, '')=COALESCE(?, '')
+        ORDER BY id DESC
+        LIMIT 1
+    """, (customer_name, customer_phone or '')).fetchone()
+    if row:
+        return row['id']
+    c.execute("INSERT INTO customers (name, phone) VALUES (?, ?)", (customer_name, customer_phone or ''))
+    return c.lastrowid
+
+
+def _legacy_sales_user(conn, sales_name):
+    if not sales_name:
+        return None
+    return conn.execute("""
+        SELECT id, display_name
+        FROM users
+        WHERE role='销售' AND is_active=1 AND display_name=?
+        LIMIT 1
+    """, (sales_name,)).fetchone()
+
+
+def _import_legacy_preview_records(conn, preview, selected_keys, operator, source_file_name, source_file_path):
+    selected_keys = set(selected_keys or [])
+    records = [
+        record for record in preview['records']
+        if record['import_status'] == 'ready'
+        and (not selected_keys or record['legacy_contract_key'] in selected_keys)
+    ]
+    if not records:
+        raise ValueError('没有可导入的已校验记录')
+
+    c = conn.cursor()
+    batch_code = f"LEGACY-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
+    c.execute("""
+        INSERT INTO legacy_import_batches
+            (batch_code, batch_name, source_file_name, source_file_path, cutover_date,
+             status, total_count, imported_count, skipped_count, summary_json,
+             created_by, confirmed_by, confirmed_at)
+        VALUES (?, ?, ?, ?, ?, '导入中', ?, 0, ?, ?, ?, ?, ?)
+    """, (
+        batch_code,
+        f'历史履约迁移 {preview["cutover_date"]}',
+        source_file_name,
+        source_file_path,
+        preview['cutover_date'],
+        len(preview['records']),
+        preview['summary']['blocked'],
+        json.dumps(preview['summary'], ensure_ascii=False),
+        operator,
+        operator,
+        datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    ))
+    batch_id = c.lastrowid
+    imported_ids = []
+    skipped = 0
+
+    for record in records:
+        existing = c.execute("""
+            SELECT contract_id
+            FROM legacy_contract_migrations
+            WHERE legacy_source=? AND legacy_contract_key=?
+            LIMIT 1
+        """, (record['legacy_source'], record['legacy_contract_key'])).fetchone()
+        if existing:
+            skipped += 1
+            continue
+
+        customer_id = _legacy_customer_id(conn, record['customer_name'], record['customer_phone'])
+        plans = record['plans']
+        repayment_day = _legacy_repayment_day(record, plans)
+        periods = record['loan_periods'] or len(plans)
+        contract_file = f"legacy-import/{batch_code}/{record['legacy_contract_key']}"
+        contract_status = (
+            '已结清'
+            if record['end_date'] and record['end_date'] < preview['cutover_date']
+            else '执行中'
+        )
+        c.execute("""
+            INSERT INTO contracts (
+                vehicle_id, customer_id, contract_type, business_mode, rental_method,
+                repayment_day, start_date, end_date, monthly_payment, rent, loan_periods,
+                company, deposit, delivery_status, delivery_date, contract_status,
+                contract_file, remark, created_by, contract_origin, legacy_cutover_date,
+                late_fee_accrual_start_date, legacy_visibility_status
+            )
+            VALUES (?, ?, ?, '历史迁移', ?, ?, ?, ?, ?, ?, ?, ?, ?, '已出库', ?, ?,
+                    ?, ?, ?, 'legacy', ?, ?, '已启用')
+        """, (
+            record['vehicle_id'], customer_id, record['contract_type'], record['rental_method'],
+            repayment_day, record['start_date'], record['end_date'], record['monthly_amount'],
+            record['monthly_amount'], periods, record['company'], record['deposit'],
+            record['start_date'], contract_status, contract_file,
+            f"历史履约迁移：{record['legacy_sheet']} 第{record['legacy_row_number']}行",
+            operator, preview['cutover_date'], preview['cutover_date'],
+        ))
+        contract_id = c.lastrowid
+        imported_ids.append(contract_id)
+        c.execute("""
+            INSERT INTO contract_vehicles (contract_id, vehicle_id, is_primary)
+            VALUES (?, ?, 1)
+        """, (contract_id, record['vehicle_id']))
+        c.execute("UPDATE vehicles SET status='租赁中' WHERE id=?", (record['vehicle_id'],))
+
+        normal_period = 0
+        for plan in plans:
+            is_deposit = '押金' in str(plan.get('payment_kind') or '')
+            period = 0 if is_deposit else normal_period + 1
+            if not is_deposit:
+                normal_period = period
+            status = _legacy_status_for_plan(plan)
+            if record['is_external_finance']:
+                c.execute("""
+                    INSERT INTO external_finance_repayments
+                        (contract_id, period, due_date, amount, payer_name, payee_name,
+                         status, paid_at, payment_reference, remark)
+                    VALUES (?, ?, ?, ?, ?, '一汽金融', ?, ?, ?, ?)
+                """, (
+                    contract_id, period, plan['due_date'], plan['amount'], record['customer_name'],
+                    status, plan.get('paid_at') or None,
+                    f"历史台账 收款及逾期 第{plan['source_row_number']}行",
+                    '客户直接向一汽金融还款；不进入客户对公司应收',
+                ))
+            else:
+                c.execute("""
+                    INSERT INTO repayments
+                        (contract_id, period, due_date, amount, paid_amount, verified_amount,
+                         status, paid_at, remark)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    contract_id, period, plan['due_date'], plan['amount'], plan['paid_amount'],
+                    plan['paid_amount'], status, plan.get('paid_at') or None,
+                    f"历史台账 收款及逾期 第{plan['source_row_number']}行",
+                ))
+
+        c.execute("""
+            INSERT INTO legacy_contract_migrations
+                (contract_id, batch_id, legacy_source, legacy_sheet, legacy_row_number,
+                 legacy_contract_key, original_contract_number, cutover_date,
+                 late_fee_start_date, migration_status, raw_json, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '已导入', ?, ?)
+        """, (
+            contract_id, batch_id, record['legacy_source'], record['legacy_sheet'],
+            record['legacy_row_number'], record['legacy_contract_key'], record['contract_number'],
+            preview['cutover_date'], preview['cutover_date'],
+            json.dumps(record, ensure_ascii=False), operator,
+        ))
+
+        sales_user = _legacy_sales_user(conn, record['sales_name'])
+        if sales_user:
+            c.execute("""
+                INSERT INTO contract_role_assignments
+                    (contract_id, assignment_role, user_id, source_name, active_from,
+                     status, assigned_by)
+                VALUES (?, 'signing_sales', ?, ?, ?, '启用', ?)
+            """, (
+                contract_id, sales_user['id'], record['sales_name'],
+                record['start_date'] or preview['cutover_date'], operator,
+            ))
+        elif record['sales_name']:
+            c.execute("""
+                INSERT INTO contract_role_assignments
+                    (contract_id, assignment_role, source_name, active_from,
+                     status, assigned_by)
+                VALUES (?, 'signing_sales', ?, ?, '待匹配', ?)
+            """, (
+                contract_id, record['sales_name'],
+                record['start_date'] or preview['cutover_date'], operator,
+            ))
+
+        if record['commission_amount'] > 0:
+            c.execute("""
+                INSERT INTO contract_commission_records
+                    (contract_id, batch_id, role_snapshot, amount, source_description, created_by)
+                VALUES (?, ?, 'back_office', ?, ?, ?)
+            """, (
+                contract_id, batch_id, record['commission_amount'],
+                f"历史台账 销售台账（租赁） 第{record['legacy_row_number']}行 佣金（内勤）",
+                operator,
+            ))
+        if record['historic_late_fee'] > 0:
+            c.execute("""
+                INSERT INTO contract_fee_items
+                    (contract_id, fee_type, description, amount_due, amount_paid, status, created_by)
+                VALUES (?, 'legacy_late_fee', '历史台账已确认违约金快照', ?, 0, '待支付', ?)
+            """, (contract_id, record['historic_late_fee'], operator))
+
+        for old_contract_id in record['legacy_correction_old_contract_ids']:
+            c.execute("""
+                INSERT OR IGNORE INTO legacy_contract_corrections
+                    (old_contract_id, replacement_contract_id, reason, status,
+                     created_by, confirmed_by, confirmed_at)
+                VALUES (?, ?, '系统已结清但历史台账仍在履约', '已确认', ?, ?, ?)
+            """, (
+                old_contract_id, contract_id, operator, operator,
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            ))
+        log_audit(
+            conn, '历史履约合同迁移', 'contract', contract_id,
+            f"批次{batch_code} 自然键{record['legacy_contract_key']} 切换日{preview['cutover_date']}",
+            operator,
+        )
+
+    c.execute("""
+        UPDATE legacy_import_batches
+        SET status='已完成', imported_count=?, skipped_count=?
+        WHERE id=?
+    """, (len(imported_ids), preview['summary']['blocked'] + skipped, batch_id))
+    return {'batch_id': batch_id, 'batch_code': batch_code, 'imported_ids': imported_ids, 'skipped': skipped}
 
 
 def create_or_update_receivable(conn, contract_id, receivable_type, amount, **kwargs):
@@ -2263,6 +2803,96 @@ def parse_period_count(value, default=12):
     return max(1, int(default or 12))
 
 
+def calculate_prorated_rent(monthly_rent, return_date, period_start_date=''):
+    """按退车当月实际天数和实际使用天数折算不足整月租金。"""
+    monthly_rent = max(0.0, parse_money(monthly_rent))
+    try:
+        return_dt = datetime.strptime(normalize_date(return_date), '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        return_dt = datetime.now().date()
+    days_in_month = (return_dt.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    days_in_month = days_in_month.day
+    try:
+        period_start = datetime.strptime(normalize_date(period_start_date), '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        period_start = return_dt.replace(day=1)
+    if period_start.year != return_dt.year or period_start.month != return_dt.month:
+        period_start = return_dt.replace(day=1)
+    days_used = max(1, min(days_in_month, (return_dt - period_start).days + 1))
+    daily_rent = round(monthly_rent / days_in_month, 2)
+    amount = round(monthly_rent / days_in_month * days_used, 2)
+    return {
+        'monthly_rent': round(monthly_rent, 2),
+        'days_in_month': days_in_month,
+        'days_used': days_used,
+        'daily_rent': daily_rent,
+        'amount': amount,
+        'return_date': return_dt.strftime('%Y-%m-%d'),
+        'formula': f'{monthly_rent:g} / {days_in_month} * {days_used}',
+    }
+
+
+def rebase_customer_repayment_plan(conn, contract_id, start_date):
+    """出库确认后按实际出库日次日重排既有账单日期，保留金额和核销状态。"""
+    contract = conn.execute(
+        """
+        SELECT contract_type, repayment_day, loan_periods, billing_cycle, rental_days
+        FROM contracts WHERE id=?
+        """,
+        (contract_id,),
+    ).fetchone()
+    if not contract:
+        return
+    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    rows = conn.execute(
+        "SELECT id, period FROM repayments WHERE contract_id=? AND period>=1 ORDER BY period ASC, id ASC",
+        (contract_id,),
+    ).fetchall()
+    for row in rows:
+        period = int(row['period'] or 0)
+        if contract['billing_cycle'] == '按天':
+            due_dt = start_dt + timedelta(days=period - 1)
+        elif contract['contract_type'] == '租赁':
+            due_dt = start_dt + relativedelta(months=period - 1)
+        else:
+            due_dt = start_dt + relativedelta(months=period)
+            due_dt = due_dt.replace(day=min(int(contract['repayment_day'] or 1), 28))
+        conn.execute(
+            "UPDATE repayments SET due_date=? WHERE id=?",
+            (due_dt.strftime('%Y-%m-%d'), row['id']),
+        )
+    rental_days = int(contract['rental_days'] or 0)
+    periods = int(contract['loan_periods'] or 0)
+    if contract['billing_cycle'] == '按天' and rental_days > 0:
+        end_dt = start_dt + timedelta(days=rental_days - 1)
+        conn.execute(
+            "UPDATE contracts SET start_date=?, end_date=? WHERE id=?",
+            (start_date, end_dt.strftime('%Y-%m-%d'), contract_id),
+        )
+    elif periods > 0:
+        if contract['contract_type'] == '租赁':
+            end_dt = start_dt + relativedelta(months=periods) - timedelta(days=1)
+        else:
+            end_dt = start_dt + relativedelta(months=periods)
+        conn.execute(
+            "UPDATE contracts SET start_date=?, end_date=? WHERE id=?",
+            (start_date, end_dt.strftime('%Y-%m-%d'), contract_id),
+        )
+
+
+def required_photo_missing(data, fields):
+    """校验三类照片均可从单字段或照片对象中取得。"""
+    missing = []
+    photo_object = data.get('photos') if isinstance(data.get('photos'), dict) else {}
+    for key, label in fields:
+        value = data.get(key)
+        if value in (None, ''):
+            value = photo_object.get(key)
+        if attachment_csv_count(value) <= 0:
+            missing.append(label)
+    return missing
+
+
 def clear_contract_plans(conn, contract_id, include_factory=True):
     c = conn.cursor()
     c.execute("DELETE FROM repayments WHERE contract_id=?", (contract_id,))
@@ -2271,7 +2901,8 @@ def clear_contract_plans(conn, contract_id, include_factory=True):
 
 
 def generate_customer_repayment_plan(conn, contract_id, contract_type, start_date, loan_periods,
-                                     rent, repayment_day=1, deposit=0, down_payment=0):
+                                     rent, repayment_day=1, deposit=0, down_payment=0,
+                                     billing_cycle='按月', rental_days=0):
     c = conn.cursor()
     start_dt = datetime.strptime(start_date, '%Y-%m-%d')
     if contract_type == '租赁' and parse_money(deposit) > 0:
@@ -2284,6 +2915,17 @@ def generate_customer_repayment_plan(conn, contract_id, contract_type, start_dat
             INSERT INTO repayments (contract_id, period, due_date, amount, status, remark)
             VALUES (?, 0, NULL, ?, '未激活', '首付款')
         """, (contract_id, parse_money(down_payment)))
+
+    if billing_cycle == '按天' and int(rental_days or 0) > 0:
+        days_in_month = (start_dt.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        daily_amount = round(parse_money(rent) / days_in_month.day, 2)
+        for p in range(1, int(rental_days) + 1):
+            due_dt = start_dt + timedelta(days=p - 1)
+            c.execute("""
+                INSERT INTO repayments (contract_id, period, due_date, amount, status)
+                VALUES (?, ?, ?, ?, '未激活')
+            """, (contract_id, p, due_dt.strftime('%Y-%m-%d'), daily_amount))
+        return
 
     for p in range(1, int(loan_periods) + 1):
         try:
@@ -2446,9 +3088,23 @@ def ensure_sales_order_planning_contract(conn, order_id, overrides=None, reset_f
         contract_id = c.lastrowid
         c.execute("UPDATE sales_orders SET contract_id=? WHERE id=?", (contract_id, order_id))
 
+    try:
+        inferred_rental_days = max(1, (datetime.strptime(end_dt.strftime('%Y-%m-%d'), '%Y-%m-%d')
+                                       - datetime.strptime(start_date, '%Y-%m-%d')).days + 1)
+    except ValueError:
+        inferred_rental_days = 0
+    billing_cycle = data.get('billing_cycle') or '按月'
+    rental_days = int(parse_money(data.get('rental_days'), 0) or 0)
+    if billing_cycle == '按天' and rental_days <= 0:
+        rental_days = inferred_rental_days
+    c.execute(
+        "UPDATE contracts SET billing_cycle=?, rental_days=? WHERE id=?",
+        (billing_cycle, rental_days, contract_id),
+    )
     generate_customer_repayment_plan(
         conn, contract_id, contract_type, start_date, loan_periods, rent,
-        repayment_day=repayment_day, deposit=deposit, down_payment=down_payment
+        repayment_day=repayment_day, deposit=deposit, down_payment=down_payment,
+        billing_cycle=billing_cycle, rental_days=rental_days,
     )
     c.execute("""
         UPDATE sales_orders
@@ -2499,6 +3155,78 @@ def require_role(*roles):
             return f(*args, **kwargs)
         return decorated
     return decorator
+
+
+# ======================== 历史履约迁移 ========================
+@app.route('/api/legacy-import/workbook-preview', methods=['POST'])
+@require_role('老板')
+def preview_legacy_import_workbook():
+    data = request.json or {}
+    file_url = (data.get('file_url') or '').strip()
+    local_path = upload_url_to_path(file_url)
+    if not file_url or not os.path.exists(local_path):
+        return jsonify({'success': False, 'message': '请先上传历史履约台账'}), 400
+    if not local_path.lower().endswith('.xlsx'):
+        return jsonify({'success': False, 'message': '仅支持 .xlsx 台账'}), 400
+    try:
+        preview = build_legacy_import_preview(local_path, data.get('cutover_date'))
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'台账解析失败：{e}'}), 400
+    return jsonify({'success': True, **preview})
+
+
+@app.route('/api/legacy-import/batches', methods=['GET'])
+@require_role('老板')
+def get_legacy_import_batches():
+    conn = get_db()
+    rows = [dict(row) for row in conn.execute("""
+        SELECT *
+        FROM legacy_import_batches
+        ORDER BY id DESC
+        LIMIT 50
+    """).fetchall()]
+    conn.close()
+    return jsonify(rows)
+
+
+@app.route('/api/legacy-import/batches', methods=['POST'])
+@require_role('老板')
+def import_legacy_contract_batch():
+    data = request.json or {}
+    file_url = (data.get('file_url') or '').strip()
+    local_path = upload_url_to_path(file_url)
+    if not file_url or not os.path.exists(local_path):
+        return jsonify({'success': False, 'message': '导入文件不存在，请重新预览'}), 400
+    try:
+        preview = build_legacy_import_preview(local_path, data.get('cutover_date'))
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'台账解析失败：{e}'}), 400
+
+    conn = get_db()
+    try:
+        result = _import_legacy_preview_records(
+            conn,
+            preview,
+            data.get('selected_keys') or [],
+            request.current_user['display_name'],
+            os.path.basename(local_path),
+            file_url,
+        )
+        conn.commit()
+        return jsonify({
+            'success': True,
+            'message': f'已导入 {len(result["imported_ids"])} 条历史履约合同',
+            'batch_id': result['batch_id'],
+            'batch_code': result['batch_code'],
+            'imported_count': len(result['imported_ids']),
+            'skipped_count': result['skipped'],
+            'preview_summary': preview['summary'],
+        })
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'历史履约迁移失败：{e}'}), 400
+    finally:
+        conn.close()
 
 
 # ======================== 登录/登出 ========================
@@ -2660,6 +3388,34 @@ def reconciliation_gate_for_repayment(conn, repayment_id):
 LATE_FEE_DAILY_RATE = 0.0005  # 万分之5/日，无复利
 
 def run_daily_collect(force=False):
+    """串行执行日终任务，避免多 Gunicorn worker 同时写入造成锁等待。"""
+    if not os.environ.get('JJY_DB_HOST'):
+        return _run_daily_collect(force=force)
+
+    lock_conn = get_db()
+    acquired = False
+    try:
+        lock = lock_conn.execute(
+            "SELECT GET_LOCK('jinjuyuan:daily-collect', 0) AS acquired"
+        ).fetchone()
+        acquired = bool(lock and int(lock['acquired'] or 0))
+        if not acquired:
+            return {
+                'skipped': True,
+                'run_date': datetime.now().strftime('%Y-%m-%d'),
+                'reason': 'already_running',
+            }
+        return _run_daily_collect(force=force)
+    finally:
+        if acquired:
+            try:
+                lock_conn.execute("SELECT RELEASE_LOCK('jinjuyuan:daily-collect')")
+            except Exception:
+                pass
+        lock_conn.close()
+
+
+def _run_daily_collect(force=False):
     """H1 统一入口：每日 00:30 / 惰性兜底调用。
     逐日重算 diff，推进 临近还款/还款日/逾期N日；逾期按万5/日写 late_fee_ledger。
     (job='daily-collect', run_date) 当天幂等，漏跑可按 diff 补推到正确档位。"""
@@ -2679,7 +3435,8 @@ def run_daily_collect(force=False):
     c.execute("""
         SELECT r.id, r.contract_id, r.period, r.due_date, r.amount,
                COALESCE(r.paid_amount,0) AS paid_amount, r.status,
-               c.vehicle_id
+               c.vehicle_id, COALESCE(c.contract_origin, 'normal') AS contract_origin,
+               c.late_fee_accrual_start_date
         FROM repayments r
         JOIN contracts c ON c.id = r.contract_id
         WHERE (r.status IN ('待还款','临近还款','还款日','部分核销','预抵','逾期')
@@ -2687,7 +3444,14 @@ def run_daily_collect(force=False):
           AND r.period >= 1
           AND COALESCE(c.contract_file, '')!=''
           AND c.delivery_status='已出库'
-    """)
+          AND (
+              COALESCE(c.contract_origin, 'normal')!='legacy'
+              OR (
+                  COALESCE(c.late_fee_accrual_start_date, '')!=''
+                  AND c.late_fee_accrual_start_date <= ?
+              )
+          )
+    """, (today_str,))
     for r in c.fetchall():
         _process_repayment_row(c, r, today, today_str, stats, contract_late)
     # 补生成提醒文案：状态已是「临近还款」但历史漏跑未写提醒的期（幂等）。
@@ -2698,7 +3462,14 @@ def run_daily_collect(force=False):
         WHERE r.status='临近还款'
           AND r.period >= 1
           AND c.delivery_status='已出库'
-    """)
+          AND (
+              COALESCE(c.contract_origin, 'normal')!='legacy'
+              OR (
+                  COALESCE(c.late_fee_accrual_start_date, '')!=''
+                  AND c.late_fee_accrual_start_date <= ?
+              )
+          )
+    """, (today_str,))
     for r in c.fetchall():
         if ensure_t3_reminder(c, r, today_str):
             stats['t3_reminder'] += 1
@@ -2785,6 +3556,10 @@ def ensure_t3_reminder(c, repayment, today_str):
 
 def _process_repayment_row(c, r, today, today_str, stats, contract_late):
     """对单笔 repayment 按 diff 推进状态 + 计提滞纳金。c 为共享游标。"""
+    if r['contract_origin'] == 'legacy':
+        cutover = str(r['late_fee_accrual_start_date'] or '')[:10]
+        if not cutover or cutover > today_str:
+            return
     rid = r['id']
     cid = r['contract_id']
     status = r['status']
@@ -2820,7 +3595,10 @@ def _process_repayment_row(c, r, today, today_str, stats, contract_late):
         if not settled:
             new_status = f'逾期{diff}日'
             stats['overdue'] += 1
-            cum = _accrue_late_fee(c, rid, cid, r['period'], amount, paid, due, today, today_str)
+            cum = _accrue_late_fee(
+                c, rid, cid, r['period'], amount, paid, due, today, today_str,
+                r['late_fee_accrual_start_date'] if r['contract_origin'] == 'legacy' else '',
+            )
             if cum is not None:
                 contract_late[cid] = contract_late.get(cid, 0) + cum
                 stats['late_fee'] += 1
@@ -2867,7 +3645,8 @@ def _process_receivable_row(c, rec, today, today_str, stats, contract_late):
         stats['late_fee'] += 1
 
 
-def _accrue_late_fee(c, rid, cid, period, amount, paid, due, today, today_str):
+def _accrue_late_fee(c, rid, cid, period, amount, paid, due, today, today_str,
+                     late_fee_start_date=''):
     """逐日计提滞纳金写 late_fee_ledger，(repayment_id, accrued_date) 幂等。
     基数 = amount - paid（原始未还本金，押金/首付款不抵扣），万5/日无复利。
     支持漏跑补提：从逾期首日(due+1)到今天，缺哪天补哪天。返回最新累计额。"""
@@ -2886,6 +3665,14 @@ def _accrue_late_fee(c, rid, cid, period, amount, paid, due, today, today_str):
         except (TypeError, ValueError):
             last_date = None
     first_overdue = due + timedelta(days=1)
+    if late_fee_start_date:
+        try:
+            first_overdue = max(
+                first_overdue,
+                datetime.strptime(str(late_fee_start_date)[:10], '%Y-%m-%d').date(),
+            )
+        except (TypeError, ValueError):
+            return None
     cursor_day = first_overdue if last_date is None else last_date + timedelta(days=1)
     daily = round(outstanding * LATE_FEE_DAILY_RATE, 2)
     while cursor_day <= today:
@@ -2907,7 +3694,7 @@ def _sync_late_fee_item(c, cid):
             FROM late_fee_ledger
             WHERE contract_id=?
             GROUP BY repayment_id
-        )
+        ) AS latest_fee
     """, (cid,))
     gross = parse_money(c.fetchone()['gross'])
     c.execute("SELECT COALESCE(SUM(waived_amount),0) AS w FROM late_fee_ledger WHERE contract_id=? AND waived=1", (cid,))
@@ -2967,6 +3754,11 @@ def reverse_late_fee_accruals_from_payment_date(conn, repayment_id, payment_date
 @app.route('/')
 def index():
     return send_from_directory('templates', 'index.html')
+
+
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204
 
 
 # ======================== 仪表盘统计 ========================
@@ -3211,6 +4003,7 @@ def dashboard_approval_type_label(ref_type):
         'lock_request': '锁车审批',
         'return_stock': '退车入库',
         'invoice': '发票审批',
+        'renewal': '续租审批',
     }.get(ref_type, ref_type)
 
 
@@ -3230,19 +4023,61 @@ def _dashboard_rows(c, sql, params=(), limit=6):
     return [dict(row) for row in c.fetchall()]
 
 
-def _dashboard_contract_scope(user, alias='c'):
-    """销售仅查看自己创建或归属给自己的报单所关联的合同。"""
+def _sales_contract_scope(user, alias='c'):
+    """销售的数据范围：历史合同按角色归属，普通合同沿用报单归属。"""
     if user['role'] != '销售':
         return '1=1', ()
     display_name = user['display_name']
+    today = datetime.now().strftime('%Y-%m-%d')
     return f"""
-        EXISTS (
-            SELECT 1
-            FROM sales_orders scoped_so
-            WHERE scoped_so.id={alias}.sales_order_id
-              AND (scoped_so.created_by=? OR scoped_so.sales_advisor=?)
+        (
+            (
+                COALESCE({alias}.contract_origin, 'normal')='legacy'
+                AND COALESCE({alias}.legacy_visibility_status, '已启用')='已启用'
+                AND EXISTS (
+                    SELECT 1
+                    FROM contract_role_assignments scoped_role
+                    WHERE scoped_role.contract_id={alias}.id
+                      AND scoped_role.user_id=?
+                      AND scoped_role.assignment_role IN ('signing_sales', 'servicing_sales')
+                      AND scoped_role.status='启用'
+                      AND (scoped_role.active_from IS NULL OR scoped_role.active_from='' OR scoped_role.active_from<=?)
+                      AND (scoped_role.active_to IS NULL OR scoped_role.active_to='' OR scoped_role.active_to>=?)
+                )
+            )
+            OR (
+                COALESCE({alias}.contract_origin, 'normal')!='legacy'
+                AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM sales_orders scoped_so
+                        WHERE scoped_so.id={alias}.sales_order_id
+                          AND (scoped_so.created_by=? OR scoped_so.sales_advisor=?)
+                    )
+                    OR {alias}.created_by=?
+                )
+            )
         )
-    """, (display_name, display_name)
+    """, (user['id'], today, today, display_name, display_name, display_name)
+
+
+def contract_is_visible_to_user(conn, contract_id, user):
+    """服务端合同数据隔离，不能依赖前端菜单或列表过滤。"""
+    if not user or user['role'] != '销售':
+        return True
+    scope, params = _sales_contract_scope(user)
+    row = conn.execute(
+        f"SELECT 1 FROM contracts c WHERE c.id=? AND ({scope}) LIMIT 1",
+        (contract_id,) + tuple(params),
+    ).fetchone()
+    return bool(row)
+
+
+def _dashboard_contract_scope(user, alias='c'):
+    """销售仪表盘与合同页使用同一份可见范围。"""
+    if user['role'] != '销售':
+        return '1=1', ()
+    return _sales_contract_scope(user, alias)
 
 
 def _dashboard_order_scope(user, alias='so'):
@@ -4223,6 +5058,113 @@ def get_model_guidance_prices():
     return jsonify(rows)
 
 
+@app.route('/api/guidance-board', methods=['GET'])
+@login_required
+def get_guidance_board():
+    """返回各角色共用的当前租赁指导价及已生效的以租代售方案。"""
+    today = datetime.now().strftime('%Y-%m-%d')
+    conn = get_db()
+    try:
+        lease_by_scope = {}
+        for db_row in conn.execute("""
+            SELECT id, car_type, is_new, lease_deposit_guidance,
+                   box_standard_price, box_wide_price, box_high_rail_price,
+                   box_refrigerated_price, box_flatbed_price, tail_plate_price,
+                   remark, updated_by, updated_at
+            FROM model_guidance_prices
+        """).fetchall():
+            row = dict(db_row)
+            car_type = normalize_base_car_type(row.get('car_type'))
+            if not car_type:
+                continue
+            condition = normalize_vehicle_condition(row.get('is_new'))
+            row['car_type'] = car_type
+            row['is_new'] = condition
+            key = (car_type, condition)
+            previous = lease_by_scope.get(key)
+            if not previous or (
+                (row.get('updated_at') or '', row.get('id') or 0)
+                > (previous.get('updated_at') or '', previous.get('id') or 0)
+            ):
+                lease_by_scope[key] = row
+
+        lease_prices = []
+        for row in lease_by_scope.values():
+            money_fields = (
+                'lease_deposit_guidance',
+                'box_standard_price',
+                'box_wide_price',
+                'box_high_rail_price',
+                'box_refrigerated_price',
+                'box_flatbed_price',
+                'tail_plate_price',
+            )
+            if not any(parse_money(row.get(field)) > 0 for field in money_fields):
+                continue
+            lease_prices.append({
+                'car_type': row['car_type'],
+                'is_new': row['is_new'],
+                'lease_deposit_guidance': parse_money(row.get('lease_deposit_guidance')),
+                'box_standard_price': parse_money(row.get('box_standard_price')),
+                'box_wide_price': parse_money(row.get('box_wide_price')),
+                'box_high_rail_price': parse_money(row.get('box_high_rail_price')),
+                'box_refrigerated_price': parse_money(row.get('box_refrigerated_price')),
+                'box_flatbed_price': parse_money(row.get('box_flatbed_price')),
+                'tail_plate_price': parse_money(row.get('tail_plate_price')),
+                'remark': row.get('remark') or '',
+                'updated_by': row.get('updated_by') or '',
+                'updated_at': row.get('updated_at') or '',
+            })
+        lease_prices.sort(key=lambda row: (row['car_type'], row['is_new']))
+
+        finance_plans = []
+        for db_row in conn.execute("""
+            SELECT id, car_type, condition, box_type, plan_name,
+                   down_payment, period_price, periods, effective_date, expiry_date,
+                   remark, status, updated_by, updated_at, sort_order
+            FROM finance_plans
+        """).fetchall():
+            row = dict(db_row)
+            effective_date = (row.get('effective_date') or '').strip()
+            expiry_date = (row.get('expiry_date') or '').strip()
+            car_type = normalize_base_car_type(row.get('car_type'))
+            if (
+                not car_type
+                or normalize_vehicle_condition(row.get('condition')) != '新车'
+                or (row.get('box_type') or '').strip() not in GUIDANCE_BOX_TYPES
+                or row.get('status') == '停用'
+                or (effective_date and effective_date > today)
+                or (expiry_date and expiry_date < today)
+            ):
+                continue
+            finance_plans.append({
+                'id': row.get('id'),
+                'car_type': car_type,
+                'condition': '新车',
+                'box_type': (row.get('box_type') or '').strip(),
+                'plan_name': row.get('plan_name') or '',
+                'down_payment': parse_money(row.get('down_payment')),
+                'period_price': parse_money(row.get('period_price')),
+                'periods': int(parse_money(row.get('periods')) or 0),
+                'effective_date': effective_date,
+                'expiry_date': expiry_date,
+                'remark': row.get('remark') or '',
+                'updated_by': row.get('updated_by') or '',
+                'updated_at': row.get('updated_at') or '',
+                'sort_order': int(parse_money(row.get('sort_order')) or 0),
+            })
+        finance_plans.sort(key=lambda row: (
+            row['car_type'], row['box_type'], row['sort_order'], -row['id']
+        ))
+        return jsonify({
+            'as_of': today,
+            'lease_prices': lease_prices,
+            'finance_plans': finance_plans,
+        })
+    finally:
+        conn.close()
+
+
 @app.route('/api/model-guidance-workbench', methods=['GET'])
 @require_role('老板')
 def get_model_guidance_workbench():
@@ -4549,9 +5491,13 @@ def upsert_model_guidance_price():
         for price_kind, old_value, new_value in history_rows:
             c.execute("""
                 INSERT INTO model_guidance_price_history
-                    (car_type, price_kind, old_price, new_price, changed_by, effective_at, affected_vehicle_count, remark)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (car_type, price_kind, old_value, new_value, user['display_name'], now, affected_count, remark))
+                    (car_type, is_new, price_kind, old_price, new_price,
+                     changed_by, effective_at, affected_vehicle_count, remark)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                base_type, is_new, price_kind, old_value, new_value,
+                user['display_name'], now, affected_count, remark,
+            ))
 
         for vehicle in affected_vehicles:
             old_hist = c.execute("""
@@ -4949,7 +5895,7 @@ def get_sku_vehicles(sku_id):
         SELECT id, vin, car_type, plate_number, condition, box_type, tailgate,
                purchase_price, created_at, status,
                vehicle_category, vehicle_engine_battery, vehicle_power_battery,
-               vehicle_color, box_type_remark
+               vehicle_color, box_type_remark, validation_status, validation_message
         FROM vehicles
         WHERE (is_deleted IS NULL OR is_deleted=0)
         ORDER BY id ASC
@@ -5009,26 +5955,60 @@ def backfill_skus(conn, operator='系统'):
 
 
 # ======================== 报单驳回退款闭环 ========================
+def _release_order_locked_vehicles(conn, order):
+    """释放报单仍锁定的车辆，已在其他流程占用的车辆不反向改状态。"""
+    if not order:
+        return []
+    c = conn.cursor()
+    release_vids = order_vehicle_ids(conn, order)
+    if not release_vids:
+        try:
+            release_vids = json.loads(order['vehicle_ids']) if order['vehicle_ids'] else []
+        except (TypeError, ValueError, KeyError):
+            release_vids = []
+    if not release_vids and order['vehicle_id']:
+        release_vids = [order['vehicle_id']]
+    for vid in release_vids:
+        c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (vid,))
+    return release_vids
+
+
 @app.route('/api/order-refunds', methods=['GET'])
 @login_required
 def get_order_refunds():
-    """退款列表；?status=待退款 可选过滤。"""
+    """退款列表；销售仅可查看自己报单发起的取消申请。"""
     conn = get_db()
     c = conn.cursor()
     status = (request.args.get('status') or '').strip()
+    user = request.current_user
+    clauses = []
+    params = []
     if status:
-        c.execute("SELECT * FROM order_refunds WHERE status=? ORDER BY id DESC", (status,))
-    else:
-        c.execute("SELECT * FROM order_refunds ORDER BY id DESC")
+        clauses.append("orx.status=?")
+        params.append(status)
+    if user['role'] == '销售':
+        clauses.append("so.created_by=?")
+        params.append(user['display_name'])
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ''
+    c.execute(f"""
+        SELECT orx.*, so.customer_name AS order_customer_name,
+               so.customer_phone AS order_customer_phone, so.created_by AS order_created_by,
+               v.plate_number, v.vin
+        FROM order_refunds orx
+        LEFT JOIN sales_orders so ON so.id=orx.sales_order_id
+        LEFT JOIN vehicles v ON v.id=COALESCE(orx.vehicle_id, so.vehicle_id)
+        {where}
+        ORDER BY orx.id DESC
+    """, params)
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return jsonify(rows)
 
 
 @app.route('/api/order-refunds', methods=['POST'])
-@require_role('老板')
+@require_role('销售')
 def create_order_refund():
-    """老板发起退款：报单须已作废且未发起过退款。"""
+    """销售发起取消订单：老板审批通过后，财务才能登记流水并退款。"""
     data = request.json or {}
     sales_order_id = data.get('sales_order_id')
     if not sales_order_id:
@@ -5036,53 +6016,150 @@ def create_order_refund():
     conn = get_db()
     c = conn.cursor()
     c.execute("""
-        SELECT so.*, v.plate_number FROM sales_orders so
+        SELECT so.*, v.plate_number, v.vin AS vehicle_vin,
+               v.status AS vehicle_status,
+               ct.delivery_status, ct.actual_delivery_date
+        FROM sales_orders so
         LEFT JOIN vehicles v ON v.id = so.vehicle_id
+        LEFT JOIN contracts ct ON ct.id = so.contract_id
         WHERE so.id=?
     """, (sales_order_id,))
     order = c.fetchone()
     if not order:
         conn.close()
         return jsonify({'success': False, 'message': '报单不存在'}), 404
-    if order['order_status'] != '已作废':
+    if order['created_by'] != request.current_user['display_name']:
         conn.close()
-        return jsonify({'success': False, 'message': f'仅已作废的报单可发起退款（当前 {order["order_status"]}）'}), 400
+        return jsonify({'success': False, 'message': '只能取消自己名下的报单'}), 403
+    if order['order_status'] == '草稿':
+        conn.close()
+        return jsonify({'success': False, 'message': '草稿无需退款，请直接删除草稿'}), 400
+    if order['order_status'] in ('已作废', '已出库'):
+        conn.close()
+        return jsonify({'success': False, 'message': f'当前报单状态为{order["order_status"]}，不能发起取消'}), 400
+    already_delivered = (
+        order['delivery_status'] == '已出库'
+        or bool(str(order['actual_delivery_date'] or '').strip())
+        or order['vehicle_status'] in ('租赁中', '经营租赁', '以租代售')
+    )
+    if already_delivered:
+        conn.close()
+        return jsonify({'success': False, 'message': '车辆已实际出库，不能取消订单；请走退车流程'}), 400
     if order['refund_id']:
         conn.close()
-        return jsonify({'success': False, 'message': '该报单已发起退款，请勿重复操作'}), 400
+        return jsonify({'success': False, 'message': '该报单已发起取消申请，请勿重复操作'}), 400
+    received = round(parse_money(order['first_payment_received_amount']), 2)
+    refund_amount = max(0.0, received)
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     user = request.current_user['display_name']
+    reason = (data.get('reason') or data.get('cancellation_reason') or '').strip()
+    if not reason:
+        conn.close()
+        return jsonify({'success': False, 'message': '取消原因不能为空'}), 400
     c.execute("""
         INSERT INTO order_refunds
             (sales_order_id, vehicle_id, contract_id, refund_amount, status,
-             initiated_by, initiated_at, customer_name, customer_phone, remark)
-        VALUES (?, ?, ?, ?, '待退款', ?, ?, ?, ?, ?)
+             initiated_by, initiated_at, customer_name, customer_phone, remark,
+             cancellation_reason, previous_order_status)
+        VALUES (?, ?, ?, ?, '待老板审批', ?, ?, ?, ?, ?, ?, ?)
     """, (
         sales_order_id,
         order['vehicle_id'],
         order['contract_id'],
-        parse_money(order['first_payment_received_amount']),
+        refund_amount,
         user,
         now,
         order['customer_name'] or '',
         order['customer_phone'] or '',
         (data.get('remark') or '').strip(),
+        reason,
+        order['order_status'],
     ))
     refund_id = c.lastrowid
-    c.execute("UPDATE sales_orders SET refund_id=? WHERE id=?", (refund_id, sales_order_id))
-    log_audit(conn, '发起报单退款', 'sales_order', sales_order_id,
-              f'应退 ¥{parse_money(order["first_payment_received_amount"])} 车辆 {order["plate_number"] or ""}',
+    c.execute("UPDATE sales_orders SET refund_id=?, order_status='取消审批中' WHERE id=?", (refund_id, sales_order_id))
+    c.execute("""
+        UPDATE approval_flows
+        SET status='已取消', acted_at=COALESCE(acted_at, ?),
+            comment=COALESCE(NULLIF(comment, ''), '销售发起取消订单')
+        WHERE ref_type IN ('order_exception', 'price_exception', 'sale_payment')
+          AND ref_id=? AND status='待审批'
+    """, (now, sales_order_id))
+    log_audit(conn, '发起取消订单', 'order_refund', refund_id,
+              f'报单{sales_order_id} 应退押金/首付款 ¥{refund_amount} 车辆 {order["plate_number"] or ""} 原因:{reason}',
               user)
     conn.commit()
     conn.close()
-    return jsonify({'success': True, 'id': refund_id, 'message': '退款已发起，等待财务执行'})
+    return jsonify({'success': True, 'id': refund_id, 'message': '取消申请已提交，等待老板审批'})
+
+
+@app.route('/api/order-refunds/<int:rid>/approve', methods=['POST'])
+@require_role('老板')
+def approve_order_refund(rid):
+    """老板同意取消，车辆继续锁定，等待财务退款。"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM order_refunds WHERE id=?", (rid,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '取消申请不存在'}), 404
+    if row['status'] != '待老板审批':
+        conn.close()
+        return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能审批'}), 400
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    c.execute("""
+        UPDATE order_refunds
+        SET status='待退款', boss_approved_by=?, boss_approved_at=?
+        WHERE id=?
+    """, (request.current_user['display_name'], now, rid))
+    c.execute("UPDATE sales_orders SET order_status='待退款' WHERE id=?", (row['sales_order_id'],))
+    log_audit(conn, '老板通过取消订单', 'order_refund', rid,
+              f'报单{row["sales_order_id"]} 等待财务退款',
+              request.current_user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '已通过取消申请，等待财务退款'})
+
+
+@app.route('/api/order-refunds/<int:rid>/reject', methods=['POST'])
+@require_role('老板')
+def reject_order_refund(rid):
+    """老板驳回取消申请，报单恢复到发起前状态，车辆继续锁定。"""
+    data = request.json or {}
+    reason = (data.get('reason') or data.get('comment') or '').strip()
+    if not reason:
+        return jsonify({'success': False, 'message': '驳回原因不能为空'}), 400
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM order_refunds WHERE id=?", (rid,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '取消申请不存在'}), 404
+    if row['status'] != '待老板审批':
+        conn.close()
+        return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能驳回'}), 400
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    previous_status = row['previous_order_status'] or '待财务确认'
+    c.execute("""
+        UPDATE order_refunds
+        SET status='已驳回', rejected_by=?, rejected_at=?, reject_reason=?
+        WHERE id=?
+    """, (request.current_user['display_name'], now, reason, rid))
+    c.execute("UPDATE sales_orders SET order_status=? WHERE id=?", (previous_status, row['sales_order_id']))
+    log_audit(conn, '老板驳回取消订单', 'order_refund', rid,
+              f'报单{row["sales_order_id"]} 原因:{reason}',
+              request.current_user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '取消申请已驳回，报单已恢复'})
 
 
 @app.route('/api/order-refunds/<int:rid>/pay', methods=['POST'])
 @require_role('财务')
 def pay_order_refund(rid):
-    """财务执行退款：填流水号+金额 → 已退款 → 车辆释放回在库。"""
+    """财务执行退款：填流水号+金额 → 已完成 → 车辆释放回在库。"""
     data = request.json or {}
     conn = get_db()
     c = conn.cursor()
@@ -5094,19 +6171,22 @@ def pay_order_refund(rid):
     if row['status'] != '待退款':
         conn.close()
         return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能执行退款'}), 400
+    if not row['boss_approved_at']:
+        conn.close()
+        return jsonify({'success': False, 'message': '请先完成老板审批'}), 400
     refund_serial = (data.get('refund_serial') or '').strip()
     refund_paid_amount = data.get('refund_paid_amount')
-    if len(refund_serial) < 4:
+    refund_due = round(parse_money(row['refund_amount']), 2)
+    if refund_due > 0 and len(refund_serial) < 4:
         conn.close()
         return jsonify({'success': False, 'message': '银行流水号至少填写4位'}), 400
     try:
-        refund_paid_amount = float(refund_paid_amount)
-        if refund_paid_amount <= 0:
+        refund_paid_amount = float(refund_paid_amount) if refund_paid_amount not in (None, '') else refund_due
+        if refund_paid_amount < 0:
             raise ValueError
     except (TypeError, ValueError):
         conn.close()
         return jsonify({'success': False, 'message': '请填写有效的退款金额'}), 400
-    refund_due = round(parse_money(row['refund_amount']), 2)
     if round(refund_paid_amount, 2) != refund_due:
         conn.close()
         return jsonify({'success': False, 'message': f'退款金额必须与应退金额一致（应退 ¥{refund_due}）'}), 400
@@ -5115,7 +6195,7 @@ def pay_order_refund(rid):
     user = request.current_user['display_name']
     c.execute("""
         UPDATE order_refunds
-        SET status='已退款', refund_serial=?, refund_paid_amount=?,
+        SET status='已完成', refund_serial=?, refund_paid_amount=?,
             bank_name=?, bank_card_no=?, executed_by=?, executed_at=?
         WHERE id=?
     """, (
@@ -5124,23 +6204,23 @@ def pay_order_refund(rid):
         (data.get('bank_card_no') or '').strip(),
         user, now, rid,
     ))
-    # 车辆释放回在库（SKU 改造：多车报单批量释放）
-    release_vids = []
-    if row['vehicle_id']:
-        release_vids = [row['vehicle_id']]
-    if row['sales_order_id']:
-        so = c.execute("SELECT vehicle_id, vehicle_ids FROM sales_orders WHERE id=?", (row['sales_order_id'],)).fetchone()
-        if so:
-            release_vids = order_vehicle_ids(conn, so) or release_vids
-    for vid in release_vids:
-        c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (vid,))
+    so = c.execute("SELECT * FROM sales_orders WHERE id=?", (row['sales_order_id'],)).fetchone()
+    if so:
+        c.execute("""
+            UPDATE sales_orders
+            SET order_status='已作废', voided_at=?, void_reason=?, voided_by=?
+            WHERE id=?
+        """, (now, row['cancellation_reason'] or '客户取消订单', user, row['sales_order_id']))
+        _release_order_locked_vehicles(conn, so)
     # 若有合同壳则终止
     if row['contract_id']:
         c.execute("""
             UPDATE contracts SET contract_status='已终止', delivery_status='已终止'
-            WHERE id=? AND contract_status='报单计划中'
+            WHERE id=?
+              AND contract_status!='已结清'
+              AND COALESCE(actual_delivery_date, '')=''
         """, (row['contract_id'],))
-    log_audit(conn, '执行报单退款', 'order_refund', rid,
+    log_audit(conn, '执行取消订单退款', 'order_refund', rid,
               f'报单{row["sales_order_id"]} 退款 ¥{refund_paid_amount} 流水号{refund_serial}', user)
     conn.commit()
     conn.close()
@@ -5150,7 +6230,8 @@ def pay_order_refund(rid):
 @app.route('/api/order-refunds/<int:rid>/cancel', methods=['POST'])
 @require_role('老板')
 def cancel_order_refund(rid):
-    """老板兜底取消退款：不退款，直接释放车辆回在库。"""
+    """兼容旧入口：待审批时按驳回处理，不释放车辆。"""
+    data = request.json or {}
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT * FROM order_refunds WHERE id=?", (rid,))
@@ -5158,31 +6239,24 @@ def cancel_order_refund(rid):
     if not row:
         conn.close()
         return jsonify({'success': False, 'message': '退款单不存在'}), 404
-    if row['status'] != '待退款':
+    if row['status'] != '待老板审批':
         conn.close()
-        return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能取消'}), 400
+        return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能取消申请'}), 400
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    c.execute("UPDATE order_refunds SET status='已取消', executed_by=?, executed_at=? WHERE id=?",
-              (request.current_user['display_name'], now, rid))
-    release_vids = []
-    if row['vehicle_id']:
-        release_vids = [row['vehicle_id']]
-    if row['sales_order_id']:
-        so = c.execute("SELECT vehicle_id, vehicle_ids FROM sales_orders WHERE id=?", (row['sales_order_id'],)).fetchone()
-        if so:
-            release_vids = order_vehicle_ids(conn, so) or release_vids
-    for vid in release_vids:
-        c.execute("UPDATE vehicles SET status='在库' WHERE id=? AND status='报单锁定中'", (vid,))
-    if row['contract_id']:
-        c.execute("""
-            UPDATE contracts SET contract_status='已终止', delivery_status='已终止'
-            WHERE id=? AND contract_status='报单计划中'
-        """, (row['contract_id'],))
-    log_audit(conn, '取消报单退款', 'order_refund', rid,
-              f'报单{row["sales_order_id"]} 取消退款，车辆释放回在库', request.current_user['display_name'])
+    reason = (data.get('reason') or data.get('comment') or '老板取消申请').strip()
+    previous_status = row['previous_order_status'] or '待财务确认'
+    c.execute("""
+        UPDATE order_refunds
+        SET status='已驳回', rejected_by=?, rejected_at=?, reject_reason=?
+        WHERE id=?
+    """, (request.current_user['display_name'], now, reason, rid))
+    c.execute("UPDATE sales_orders SET order_status=? WHERE id=?", (previous_status, row['sales_order_id']))
+    log_audit(conn, '取消报单退款申请', 'order_refund', rid,
+              f'报单{row["sales_order_id"]} 返回状态:{previous_status}',
+              request.current_user['display_name'])
     conn.commit()
     conn.close()
-    return jsonify({'success': True, 'message': '退款已取消，车辆已释放回在库'})
+    return jsonify({'success': True, 'message': '取消申请已驳回，报单已恢复'})
 
 
 # 文件上传
@@ -5195,7 +6269,10 @@ def upload_file():
     if not f.filename:
         return jsonify({'success': False, 'message': '文件名为空'}), 400
     ext = os.path.splitext(f.filename)[1].lower()
-    if ext not in ['.jpg', '.jpeg', '.png', '.pdf', '.doc', '.docx', '.xls', '.xlsx']:
+    allowed_extensions = {'.jpg', '.jpeg', '.png', '.pdf', '.doc', '.docx', '.xls', '.xlsx'}
+    if request.form.get('upload_purpose') == 'invoice':
+        allowed_extensions.update({'.ofd', '.xml', '.gif', '.webp', '.bmp', '.heic'})
+    if ext not in allowed_extensions:
         return jsonify({'success': False, 'message': '不支持的文件格式'}), 400
     filename = f"{uuid.uuid4().hex}{ext}"
     filepath = os.path.join(UPLOAD_DIR, filename)
@@ -5208,7 +6285,7 @@ def serve_upload(filename):
 
 
 @app.route('/api/vehicles', methods=['POST'])
-@require_role('车管')
+@require_role('运营', '老板')
 def add_vehicle():
     data = request.json or {}
     vin = (data.get('vin') or '').strip().upper()
@@ -5469,8 +6546,8 @@ def import_vehicles():
     user = get_current_user()
     if not user:
         return jsonify({'success': False, 'message': '登录已失效，请刷新页面'}), 200
-    if user['role'] not in ('车管', '老板'):
-        return jsonify({'success': False, 'message': '仅车管角色可以批量导入'}), 200
+    if user['role'] not in ('运营', '老板'):
+        return jsonify({'success': False, 'message': '仅运营或老板角色可以批量导入'}), 200
     request.current_user = user
     file_url = ''
     if request.is_json:
@@ -6250,6 +7327,17 @@ def issue_invoice_request(iid):
     invoice_no = (data.get('invoice_no') or '').strip()
     if not invoice_no:
         return jsonify({'success': False, 'message': '发票号不能为空'}), 400
+    invoice_date = str(data.get('invoice_date') or '').strip()
+    if not invoice_date:
+        return jsonify({'success': False, 'message': '开票日期不能为空'}), 400
+    try:
+        if datetime.strptime(invoice_date, '%Y-%m-%d').strftime('%Y-%m-%d') != invoice_date:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': '开票日期格式应为YYYY-MM-DD'}), 400
+    invoice_file_path = merge_attachment_csv(data.get('invoice_file_path'))
+    if attachment_csv_count(invoice_file_path) > 10:
+        return jsonify({'success': False, 'message': '发票文件最多上传10个'}), 400
 
     conn = get_db()
     c = conn.cursor()
@@ -6267,13 +7355,21 @@ def issue_invoice_request(iid):
         UPDATE invoice_requests
         SET status='已开票',
             invoice_no=?,
+            invoice_date=?,
             invoiced_at=?,
             invoice_file_path=?,
             processed_by=?
         WHERE id=?
-    """, (invoice_no, now, (data.get('invoice_file_path') or '').strip(), request.current_user['display_name'], iid))
+    """, (
+        invoice_no,
+        invoice_date,
+        now,
+        invoice_file_path,
+        request.current_user['display_name'],
+        iid,
+    ))
     log_audit(conn, '发票开具', 'invoice_request', iid,
-              f'发票号:{invoice_no}', request.current_user['display_name'])
+              f'发票号:{invoice_no} 开票日期:{invoice_date}', request.current_user['display_name'])
     conn.commit()
     conn.close()
     return jsonify({'success': True, 'message': '发票已开具'})
@@ -6358,11 +7454,49 @@ def get_sales_orders():
     expire_sales_order_drafts(conn)
     conn.commit()
     c = conn.cursor()
-    c.execute("""
+    user = request.current_user
+    where_clauses = []
+    params = []
+    if user['role'] == '销售':
+        where_clauses.append("(so.created_by=? OR so.sales_advisor=?)")
+        params.extend([user['display_name'], user['display_name']])
+
+    plate_number = (request.args.get('plate_number') or '').strip()
+    if plate_number:
+        where_clauses.append(
+            "COALESCE(so.plate_number, v.plate_number, '') LIKE ?"
+        )
+        params.append(f'%{plate_number}%')
+    order_status = (request.args.get('order_status') or '').strip()
+    if order_status:
+        where_clauses.append("so.order_status=?")
+        params.append(order_status)
+    customer = (request.args.get('customer') or '').strip()
+    if customer:
+        where_clauses.append("COALESCE(so.customer_name, '') LIKE ?")
+        params.append(f'%{customer}%')
+    car_type = (request.args.get('car_type') or '').strip()
+    if car_type:
+        where_clauses.append(
+            "COALESCE(so.car_type, v.car_type, '') LIKE ?"
+        )
+        params.append(f'%{car_type}%')
+    salesperson = (request.args.get('salesperson') or '').strip()
+    if salesperson:
+        where_clauses.append(
+            "COALESCE(so.sales_advisor, so.created_by, '') LIKE ?"
+        )
+        params.append(f'%{salesperson}%')
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ''
+
+    c.execute(f"""
         SELECT so.*, v.plate_number as vehicle_plate_number, v.car_type as vehicle_car_type, v.company, v.status as vehicle_status,
                c.contract_type, c.contract_status, c.delivery_status, c.contract_file,
                c.rent AS contract_rent,
                c.loan_periods AS contract_loan_periods,
+               c.end_date AS contract_end_date,
+               c.billing_cycle AS contract_billing_cycle,
+               c.rental_days AS contract_rental_days,
                c.deposit AS contract_deposit,
                c.down_payment AS contract_down_payment,
                c.start_date AS contract_start_date,
@@ -6401,10 +7535,11 @@ def get_sales_orders():
             FROM factory_repayments
             GROUP BY contract_id
         ) factory_plan ON factory_plan.contract_id = c.id
+        {where_sql}
         ORDER BY so.id DESC
-    """)
+    """, params)
     rows = [dict(r) for r in c.fetchall()]
-    rows = redact_for_role(conn, request.current_user['role'], 'sales_orders', rows)
+    rows = redact_for_role(conn, user['role'], 'sales_orders', rows)
     conn.close()
     return jsonify(rows)
 
@@ -6494,11 +7629,14 @@ def create_sales_order():
                 conn.close()
                 return jsonify({'success': False, 'message': f'车辆 {v_row["vin"]} 已被 {existing_order["created_by"]} 报单锁定，其他销售不能进行二次报单'}), 400
 
+    blacklist_hit = 0
+    blacklist_reason = ''
+    blacklist_marked_at = ''
     if not is_draft:
         customer_name = (data.get('customer_name') or '').strip()
         customer_phone = (data.get('customer_phone') or '').strip()
         c.execute("""
-            SELECT id, reason FROM customer_blacklist
+            SELECT id, reason, created_at FROM customer_blacklist
             WHERE status='生效'
               AND (
                     (customer_phone!='' AND customer_phone=?)
@@ -6508,8 +7646,9 @@ def create_sales_order():
         """, (customer_phone, customer_name))
         blacklist = c.fetchone()
         if blacklist:
-            conn.close()
-            return jsonify({'success': False, 'message': '客户命中黑名单，请联系老板审核解禁'}), 400
+            blacklist_hit = 1
+            blacklist_reason = blacklist['reason'] or '客户命中黑名单'
+            blacklist_marked_at = blacklist['created_at'] or ''
 
     sale_total_price = 0  # sale_total_price 已废弃（整车销售下线，以租代售仅走金融方案）
     sales_mode = normalize_sales_mode(data.get('sales_mode', '经营租赁'))
@@ -6531,7 +7670,10 @@ def create_sales_order():
     guidance_price = guidance_check['guidance_price']
     guidance_label = '指导价'
     # ===== 20260804 首付前移：报单时上传首付截图 + 判断首付足额 =====
-    customer_screenshot_path = (data.get('customer_screenshot_path') or data.get('screenshot_path') or '').strip()
+    customer_screenshot_path = merge_attachment_csv(
+        data.get('customer_screenshot_path'),
+        data.get('screenshot_path'),
+    )
     first_payment_received = parse_money(data.get('first_payment_received_amount'))
     if guidance_check['mode'] == '租赁':
         expected_first_payment = round(upfront_amount + lease_quote, 2)  # 押金 + 首月月供
@@ -6546,6 +7688,10 @@ def create_sales_order():
 
     # 合并审批异常项：租赁价格异常 + 首付不足
     abnormalities = []
+    if blacklist_hit:
+        abnormalities.append(
+            f'客户命中黑名单：{blacklist_reason}（标记时间 {blacklist_marked_at or "未知"}）'
+        )
     if guidance_check['mode'] == '租赁':
         abnormalities.extend(guidance_check['below'])
     abnormalities.extend(guidance_check['missing'])
@@ -6611,8 +7757,9 @@ def create_sales_order():
              customer_screenshot_path, first_payment_received_amount, first_payment_shortage_amount,
              first_payment_shortage_reason, first_payment_promised_date, first_payment_check_status,
              order_exception_reason, finance_plan_id, snapshot_finance_plan,
-             snapshot_lease_deposit_guidance, snapshot_box_monthly_guidance, vehicle_ids)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             snapshot_lease_deposit_guidance, snapshot_box_monthly_guidance, vehicle_ids,
+             blacklist_hit, blacklist_reason, blacklist_marked_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         data.get('payment_date') or datetime.now().strftime('%Y-%m-%d'),
         data.get('customer_name', '').strip() or ('草稿客户' if is_draft else ''),
@@ -6673,6 +7820,9 @@ def create_sales_order():
         snapshot_lease_deposit_guidance,
         snapshot_box_monthly_guidance,
         json.dumps([v['id'] for v in vehicles_multi], ensure_ascii=False) if vehicles_multi else None,
+        blacklist_hit,
+        blacklist_reason,
+        blacklist_marked_at,
     ))
     order_id = c.lastrowid
     if needs_order_approval:
@@ -6784,7 +7934,13 @@ def update_sales_order_draft(order_id):
     snapshot_lease_price = 0
     snapshot_sale_price = 0
 
-    customer_screenshot_path = (data.get('customer_screenshot_path') or order['customer_screenshot_path'] or '').strip()
+    if 'customer_screenshot_path' in data or 'screenshot_path' in data:
+        customer_screenshot_path = merge_attachment_csv(
+            data.get('customer_screenshot_path'),
+            data.get('screenshot_path'),
+        )
+    else:
+        customer_screenshot_path = merge_attachment_csv(order['customer_screenshot_path'])
     first_payment_received = parse_money(data.get('first_payment_received_amount'), order['first_payment_received_amount'])
     first_payment_shortage_reason = (data.get('first_payment_shortage_reason') or order['first_payment_shortage_reason'] or '').strip()
     first_payment_promised_date = normalize_date(data.get('first_payment_promised_date')) or order['first_payment_promised_date']
@@ -6793,6 +7949,9 @@ def update_sales_order_draft(order_id):
     snapshot_finance_plan = None
     snapshot_lease_deposit_guidance = 0
     snapshot_box_monthly_guidance = 0
+    blacklist_hit = 0
+    blacklist_reason = ''
+    blacklist_marked_at = ''
 
     if submit_now:
         if vehicle and vehicle['status'] not in ('在库', '报单锁定中'):
@@ -6804,14 +7963,16 @@ def update_sales_order_draft(order_id):
         customer_name = (data.get('customer_name') or order['customer_name'] or '').strip()
         customer_phone = (data.get('customer_phone') or order['customer_phone'] or '').strip()
         c.execute("""
-            SELECT id FROM customer_blacklist
+            SELECT id, reason, created_at FROM customer_blacklist
             WHERE status='生效'
               AND ((customer_phone!='' AND customer_phone=?) OR (customer_name!='' AND customer_name=?))
             LIMIT 1
         """, (customer_phone, customer_name))
-        if c.fetchone():
-            conn.close()
-            return jsonify({'success': False, 'message': '客户命中黑名单，请联系老板审核解禁'}), 400
+        blacklist = c.fetchone()
+        if blacklist:
+            blacklist_hit = 1
+            blacklist_reason = blacklist['reason'] or '客户命中黑名单'
+            blacklist_marked_at = blacklist['created_at'] or ''
 
         if vehicle:
             c.execute("""
@@ -6845,6 +8006,10 @@ def update_sales_order_draft(order_id):
         shortage = round(max(0, expected_first_payment - first_payment_received), 2)
 
         abnormalities = []
+        if blacklist_hit:
+            abnormalities.append(
+                f'客户命中黑名单：{blacklist_reason}（标记时间 {blacklist_marked_at or "未知"}）'
+            )
         if guidance_check['mode'] == '租赁':
             abnormalities.extend(guidance_check['below'])
         abnormalities.extend(guidance_check['missing'])
@@ -6905,7 +8070,8 @@ def update_sales_order_draft(order_id):
             customer_screenshot_path=?, first_payment_received_amount=?, first_payment_shortage_amount=?,
             first_payment_shortage_reason=?, first_payment_promised_date=?, first_payment_check_status=?,
             order_exception_reason=?, finance_plan_id=?, snapshot_finance_plan=?,
-            snapshot_lease_deposit_guidance=?, snapshot_box_monthly_guidance=?, vehicle_ids=?
+            snapshot_lease_deposit_guidance=?, snapshot_box_monthly_guidance=?, vehicle_ids=?,
+            blacklist_hit=?, blacklist_reason=?, blacklist_marked_at=?
         WHERE id=?
     """, (
         data.get('payment_date') or order['payment_date'] or datetime.now().strftime('%Y-%m-%d'),
@@ -6966,6 +8132,9 @@ def update_sales_order_draft(order_id):
         snapshot_lease_deposit_guidance,
         snapshot_box_monthly_guidance,
         json.dumps([v['id'] for v in vehicles_multi], ensure_ascii=False) if vehicles_multi else order['vehicle_ids'] if 'vehicle_ids' in order.keys() and order['vehicle_ids'] else None,
+        blacklist_hit,
+        blacklist_reason,
+        blacklist_marked_at,
         order_id,
     ))
     if submit_now:
@@ -7262,10 +8431,13 @@ def void_sales_order(order_id):
 
 # ======================== 合同 CRUD ========================
 @app.route('/api/contracts', methods=['GET'])
+@login_required
 def get_contracts():
     conn = get_db()
     c = conn.cursor()
-    c.execute("""
+    user = request.current_user
+    scope, scope_params = _sales_contract_scope(user)
+    c.execute(f"""
         SELECT c.*, v.vin, v.plate_number, v.car_type, v.status as vehicle_status,
                cu.name as customer_name, cu.phone as customer_phone,
                (SELECT ip.id FROM contract_initial_payments ip WHERE ip.contract_id=c.id ORDER BY ip.id DESC LIMIT 1) as initial_payment_id,
@@ -7275,8 +8447,9 @@ def get_contracts():
         JOIN vehicles v ON v.id = c.vehicle_id
         LEFT JOIN customers cu ON cu.id = c.customer_id
         WHERE (v.is_deleted IS NULL OR v.is_deleted = 0)
+          AND ({scope})
         ORDER BY c.id ASC
-    """)
+    """, scope_params)
     contracts = [dict(row) for row in c.fetchall()]
     # SKU 改造：多车合同带出关联车辆 VIN 列表（供前端展示）
     for ct in contracts:
@@ -7294,9 +8467,7 @@ def get_contracts():
             ]
         else:
             ct['contract_vehicle_vins'] = []
-    user = get_current_user()
-    if user:
-        contracts = redact_for_role(conn, user['role'], 'contracts', contracts)
+    contracts = redact_for_role(conn, user['role'], 'contracts', contracts)
     conn.close()
     return jsonify(contracts)
 
@@ -7364,6 +8535,8 @@ def add_contract():
             if not contract_file:
                 return jsonify({'success': False, 'message': '请上传要补充的合同附件'}), 400
             merged_contract_file = merge_attachment_csv(existing_order_contract['contract_file'], contract_file)
+            if attachment_csv_count(merged_contract_file) > 10:
+                return jsonify({'success': False, 'message': '每份合同最多上传 10 个附件'}), 400
             c.execute("UPDATE contracts SET contract_file=? WHERE id=?", (merged_contract_file, existing_order_contract['id']))
             c.execute("UPDATE sales_orders SET contract_id=? WHERE id=?", (existing_order_contract['id'], sales_order_id))
             log_audit(conn, '补充线下合同附件', 'contract', existing_order_contract['id'],
@@ -7415,6 +8588,8 @@ def add_contract():
 
         if not contract_file:
             return jsonify({'success': False, 'message': '请先上传线下签署的合同文档'}), 400
+        if attachment_csv_count(contract_file) > 10:
+            return jsonify({'success': False, 'message': '每份合同最多上传 10 个附件'}), 400
 
         c.execute("""
             SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total, COALESCE(AVG(amount), 0) AS avg_amount
@@ -7657,6 +8832,16 @@ def add_contract():
             planning_has_financial_activity = bool(c.fetchone())
             if not planning_has_financial_activity:
                 c.execute("DELETE FROM repayments WHERE contract_id=?", (contract_id,))
+                billing_cycle = data.get('billing_cycle') or (
+                    '按天' if '短租' in str(rental_method or '') else '按月'
+                )
+                rental_days = int(parse_money(data.get('rental_days'), 0) or 0)
+                if billing_cycle == '按天' and rental_days <= 0:
+                    rental_days = max(1, (end_dt - start_dt).days + 1)
+                c.execute(
+                    "UPDATE contracts SET billing_cycle=?, rental_days=? WHERE id=?",
+                    (billing_cycle, rental_days, contract_id),
+                )
                 generate_customer_repayment_plan(
                     conn,
                     contract_id,
@@ -7667,6 +8852,8 @@ def add_contract():
                     repayment_day=repayment_day,
                     deposit=deposit,
                     down_payment=down_payment,
+                    billing_cycle=billing_cycle,
+                    rental_days=rental_days,
                 )
             if factory_count > 0:
                 comparison = compare_contract_repayment_plans(conn, contract_id)
@@ -7812,14 +8999,17 @@ def add_contract():
 
 # ======================== 客户还款（客户 → 公司）========================
 @app.route('/api/contracts/<int:cid>/repayments', methods=['GET'])
+@login_required
 def get_repayments(cid):
     conn = get_db()
+    user = request.current_user
+    if not contract_is_visible_to_user(conn, cid, user):
+        conn.close()
+        return jsonify({'success': False, 'message': '合同不存在'}), 404
     c = conn.cursor()
     c.execute("SELECT * FROM repayments WHERE contract_id = ? ORDER BY period ASC", (cid,))
     repayments = [dict(row) for row in c.fetchall()]
-    user = get_current_user()
-    if user:
-        repayments = redact_for_role(conn, user['role'], 'repayments', repayments)
+    repayments = redact_for_role(conn, user['role'], 'repayments', repayments)
     conn.close()
     return jsonify(repayments)
 
@@ -7866,16 +9056,39 @@ def confirm_repayment(rid):
 
 # ======================== 厂家还款（公司 → 一汽解放）========================
 @app.route('/api/contracts/<int:cid>/factory-repayments', methods=['GET'])
+@login_required
 def get_factory_repayments(cid):
     conn = get_db()
+    user = request.current_user
+    if not contract_is_visible_to_user(conn, cid, user):
+        conn.close()
+        return jsonify({'success': False, 'message': '合同不存在'}), 404
     c = conn.cursor()
     c.execute("SELECT * FROM factory_repayments WHERE contract_id = ? ORDER BY period ASC", (cid,))
     repayments = [dict(row) for row in c.fetchall()]
-    user = get_current_user()
-    if user:
-        repayments = redact_for_role(conn, user['role'], 'factory_repayments', repayments)
+    repayments = redact_for_role(conn, user['role'], 'factory_repayments', repayments)
     conn.close()
     return jsonify(repayments)
+
+
+@app.route('/api/contracts/<int:cid>/external-finance-repayments', methods=['GET'])
+@login_required
+def get_external_finance_repayments(cid):
+    conn = get_db()
+    user = request.current_user
+    if not contract_is_visible_to_user(conn, cid, user):
+        conn.close()
+        return jsonify({'success': False, 'message': '合同不存在'}), 404
+    rows = [
+        dict(row) for row in conn.execute("""
+            SELECT *
+            FROM external_finance_repayments
+            WHERE contract_id=?
+            ORDER BY period ASC, due_date ASC, id ASC
+        """, (cid,)).fetchall()
+    ]
+    conn.close()
+    return jsonify(rows)
 
 @app.route('/api/factory-repayments/<int:rid>/confirm', methods=['POST'])
 @require_role('财务')
@@ -8308,7 +9521,7 @@ def get_completion_history():
                 WHEN COALESCE(v.status, '')='待维修' THEN '已退车结算，待维修（二手车）'
                 ELSE '已退车结算（二手车）'
             END AS completion_result,
-            COALESCE(NULLIF(ri.paid_out_at, ''), NULLIF(ri.created_at, '')) AS completed_at,
+            COALESCE(ri.paid_out_at, ri.created_at) AS completed_at,
             ri.contract_id,
             ri.vehicle_id,
             COALESCE(cu.name, ri.customer_name, '') AS customer_name,
@@ -8344,7 +9557,7 @@ def get_completion_history():
             ot.id AS source_id,
             '以租代售过户' AS completion_type,
             '车辆已过户' AS completion_result,
-            COALESCE(NULLIF(ot.completed_at, ''), NULLIF(ot.transfer_date, ''), NULLIF(ot.created_at, '')) AS completed_at,
+            COALESCE(ot.completed_at, NULLIF(ot.transfer_date, ''), ot.created_at) AS completed_at,
             ot.contract_id,
             ot.vehicle_id,
             COALESCE(cu.name, '') AS customer_name,
@@ -8875,6 +10088,9 @@ def get_pending_bills():
 @login_required
 def get_contract_fee_items(cid):
     conn = get_db()
+    if not contract_is_visible_to_user(conn, cid, request.current_user):
+        conn.close()
+        return jsonify({'success': False, 'message': '合同不存在'}), 404
     c = conn.cursor()
     c.execute("""
         SELECT *
@@ -8929,11 +10145,13 @@ def create_contract_fee_item(cid):
 
 # ======================== 对账核销流程（三位一体）========================
 @app.route('/api/reconciliation/list', methods=['GET'])
+@login_required
 def get_reconciliation_list():
     """获取所有需要对账的还款记录（含已核销的），用于对账单页面"""
     conn = get_db()
     c = conn.cursor()
-    c.execute("""
+    scope, scope_params = _sales_contract_scope(request.current_user)
+    c.execute(f"""
         SELECT r.id, r.contract_id, r.period, r.due_date, r.amount, r.status,
                r.paid_at, r.screenshot_path, r.bank_receipt_path, r.bank_serial,
                r.reported_amount, r.verified_by, r.verified_at, r.paid_amount, r.verified_amount, r.waterfall_summary,
@@ -8947,8 +10165,9 @@ def get_reconciliation_list():
           AND r.status!='未激活'
           AND COALESCE(c.contract_file, '')!=''
           AND c.delivery_status='已出库'
+          AND ({scope})
         ORDER BY r.due_date DESC
-    """)
+    """, scope_params)
     rows = [dict(row) for row in c.fetchall()]
     # 计算每条记录的核销步骤进度（运营发起对账 → 财务对账核销）
     for row in rows:
@@ -9388,6 +10607,65 @@ def upload_initial_payment_receipt(pid):
     return jsonify({'success': True, 'message': '公司收款回单已上传'})
 
 
+def ensure_refurbishment_record(conn, vehicle_id, return_inspection_id=None, repair_reason='', created_by='系统'):
+    """把退车车辆送入待整备库；同一退车单只保留一条整备记录。"""
+    c = conn.cursor()
+    if return_inspection_id:
+        existing = c.execute("""
+            SELECT id
+            FROM refurbishment_records
+            WHERE return_inspection_id=?
+            ORDER BY id DESC LIMIT 1
+        """, (return_inspection_id,)).fetchone()
+    else:
+        existing = c.execute("""
+            SELECT id
+            FROM refurbishment_records
+            WHERE vehicle_id=? AND status!='整备完成'
+            ORDER BY id DESC LIMIT 1
+        """, (vehicle_id,)).fetchone()
+    if existing:
+        if repair_reason:
+            c.execute("""
+                UPDATE refurbishment_records
+                SET repair_reason=COALESCE(NULLIF(repair_reason, ''), ?)
+                WHERE id=?
+            """, (repair_reason, existing['id']))
+        return existing['id']
+
+    vehicle = c.execute(
+        "SELECT status FROM vehicles WHERE id=?",
+        (vehicle_id,),
+    ).fetchone()
+    c.execute("""
+        INSERT INTO refurbishment_records
+            (vehicle_id, return_inspection_id, status, source_status,
+             available_for, condition, repair_reason, created_by)
+        VALUES (?, ?, '待整备', ?, '可租/可售', '二手车', ?, ?)
+    """, (
+        vehicle_id,
+        return_inspection_id,
+        vehicle['status'] if vehicle else '',
+        repair_reason or None,
+        created_by,
+    ))
+    return c.lastrowid
+
+
+def _refurbishment_for_return(c, vehicle_id, return_inspection_id=None):
+    if return_inspection_id:
+        return c.execute("""
+            SELECT * FROM refurbishment_records
+            WHERE return_inspection_id=?
+            ORDER BY id DESC LIMIT 1
+        """, (return_inspection_id,)).fetchone()
+    return c.execute("""
+        SELECT * FROM refurbishment_records
+        WHERE vehicle_id=? AND status!='整备完成'
+        ORDER BY id DESC LIMIT 1
+    """, (vehicle_id,)).fetchone()
+
+
 @app.route('/api/vehicles/<int:vid>/repair/start', methods=['POST'])
 @require_role('运营', '车管')
 def start_vehicle_repair(vid):
@@ -9414,7 +10692,7 @@ def start_vehicle_repair(vid):
 
 
 @app.route('/api/vehicles/<int:vid>/repair/complete', methods=['POST'])
-@require_role('运营', '车管')
+@require_role('运营')
 def complete_vehicle_repair(vid):
     data = request.json or {}
     conn = get_db()
@@ -9427,7 +10705,6 @@ def complete_vehicle_repair(vid):
     if row['status'] not in ('待维修', '维修中'):
         conn.close()
         return jsonify({'success': False, 'message': '车辆当前不在待维修或维修中状态'}), 400
-    previous = row['pre_repair_status'] or '在库'
     return_repair = c.execute("""
         SELECT id FROM return_inspections
         WHERE vehicle_id=? AND needs_repair=1 AND status IN ('已完成', '已入库')
@@ -9436,9 +10713,20 @@ def complete_vehicle_repair(vid):
     """, (vid,)).fetchone()
     was_return_repair = bool(return_repair)
     repair_completion_note = (data.get('repair_completion_note') or '').strip()
-    if was_return_repair and not repair_completion_note:
+    if not repair_completion_note:
         conn.close()
         return jsonify({'success': False, 'message': '请填写维修完成情况'}), 400
+    missing_photos = required_photo_missing(data, [
+        ('repair_appearance_photos', '维修后外观照片'),
+        ('repair_mileage_photos', '维修后里程照片'),
+        ('repair_tools_photos', '维修后工具照片'),
+    ])
+    if missing_photos:
+        conn.close()
+        return jsonify({
+            'success': False,
+            'message': f'请上传{"、".join(missing_photos)}后再完成维修',
+        }), 400
     repair_cost_raw = data.get('repair_cost')
     if repair_cost_raw in (None, ''):
         repair_cost = 0
@@ -9451,9 +10739,9 @@ def complete_vehicle_repair(vid):
         conn.close()
         return jsonify({'success': False, 'message': '维修费用不能小于0'}), 400
     repair_completed_at = (data.get('repair_completed_at') or datetime.now().strftime('%Y-%m-%d')).strip()
-    next_status = '在库' if was_return_repair else previous
+    next_status = '待整备'
     if was_return_repair:
-        # 租赁退车后的待维修车辆已发生实际使用，维修完成入库后仍须按二手车管理。
+        # 租赁退车后的待维修车辆已发生实际使用，维修完成后仍须按二手车管理。
         c.execute(
             "UPDATE vehicles SET status=?, condition='二手车', pre_repair_status=NULL WHERE id=?",
             (next_status, vid),
@@ -9464,22 +10752,614 @@ def complete_vehicle_repair(vid):
         c.execute("""
             UPDATE return_inspections
             SET repair_completed_by=?, repair_completed_at=?,
-                repair_completion_note=?, repair_cost=?
+                repair_completion_note=?, repair_cost=?,
+                repair_appearance_photos=?, repair_mileage_photos=?, repair_tools_photos=?
             WHERE id=?
         """, (
             request.current_user['display_name'],
             repair_completed_at,
             repair_completion_note,
             round(repair_cost, 2),
+            (data.get('repair_appearance_photos') or '').strip(),
+            (data.get('repair_mileage_photos') or '').strip(),
+            (data.get('repair_tools_photos') or '').strip(),
             return_repair['id'],
         ))
+    refurb_id = ensure_refurbishment_record(
+        conn,
+        vid,
+        return_inspection_id=return_repair['id'] if return_repair else None,
+        repair_reason=repair_completion_note,
+        created_by=request.current_user['display_name'],
+    )
+    if refurb_id:
+        c.execute("""
+            UPDATE refurbishment_records
+            SET status='待整备',
+                repair_note=?,
+                appearance_photos=?,
+                mileage_photos=?,
+                tools_photos=?,
+                cost=?,
+                started_by=NULL,
+                started_at=NULL
+            WHERE id=?
+        """, (
+            repair_completion_note,
+            (data.get('repair_appearance_photos') or '').strip(),
+            (data.get('repair_mileage_photos') or '').strip(),
+            (data.get('repair_tools_photos') or '').strip(),
+            round(repair_cost, 2),
+            refurb_id,
+        ))
     log_audit(conn, '车辆维修完成', 'vehicle', vid,
-              f'维修完成入库，恢复状态:{next_status}；完成日期:{repair_completed_at}；'
+              f'维修完成，转入待整备；完成日期:{repair_completed_at}；'
               f'维修费用:¥{repair_cost:.2f}；维修结果:{repair_completion_note or "未填写"}',
               request.current_user['display_name'])
     conn.commit()
     conn.close()
     return jsonify({'success': True, 'message': '维修已完成', 'status': next_status})
+
+
+@app.route('/api/refurbishment-records', methods=['GET'])
+@login_required
+def get_refurbishment_records():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT fr.*, v.vin, v.plate_number, v.car_type, v.status AS vehicle_status,
+               ri.customer_name,
+               COALESCE(ri.needs_repair, 0) AS needs_repair,
+               COALESCE(ri.repair_completed_at, '') AS repair_completed_at,
+               COALESCE(fr.repair_reason, ri.repair_reason, '') AS repair_reason
+        FROM refurbishment_records fr
+        JOIN vehicles v ON v.id=fr.vehicle_id
+        LEFT JOIN return_inspections ri ON ri.id=fr.return_inspection_id
+        ORDER BY CASE fr.status
+            WHEN '待整备' THEN 1
+            WHEN '整备中' THEN 2
+            ELSE 3
+        END, fr.id DESC
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify(rows)
+
+
+@app.route('/api/refurbishment-records/<int:rid>/start', methods=['POST'])
+@require_role('运营')
+def start_refurbishment(rid):
+    conn = get_db()
+    c = conn.cursor()
+    row = c.execute("""
+        SELECT fr.*, ri.needs_repair, COALESCE(ri.repair_completed_at, '') AS repair_completed_at
+        FROM refurbishment_records fr
+        LEFT JOIN return_inspections ri ON ri.id=fr.return_inspection_id
+        WHERE fr.id=?
+    """, (rid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '整备记录不存在'}), 404
+    if row['status'] != '待整备':
+        conn.close()
+        return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能开始整备'}), 400
+    if row['needs_repair'] and not row['repair_completed_at']:
+        conn.close()
+        return jsonify({'success': False, 'message': '车辆有待维修事项，请先在维修队列开始维修'}), 400
+    c.execute("""
+        UPDATE refurbishment_records
+        SET status='整备中', started_by=?, started_at=datetime('now','localtime')
+        WHERE id=?
+    """, (request.current_user['display_name'], rid))
+    c.execute("UPDATE vehicles SET status='整备中' WHERE id=?", (row['vehicle_id'],))
+    log_audit(conn, '车辆开始整备', 'refurbishment_record', rid,
+              f'车辆#{row["vehicle_id"]}', request.current_user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '车辆已进入整备中'})
+
+
+@app.route('/api/refurbishment-records/<int:rid>/complete', methods=['POST'])
+@require_role('运营')
+def complete_refurbishment(rid):
+    data = request.json or {}
+    completion_note = (data.get('completion_note') or '').strip()
+    if not completion_note:
+        return jsonify({'success': False, 'message': '请填写整备完成情况'}), 400
+    available_for = (data.get('available_for') or '可租/可售').strip()
+    if available_for not in ('可租', '可售', '可租/可售'):
+        return jsonify({'success': False, 'message': '请选择可租、可售或可租/可售'}), 400
+    conn = get_db()
+    c = conn.cursor()
+    row = c.execute("""
+        SELECT fr.*, ri.needs_repair, COALESCE(ri.repair_completed_at, '') AS repair_completed_at
+        FROM refurbishment_records fr
+        LEFT JOIN return_inspections ri ON ri.id=fr.return_inspection_id
+        WHERE fr.id=?
+    """, (rid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '整备记录不存在'}), 404
+    if row['status'] != '整备中':
+        conn.close()
+        return jsonify({'success': False, 'message': f'当前状态为{row["status"]}，不能完成整备'}), 400
+    if row['needs_repair'] and not row['repair_completed_at']:
+        conn.close()
+        return jsonify({'success': False, 'message': '维修尚未完成，不能结束整备'}), 400
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    c.execute("""
+        UPDATE refurbishment_records
+        SET status='整备完成', completion_note=?, available_for=?,
+            completed_by=?, completed_at=?
+        WHERE id=?
+    """, (
+        completion_note,
+        available_for,
+        request.current_user['display_name'],
+        now,
+        rid,
+    ))
+    c.execute("""
+        UPDATE vehicles
+        SET status='在库', condition='二手车'
+        WHERE id=?
+    """, (row['vehicle_id'],))
+    log_audit(conn, '车辆整备完成', 'refurbishment_record', rid,
+              f'车辆#{row["vehicle_id"]} 可租/可售:{available_for} {completion_note}',
+              request.current_user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '整备完成，车辆已入库'})
+
+
+def _renewal_deposit_snapshot(conn, contract_id, required_override=None):
+    contract = conn.execute(
+        "SELECT deposit, collected_deposit FROM contracts WHERE id=?",
+        (contract_id,),
+    ).fetchone()
+    if not contract:
+        raise ValueError('原合同不存在')
+    required = (
+        parse_money(required_override)
+        if required_override is not None
+        else parse_money(contract['deposit'])
+    )
+    deposit_row = conn.execute("""
+        SELECT id, amount, paid_amount
+        FROM repayments
+        WHERE contract_id=? AND period=0 AND remark='押金'
+        ORDER BY id DESC LIMIT 1
+    """, (contract_id,)).fetchone()
+    if deposit_row:
+        balance = min(
+            parse_money(deposit_row['amount']),
+            parse_money(deposit_row['paid_amount']),
+        )
+    else:
+        balance = parse_money(contract['collected_deposit'])
+    balance = round(max(0, balance), 2)
+    required = round(max(0, required), 2)
+    return {
+        'required': required,
+        'balance': balance,
+        'topup_amount': round(max(0, required - balance), 2),
+        'deposit_row_id': deposit_row['id'] if deposit_row else None,
+    }
+
+
+def _renewal_terms_from_request(data, contract):
+    billing_cycle = (data.get('billing_cycle') or contract['billing_cycle'] or '按月').strip()
+    if billing_cycle not in ('按天', '按月'):
+        raise ValueError('账单周期必须为按天或按月')
+    monthly_rent = round(parse_money(data.get('monthly_rent')), 2)
+    if monthly_rent <= 0:
+        raise ValueError('续租月租必须大于0')
+
+    start_date = normalize_date(contract['end_date'])
+    try:
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    except (TypeError, ValueError):
+        raise ValueError('原合同到期日无效，不能发起续租')
+    new_start_date = (start_dt + timedelta(days=1)).strftime('%Y-%m-%d')
+    requested_start = normalize_date(data.get('new_start_date'))
+    if requested_start and requested_start != new_start_date:
+        raise ValueError(f'续租起租日固定为原合同到期日次日（{new_start_date}）')
+
+    requested_end = normalize_date(data.get('new_end_date'))
+    if billing_cycle == '按天':
+        rental_days = int(parse_money(data.get('rental_days'), 0) or 0)
+        if rental_days <= 0 and requested_end:
+            try:
+                end_dt = datetime.strptime(requested_end, '%Y-%m-%d')
+                rental_days = (end_dt - datetime.strptime(new_start_date, '%Y-%m-%d')).days + 1
+            except (TypeError, ValueError):
+                rental_days = 0
+        if rental_days <= 0:
+            raise ValueError('短租续租必须填写有效天数或结束日期')
+        derived_end = (
+            datetime.strptime(new_start_date, '%Y-%m-%d')
+            + timedelta(days=rental_days - 1)
+        ).strftime('%Y-%m-%d')
+        if requested_end and requested_end != derived_end:
+            raise ValueError(f'按 {rental_days} 天续租的到期日应为 {derived_end}')
+        loan_periods = rental_days
+    else:
+        loan_periods = int(parse_money(data.get('loan_periods'), 0) or 0)
+        if loan_periods <= 0:
+            raise ValueError('按月续租必须填写续租期数')
+        derived_end = (
+            datetime.strptime(new_start_date, '%Y-%m-%d')
+            + relativedelta(months=loan_periods)
+            - timedelta(days=1)
+        ).strftime('%Y-%m-%d')
+        if requested_end and requested_end != derived_end:
+            raise ValueError(f'按 {loan_periods} 个月续租的到期日应为 {derived_end}')
+        rental_days = 0
+
+    return {
+        'billing_cycle': billing_cycle,
+        'new_start_date': new_start_date,
+        'new_end_date': derived_end,
+        'loan_periods': loan_periods,
+        'rental_days': rental_days,
+        'monthly_rent': monthly_rent,
+    }
+
+
+def _append_renewal_repayments(conn, contract, renewal):
+    max_period = conn.execute(
+        "SELECT COALESCE(MAX(period), 0) AS max_period FROM repayments WHERE contract_id=?",
+        (contract['id'],),
+    ).fetchone()['max_period']
+    next_period = int(max_period or 0) + 1
+    start_dt = datetime.strptime(renewal['new_start_date'], '%Y-%m-%d')
+    inserted = 0
+
+    if renewal['billing_cycle'] == '按天':
+        for offset in range(int(renewal['rental_days'])):
+            due_dt = start_dt + timedelta(days=offset)
+            days_in_month = (
+                due_dt.replace(day=28) + timedelta(days=4)
+            ).replace(day=1) - timedelta(days=1)
+            amount = round(renewal['monthly_rent'] / days_in_month.day, 2)
+            due_date = due_dt.strftime('%Y-%m-%d')
+            conn.execute("""
+                INSERT INTO repayments (contract_id, period, due_date, amount, status, remark)
+                VALUES (?, ?, ?, ?, ?, '续租按日账单')
+            """, (
+                contract['id'],
+                next_period + offset,
+                due_date,
+                amount,
+                repayment_status_after_allocation(due_date, 0, amount),
+            ))
+            inserted += 1
+        return inserted
+
+    for offset in range(int(renewal['loan_periods'])):
+        if contract['contract_type'] == '租赁':
+            due_dt = start_dt + relativedelta(months=offset)
+        else:
+            due_dt = start_dt + relativedelta(months=offset + 1)
+            due_dt = due_dt.replace(day=min(int(contract['repayment_day'] or 1), 28))
+        due_date = due_dt.strftime('%Y-%m-%d')
+        amount = renewal['monthly_rent']
+        conn.execute("""
+            INSERT INTO repayments (contract_id, period, due_date, amount, status, remark)
+            VALUES (?, ?, ?, ?, ?, '续租按月账单')
+        """, (
+            contract['id'],
+            next_period + offset,
+            due_date,
+            amount,
+            repayment_status_after_allocation(due_date, 0, amount),
+        ))
+        inserted += 1
+    return inserted
+
+
+@app.route('/api/renewals', methods=['GET'])
+@login_required
+def get_renewals():
+    user = request.current_user
+    conn = get_db()
+    c = conn.cursor()
+    where = ''
+    params = ()
+    if user['role'] == '销售':
+        scope, scope_params = _sales_contract_scope(user, 'c')
+        where = f'WHERE ({scope})'
+        params = scope_params
+    c.execute(f"""
+        SELECT ra.*, c.contract_type, c.business_mode, c.rent AS original_rent,
+               c.start_date AS original_start_date, c.end_date AS original_end_date,
+               v.vin, v.plate_number, v.car_type,
+               cu.name AS customer_name, cu.phone AS customer_phone
+        FROM renewal_applications ra
+        JOIN contracts c ON c.id=ra.original_contract_id
+        JOIN vehicles v ON v.id=ra.vehicle_id
+        LEFT JOIN customers cu ON cu.id=ra.customer_id
+        {where}
+        ORDER BY ra.id DESC
+    """, params)
+    items = []
+    for row in c.fetchall():
+        item = dict(row)
+        item['can_activate'] = (
+            user['role'] == '运营'
+            and item['status'] == '待运营处理'
+        )
+        items.append(item)
+    conn.close()
+    return jsonify(items)
+
+
+@app.route('/api/contracts/<int:contract_id>/renewals', methods=['POST'])
+@require_role('销售')
+def create_renewal(contract_id):
+    data = request.json or {}
+    user = request.current_user
+    conn = get_db()
+    c = conn.cursor()
+    if not contract_is_visible_to_user(conn, contract_id, user):
+        conn.close()
+        return jsonify({'success': False, 'message': '无权为该合同发起续租'}), 403
+    contract = c.execute("""
+        SELECT c.*, v.status AS vehicle_status
+        FROM contracts c
+        JOIN vehicles v ON v.id=c.vehicle_id
+        WHERE c.id=?
+    """, (contract_id,)).fetchone()
+    if not contract:
+        conn.close()
+        return jsonify({'success': False, 'message': '原合同不存在'}), 404
+    if contract['contract_status'] in ('已结清', '已终止'):
+        conn.close()
+        return jsonify({'success': False, 'message': '已结清或已终止合同不能续租'}), 400
+    try:
+        original_end = datetime.strptime(normalize_date(contract['end_date']), '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        conn.close()
+        return jsonify({'success': False, 'message': '原合同到期日无效，不能续租'}), 400
+    if datetime.now().date() > original_end:
+        conn.close()
+        return jsonify({'success': False, 'message': '原合同已到期，不能再发起续租'}), 400
+    existing = c.execute("""
+        SELECT id FROM renewal_applications
+        WHERE original_contract_id=? AND status IN ('待老板审批', '待运营处理', '已生效')
+        ORDER BY id DESC LIMIT 1
+    """, (contract_id,)).fetchone()
+    if existing:
+        conn.close()
+        return jsonify({'success': False, 'message': '该合同已有进行中或已生效的续租申请'}), 400
+    try:
+        terms = _renewal_terms_from_request(data, contract)
+        deposit = _renewal_deposit_snapshot(
+            conn,
+            contract_id,
+            data.get('deposit_required'),
+        )
+    except ValueError as exc:
+        conn.close()
+        return jsonify({'success': False, 'message': str(exc)}), 400
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    c.execute("""
+        INSERT INTO renewal_applications
+            (original_contract_id, vehicle_id, customer_id,
+             new_start_date, new_end_date, billing_cycle, loan_periods, monthly_rent,
+             deposit_required, deposit_balance, deposit_topup_amount,
+             status, application_note, requested_by, requested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '待老板审批', ?, ?, ?)
+    """, (
+        contract_id,
+        contract['vehicle_id'],
+        contract['customer_id'],
+        terms['new_start_date'],
+        terms['new_end_date'],
+        terms['billing_cycle'],
+        terms['loan_periods'],
+        terms['monthly_rent'],
+        deposit['required'],
+        deposit['balance'],
+        deposit['topup_amount'],
+        (data.get('application_note') or '').strip(),
+        user['display_name'],
+        now,
+    ))
+    renewal_id = c.lastrowid
+    create_approval_flow(conn, 'renewal', renewal_id)
+    log_audit(conn, '发起续租', 'renewal', renewal_id,
+              f"合同#{contract_id} {terms['new_start_date']}至{terms['new_end_date']} 月租¥{terms['monthly_rent']:.2f}",
+              user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'id': renewal_id, 'message': '续租申请已提交老板审批'})
+
+
+@app.route('/api/renewals/<int:renewal_id>/activate', methods=['POST'])
+@require_role('运营')
+def activate_renewal(renewal_id):
+    data = request.json or {}
+    user = request.current_user
+    conn = get_db()
+    c = conn.cursor()
+    renewal = c.execute("""
+        SELECT ra.*, c.contract_type, c.billing_cycle, c.repayment_day,
+               c.loan_periods AS original_loan_periods,
+               c.rental_days AS original_rental_days,
+               c.contract_file AS original_contract_file,
+               c.end_date AS original_end_date
+        FROM renewal_applications ra
+        JOIN contracts c ON c.id=ra.original_contract_id
+        WHERE ra.id=?
+    """, (renewal_id,)).fetchone()
+    if not renewal:
+        conn.close()
+        return jsonify({'success': False, 'message': '续租申请不存在'}), 404
+    if renewal['status'] != '待运营处理':
+        conn.close()
+        return jsonify({'success': False, 'message': '续租申请尚未通过老板审批或已生效'}), 400
+    try:
+        original_end = datetime.strptime(normalize_date(renewal['original_end_date']), '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        conn.close()
+        return jsonify({'success': False, 'message': '原合同到期日无效'}), 400
+    if datetime.now().date() > original_end:
+        conn.close()
+        return jsonify({'success': False, 'message': '原合同已到期，不能激活续租'}), 400
+
+    contract_file = (
+        data.get('contract_file')
+        or data.get('renewal_contract_file')
+        or ''
+    ).strip()
+    if attachment_csv_count(contract_file) <= 0:
+        conn.close()
+        return jsonify({'success': False, 'message': '请上传续租合同后再激活'}), 400
+    contract_number = (data.get('contract_number') or '').strip()
+    if not contract_number:
+        conn.close()
+        return jsonify({'success': False, 'message': '请填写续租合同编号'}), 400
+
+    deposit = _renewal_deposit_snapshot(
+        conn,
+        renewal['original_contract_id'],
+        renewal['deposit_required'],
+    )
+    topup_amount = deposit['topup_amount']
+    confirmed = data.get('deposit_topup_confirmed') in (True, 1, '1', 'true', 'True', '是')
+    if topup_amount > 0:
+        if not confirmed:
+            conn.close()
+            return jsonify({
+                'success': False,
+                'message': f'押金不足，请先补足 ¥{topup_amount:.2f} 并确认到账',
+            }), 400
+        received_topup = round(parse_money(data.get('deposit_topup_amount')), 2)
+        if received_topup < topup_amount:
+            conn.close()
+            return jsonify({
+                'success': False,
+                'message': f'补缴金额不足，应至少补缴 ¥{topup_amount:.2f}',
+            }), 400
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if topup_amount > 0:
+        if deposit['deposit_row_id']:
+            c.execute("""
+                UPDATE repayments
+                SET amount=?,
+                    paid_amount=MAX(COALESCE(paid_amount, 0), ?),
+                    verified_amount=MAX(COALESCE(verified_amount, 0), ?),
+                    status='已还款',
+                    bank_serial=COALESCE(NULLIF(bank_serial, ''), ?),
+                    waterfall_summary=COALESCE(
+                        NULLIF(waterfall_summary, ''),
+                        ?
+                    )
+                WHERE id=?
+            """, (
+                deposit['required'],
+                deposit['required'],
+                deposit['required'],
+                (data.get('deposit_bank_serial') or '').strip() or None,
+                f"续租#{renewal_id}补足押金¥{topup_amount:.2f}",
+                deposit['deposit_row_id'],
+            ))
+        else:
+            c.execute("""
+                INSERT INTO repayments
+                    (contract_id, period, due_date, amount, paid_amount,
+                     verified_amount, status, bank_serial, remark)
+                VALUES (?, 0, NULL, ?, ?, ?, '已还款', ?, '押金')
+            """, (
+                renewal['original_contract_id'],
+                deposit['required'],
+                deposit['required'],
+                deposit['required'],
+                (data.get('deposit_bank_serial') or '').strip() or None,
+            ))
+
+    original_contract = {
+        'id': renewal['original_contract_id'],
+        'contract_type': renewal['contract_type'],
+        'repayment_day': renewal['repayment_day'],
+    }
+    renewal_terms = {
+        'billing_cycle': renewal['billing_cycle'] or '按月',
+        'new_start_date': renewal['new_start_date'],
+        'new_end_date': renewal['new_end_date'],
+        'loan_periods': renewal['loan_periods'],
+        'rental_days': renewal['loan_periods'] if (renewal['billing_cycle'] or '') == '按天' else 0,
+        'monthly_rent': renewal['monthly_rent'],
+    }
+    appended_periods = _append_renewal_repayments(
+        conn,
+        original_contract,
+        renewal_terms,
+    )
+    merged_contract_file = merge_attachment_csv(
+        renewal['original_contract_file'],
+        contract_file,
+    )
+    c.execute("""
+        UPDATE contracts
+        SET end_date=?,
+            rent=?,
+            loan_periods=COALESCE(loan_periods, 0)+?,
+            billing_cycle=?,
+            rental_days=CASE WHEN ?='按天' THEN ? ELSE rental_days END,
+            contract_file=?,
+            collected_deposit=?,
+            deposit_status=CASE WHEN ?>0 THEN '已收' ELSE deposit_status END
+        WHERE id=?
+    """, (
+        renewal['new_end_date'],
+        renewal['monthly_rent'],
+        renewal['loan_periods'],
+        renewal['billing_cycle'] or '按月',
+        renewal['billing_cycle'] or '按月',
+        renewal['loan_periods'],
+        merged_contract_file,
+        deposit['required'],
+        deposit['required'],
+        renewal['original_contract_id'],
+    ))
+    c.execute("""
+        UPDATE renewal_applications
+        SET status='已生效',
+            contract_file=?,
+            contract_number=?,
+            deposit_balance=?,
+            deposit_topup_amount=?,
+            deposit_topup_confirmed=?,
+            operations_filled_by=?,
+            operations_filled_at=?,
+            activated_at=?
+        WHERE id=?
+    """, (
+        contract_file,
+        contract_number,
+        deposit['required'],
+        topup_amount,
+        1 if confirmed else 0,
+        user['display_name'],
+        now,
+        now,
+        renewal_id,
+    ))
+    log_audit(conn, '续租生效', 'renewal', renewal_id,
+              f"合同#{renewal['original_contract_id']} 延长至{renewal['new_end_date']}，追加{appended_periods}期账单，"
+              f"补押金¥{topup_amount:.2f}，续租合同:{contract_number}",
+              user['display_name'])
+    conn.commit()
+    conn.close()
+    return jsonify({
+        'success': True,
+        'message': f'续租已生效，已追加{appended_periods}期账单',
+        'appended_periods': appended_periods,
+    })
 
 
 # ======================== 退还车辆验收单 ========================
@@ -10141,39 +12021,8 @@ def pay_return_refund(rid):
             request.current_user['display_name'],
             '退车结算前复核历史首期回款',
         )
-        c.execute("""
-            SELECT COUNT(*) AS cnt
-            FROM repayments
-            WHERE contract_id=?
-              AND COALESCE(paid_amount, 0) < COALESCE(amount, 0)
-              AND (
-                  period=0
-                  OR COALESCE(due_date, '')=''
-                  OR due_date<=?
-              )
-        """, (row['contract_id'], settlement_date))
-        if c.fetchone()['cnt'] > 0:
-            conn.close()
-            return jsonify({'success': False, 'message': '客户仍有已到期未结清首付款或租金，不能完成退车结算'}), 400
-        c.execute("""
-            SELECT COUNT(*) AS cnt
-            FROM receivables
-            WHERE contract_id=?
-              AND status NOT IN ('已结清', '已取消')
-              AND amount > COALESCE(paid_amount, 0)
-        """, (row['contract_id'],))
-        if c.fetchone()['cnt'] > 0:
-            conn.close()
-            return jsonify({'success': False, 'message': '存在未结清挂账应收，不能完成退车结算'}), 400
-        c.execute("""
-            SELECT COUNT(*) AS cnt
-            FROM contract_fee_items
-            WHERE contract_id=?
-              AND amount_due > COALESCE(amount_paid, 0)
-        """, (row['contract_id'],))
-        if c.fetchone()['cnt'] > 0:
-            conn.close()
-            return jsonify({'success': False, 'message': '存在未结清合同费用，不能完成退车结算'}), 400
+        # 逾期首付款、租金、费用或挂账应收不阻塞退车和车辆入库。
+        # 已到期欠款继续保留在原合同下供后续催收/核销，只取消退车日之后尚未到期的分期。
         c.execute("""
             UPDATE repayments
             SET status='已取消',
@@ -10228,6 +12077,13 @@ def pay_return_refund(rid):
                 conn,
                 dict(returned_vehicle),
                 request.current_user['display_name'],
+            )
+            ensure_refurbishment_record(
+                conn,
+                row['vehicle_id'],
+                return_inspection_id=rid,
+                repair_reason=(row['repair_reason'] or '').strip(),
+                created_by=request.current_user['display_name'],
             )
     if row['contract_id']:
         c.execute("UPDATE contracts SET contract_status='已结清', delivery_status='已完成' WHERE id=?", (row['contract_id'],))
@@ -10312,6 +12168,106 @@ def _synthesize_return_items(conn, user):
             'total_price': 0, 'rent': 0, 'monthly_payment': 0, 'loan_periods': 0,
             'deposit': 0, 'down_payment': 0, 'start_date': '', 'end_date': '',
             'contract_file': '', 'business_mode': '', 'reason': '', 'overdue_days': 0,
+        })
+    return items
+
+
+def _synthesize_order_refund_items(conn, user):
+    """把取消订单申请合成为审批中心卡片，销售发起后全程可见。"""
+    c = conn.cursor()
+    c.execute("""
+        SELECT orx.*, so.customer_name AS order_customer_name,
+               so.customer_phone AS order_customer_phone,
+               so.created_by AS order_created_by,
+               so.sales_mode, so.car_type AS order_car_type,
+               so.vin AS order_vin, so.lease_term,
+               v.plate_number AS vehicle_plate_number,
+               v.car_type AS vehicle_car_type,
+               v.vin AS vehicle_vin
+        FROM order_refunds orx
+        LEFT JOIN sales_orders so ON so.id=orx.sales_order_id
+        LEFT JOIN vehicles v ON v.id=COALESCE(orx.vehicle_id, so.vehicle_id)
+        ORDER BY orx.id DESC
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    items = []
+    for row in rows:
+        status = row.get('status') or '待老板审批'
+        if user['role'] == '销售' and row.get('order_created_by') != user['display_name']:
+            continue
+        if user['role'] == '财务' and status not in ('待退款', '已完成'):
+            continue
+        if user['role'] not in ('销售', '老板', '财务'):
+            continue
+        boss_done = bool(row.get('boss_approved_at'))
+        finance_done = status == '已完成'
+        sales_done = bool(row.get('initiated_at'))
+        steps = [
+            {
+                'id': row['id'], 'ref_type': 'order_refund', 'ref_id': row['id'],
+                'step_order': 1, 'required_role': '销售', 'step_label': '销售发起',
+                'status': '已通过' if sales_done else '待审批',
+                'operator_name': row.get('initiated_by', ''),
+                'acted_at': row.get('initiated_at', ''),
+                'comment': row.get('cancellation_reason', ''),
+            },
+            {
+                'id': row['id'], 'ref_type': 'order_refund', 'ref_id': row['id'],
+                'step_order': 2, 'required_role': '老板', 'step_label': '老板审核',
+                'status': '已通过' if boss_done else ('已驳回' if status == '已驳回' else '待审批'),
+                'operator_name': row.get('boss_approved_by') or row.get('rejected_by', ''),
+                'acted_at': row.get('boss_approved_at') or row.get('rejected_at', ''),
+                'comment': row.get('reject_reason', ''),
+            },
+            {
+                'id': row['id'], 'ref_type': 'order_refund', 'ref_id': row['id'],
+                'step_order': 3, 'required_role': '财务', 'step_label': '财务退款',
+                'status': '已通过' if finance_done else ('待审批' if status == '待退款' else '待处理'),
+                'operator_name': row.get('executed_by', ''),
+                'acted_at': row.get('executed_at', ''),
+                'comment': row.get('refund_serial', ''),
+            },
+        ]
+        current_step = 0
+        overall_status = '已完成'
+        if status == '已驳回':
+            overall_status = '已驳回'
+            current_step = 2
+        elif status == '待老板审批':
+            overall_status = '审批中'
+            current_step = 2
+        elif status == '待退款':
+            overall_status = '审批中'
+            current_step = 3
+        items.append({
+            'ref_type': 'order_refund',
+            'ref_id': row['id'],
+            'refund_id': row['id'],
+            'sales_order_id': row.get('sales_order_id'),
+            'vehicle_id': row.get('vehicle_id'),
+            'plate_number': row.get('vehicle_plate_number') or '',
+            'car_type': row.get('order_car_type') or row.get('vehicle_car_type') or '',
+            'vin': row.get('order_vin') or row.get('vehicle_vin') or '',
+            'customer_name': row.get('customer_name') or row.get('order_customer_name') or '',
+            'customer_phone': row.get('customer_phone') or row.get('order_customer_phone') or '',
+            'contract_type': '取消订单退款',
+            'business_mode': row.get('sales_mode') or '',
+            'delivery_status': status,
+            'refund_status': status,
+            'refund_amount': row.get('refund_amount', 0),
+            'refund_serial': row.get('refund_serial', ''),
+            'reason': row.get('cancellation_reason') or row.get('remark') or '',
+            'cancellation_reason': row.get('cancellation_reason') or '',
+            'reject_reason': row.get('reject_reason') or '',
+            'requested_by': row.get('initiated_by') or '',
+            'created_at': row.get('initiated_at') or row.get('created_at') or '',
+            'rent': 0,
+            'deposit': row.get('refund_amount', 0),
+            'down_payment': row.get('refund_amount', 0),
+            'loan_periods': 0,
+            'steps': steps,
+            'current_step': current_step,
+            'overall_status': overall_status,
         })
     return items
 
@@ -10599,6 +12555,55 @@ def get_approvals():
             })
             return item
 
+        if base_ref_type == 'renewal':
+            c.execute("""
+                SELECT ra.*, c.contract_type, c.business_mode, c.rent AS original_rent,
+                       c.start_date AS original_start_date, c.end_date AS original_end_date,
+                       c.contract_file AS original_contract_file,
+                       v.vin, v.plate_number, v.car_type,
+                       cu.name AS customer_name, cu.phone AS customer_phone
+                FROM renewal_applications ra
+                JOIN contracts c ON c.id = ra.original_contract_id
+                JOIN vehicles v ON v.id = ra.vehicle_id
+                LEFT JOIN customers cu ON cu.id = ra.customer_id
+                WHERE ra.id = ?
+            """, (base_ref_id,))
+            row = c.fetchone()
+            if not row:
+                return item
+            row = dict(row)
+            item.update({
+                'contract_id': row['original_contract_id'],
+                'vehicle_id': row['vehicle_id'],
+                'plate_number': row.get('plate_number', ''),
+                'car_type': row.get('car_type', ''),
+                'vin': row.get('vin', ''),
+                'customer_name': row.get('customer_name', ''),
+                'customer_phone': row.get('customer_phone', ''),
+                'contract_type': row.get('contract_type', ''),
+                'business_mode': '续租',
+                'rent': row.get('monthly_rent', 0),
+                'monthly_payment': row.get('monthly_rent', 0),
+                'billing_cycle': row.get('billing_cycle', '按月'),
+                'loan_periods': row.get('loan_periods', 0),
+                'deposit': row.get('deposit_required', 0),
+                'start_date': row.get('new_start_date', ''),
+                'end_date': row.get('new_end_date', ''),
+                'contract_file': row.get('contract_file', ''),
+                'created_at': row.get('requested_at') or row.get('created_at', ''),
+                'requested_by': row.get('requested_by', ''),
+                'renewal_status': row.get('status', ''),
+                'original_contract_id': row.get('original_contract_id'),
+                'original_end_date': row.get('original_end_date', ''),
+                'deposit_balance': row.get('deposit_balance', 0),
+                'deposit_topup_amount': row.get('deposit_topup_amount', 0),
+                'deposit_topup_confirmed': row.get('deposit_topup_confirmed', 0),
+                'application_note': row.get('application_note', ''),
+                'reject_reason': row.get('reject_reason', ''),
+                'follow_up_role': '运营' if row.get('status') == '待运营处理' else '',
+            })
+            return item
+
         if base_ref_type == 'invoice':
             c.execute("""
                 SELECT ir.*, c.contract_type, cu.name as customer_name
@@ -10619,6 +12624,7 @@ def get_approvals():
                 'invoice_entity_name': row.get('invoice_entity_name', ''),
                 'invoice_entity_tax_no': row.get('invoice_entity_tax_no', ''),
                 'invoice_no': row.get('invoice_no', ''),
+                'invoice_date': row.get('invoice_date', ''),
                 'invoice_file_path': row.get('invoice_file_path', ''),
                 'receiving_company': row.get('receiving_company', ''),
                 'applied_by': row.get('applied_by', ''),
@@ -10648,6 +12654,16 @@ def get_approvals():
             if s['status'] == '待审批' and item['current_step'] == 0:
                 item['current_step'] = s['step_order']
                 item['overall_status'] = '审批中'
+        if base_ref_type == 'renewal':
+            renewal_status = item.get('renewal_status') or ''
+            if renewal_status == '已驳回':
+                item['overall_status'] = '已驳回'
+            elif renewal_status == '已生效':
+                item['overall_status'] = '已完成'
+            elif renewal_status == '待运营处理':
+                item['overall_status'] = '待运营处理'
+            elif renewal_status:
+                item['overall_status'] = '审批中'
         pending_step = next((s for s in steps if s['status'] == '待审批' and s['step_order'] == item['current_step']), None)
         is_user_step = pending_step and pending_step['required_role'] == user['role']
         is_user_related = (
@@ -10662,8 +12678,11 @@ def get_approvals():
     # 合成退车入库流程（销售一发起即可见，全程 6 步状态展示）
     if not ref_type or ref_type == 'return_stock':
         result.extend(_synthesize_return_items(conn, user))
+    if not ref_type or ref_type == 'order_refund':
+        result.extend(_synthesize_order_refund_items(conn, user))
 
-    result.sort(key=lambda x: x['created_at'] or '', reverse=True)
+    # MySQL returns DATETIME objects while historical SQLite rows use strings.
+    result.sort(key=lambda x: str(x['created_at'] or ''), reverse=True)
 
     conn.close()
     return jsonify(result)
@@ -10881,6 +12900,19 @@ def approve_step(flow_id):
                     WHERE id=?
                 """, (user['display_name'], now, ref_id))
             message = '领导审批通过，等待财务退还押金'
+        elif ref_type == 'renewal':
+            c.execute("""
+                UPDATE renewal_applications
+                SET status='待运营处理',
+                    boss_approved_by=?,
+                    boss_approved_at=?
+                WHERE id=? AND status='待老板审批'
+            """, (user['display_name'], now, ref_id))
+            if c.rowcount == 0:
+                conn.rollback()
+                conn.close()
+                return jsonify({'success': False, 'message': '续租申请状态已变化，请刷新后重试'}), 409
+            message = '续租审批通过，请运营补足押金并上传续租合同'
         elif ref_type == 'invoice':
             # 发票审批通过 → 进入待开票，财务可开票
             c.execute("""
@@ -11059,6 +13091,15 @@ def reject_step(flow_id):
                 """, (now, comment or '首次付款不足老板驳回，退款终止', user['display_name'], payment['sales_order_id']))
     elif ref_type == 'return_stock':
         return_inspection_to_sales_for_revision(c, ref_id, user['display_name'], now, comment)
+    elif ref_type == 'renewal':
+        c.execute("""
+            UPDATE renewal_applications
+            SET status='已驳回',
+                rejected_by=?,
+                rejected_at=?,
+                reject_reason=?
+            WHERE id=?
+        """, (user['display_name'], now, comment, ref_id))
     elif ref_type == 'invoice':
         c.execute("""
             UPDATE invoice_requests
@@ -11113,6 +13154,18 @@ def resubmit_approval(ref_id):
     elif ref_type == 'return_stock':
         conn.close()
         return jsonify({'success': False, 'message': '退车驳回后请由销售在退车单中修改并重新提交'}), 400
+    elif ref_type == 'renewal':
+        c.execute("""
+            UPDATE renewal_applications
+            SET status='待老板审批',
+                rejected_by=NULL,
+                rejected_at=NULL,
+                reject_reason=NULL
+            WHERE id=? AND status='已驳回'
+        """, (ref_id,))
+        if c.rowcount == 0:
+            conn.close()
+            return jsonify({'success': False, 'message': '续租申请当前状态不能重新提交'}), 400
     elif ref_type == 'invoice':
         # 发票驳回后可重提：状态回到待审批，重新走老板审批
         c.execute("UPDATE invoice_requests SET status='待审批' WHERE id=?", (ref_id,))
@@ -11182,7 +13235,7 @@ def create_late_fee_waiver(cid):
 @app.route('/api/waivers/<int:wid>/approve', methods=['POST'])
 @require_role('老板')
 def approve_late_fee_waiver(wid):
-    """J3 ② 老板审批减免：通过 → status='已通过' 推送财务待办；驳回 → status='已驳回'。"""
+    """老板审批减免：租金减免进入运营填写，滞纳金减免保留原财务流程。"""
     data = request.json or {}
     user = request.current_user
     decision = (data.get('decision') or 'approve').strip()
@@ -11209,14 +13262,90 @@ def approve_late_fee_waiver(wid):
         log_audit(conn, f'驳回{kind_label}', 'waiver', wid, f"原因:{comment}", user['display_name'])
         msg = '减免申请已驳回'
     else:
-        c.execute("UPDATE waivers SET status='已通过', boss_approved_by=?, boss_approved_at=? WHERE id=?",
-                  (user['display_name'], now, wid))
+        next_status = '待运营填写' if w['waiver_kind'] == 'rent' else '已通过'
+        c.execute("UPDATE waivers SET status=?, boss_approved_by=?, boss_approved_at=? WHERE id=?",
+                  (next_status, user['display_name'], now, wid))
         kind_label = '租金减免' if w['waiver_kind'] == 'rent' else '滞纳金减免'
-        log_audit(conn, f'通过{kind_label}', 'waiver', wid, comment or '老板审批通过，等待财务执行', user['display_name'])
-        msg = '减免申请已通过，等待财务执行'
+        pending_label = '等待运营填写减免金额和坏账金额' if next_status == '待运营填写' else '等待财务执行'
+        log_audit(conn, f'通过{kind_label}', 'waiver', wid, comment or f'老板审批通过，{pending_label}', user['display_name'])
+        msg = f'减免申请已通过，{pending_label}'
     conn.commit()
     conn.close()
     return jsonify({'success': True, 'message': msg})
+
+
+@app.route('/api/waivers/<int:wid>/operations', methods=['POST'])
+@require_role('运营')
+def fill_waiver_operations_amounts(wid):
+    """运营填写租金减免核销口径：减免金额和坏账金额。"""
+    data = request.json or {}
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM waivers WHERE id=?", (wid,))
+    w = c.fetchone()
+    if not w:
+        conn.close()
+        return jsonify({'success': False, 'message': '减免申请不存在'}), 404
+    if w['waiver_kind'] != 'rent':
+        conn.close()
+        return jsonify({'success': False, 'message': '仅租金减免需要运营填写金额'}), 400
+    if w['status'] != '待运营填写':
+        conn.close()
+        return jsonify({'success': False, 'message': f'当前状态为{w["status"]}，不能填写减免金额'}), 400
+
+    raw_waive = data.get('approved_waive_amount', data.get('waive_amount'))
+    approved_waive_amount = parse_money(raw_waive)
+    bad_debt_amount = parse_money(data.get('bad_debt_amount'))
+    if approved_waive_amount < 0 or bad_debt_amount < 0:
+        conn.close()
+        return jsonify({'success': False, 'message': '减免金额和坏账金额不能小于0'}), 400
+    if approved_waive_amount + bad_debt_amount <= 0:
+        conn.close()
+        return jsonify({'success': False, 'message': '减免金额和坏账金额至少有一项大于0'}), 400
+
+    start_period_raw = data.get('carryover_start_period', data.get('start_period'))
+    start_period = None
+    if start_period_raw not in (None, ''):
+        try:
+            start_period = int(start_period_raw)
+        except (TypeError, ValueError):
+            conn.close()
+            return jsonify({'success': False, 'message': '开始抵扣期数必须为正整数'}), 400
+        if start_period < 1:
+            conn.close()
+            return jsonify({'success': False, 'message': '开始抵扣期数必须为正整数'}), 400
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    c.execute("""
+        UPDATE waivers
+        SET approved_waive_amount=?,
+            bad_debt_amount=?,
+            carryover_start_period=?,
+            operations_note=?,
+            operations_filled_by=?,
+            operations_filled_at=?,
+            status='待财务核销'
+        WHERE id=?
+    """, (
+        round(approved_waive_amount, 2),
+        round(bad_debt_amount, 2),
+        start_period,
+        (data.get('operations_note') or data.get('remark') or '').strip(),
+        request.current_user['display_name'],
+        now,
+        wid,
+    ))
+    log_audit(
+        conn,
+        '运营填写租金减免',
+        'waiver',
+        wid,
+        f"减免金额¥{approved_waive_amount:.2f}，坏账金额¥{bad_debt_amount:.2f}",
+        request.current_user['display_name'],
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '金额已填写，等待财务核销'})
 
 
 @app.route('/api/waivers/<int:wid>/execute', methods=['POST'])
@@ -11235,22 +13364,52 @@ def execute_late_fee_waiver(wid):
     if not w:
         conn.close()
         return jsonify({'success': False, 'message': '减免申请不存在'}), 404
-    if w['status'] != '已通过':
+    if w['status'] not in ('已通过', '待财务核销'):
         conn.close()
-        return jsonify({'success': False, 'message': '仅"已通过"的减免可由财务执行'}), 400
+        return jsonify({'success': False, 'message': '仅"已通过"或"待财务核销"的减免可由财务执行'}), 400
 
     cid = w['contract_id']
     if w['waiver_kind'] == 'rent':
-        requested = w['waive_amount']
-        if requested in (None, '') or parse_money(requested) <= 0:
+        approved_waive_amount = parse_money(w['approved_waive_amount'])
+        bad_debt_amount = parse_money(w['bad_debt_amount'])
+        requested = approved_waive_amount + bad_debt_amount
+        if requested <= 0 and w['waive_amount'] not in (None, ''):
+            requested = parse_money(w['waive_amount'])
+            approved_waive_amount = requested
+            bad_debt_amount = 0
+        if requested <= 0:
             conn.close()
-            return jsonify({'success': False, 'message': '租金减免必须填写大于0的减免金额'}), 400
+            return jsonify({'success': False, 'message': '租金减免金额必须大于0'}), 400
         try:
             periods = parse_target_periods(w['target_period_list'])
         except (TypeError, ValueError):
             conn.close()
             return jsonify({'success': False, 'message': '目标期数格式不正确'}), 400
-        params = [cid]
+        start_period = int(w['carryover_start_period'] or 0)
+        if start_period <= 0:
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            c.execute("""
+                SELECT MIN(period) AS period
+                FROM repayments
+                WHERE contract_id=?
+                  AND period>=1
+                  AND COALESCE(paid_amount, 0) < COALESCE(amount, 0)
+                  AND COALESCE(due_date, '') >= ?
+            """, (cid, today_str))
+            start_row = c.fetchone()
+            start_period = int(start_row['period'] or 0) if start_row and start_row['period'] else 0
+            if start_period <= 0:
+                c.execute("""
+                    SELECT MIN(period) AS period
+                    FROM repayments
+                    WHERE contract_id=?
+                      AND period>=1
+                      AND COALESCE(paid_amount, 0) < COALESCE(amount, 0)
+                """, (cid,))
+                start_row = c.fetchone()
+                start_period = int(start_row['period'] or 0) if start_row and start_row['period'] else 1
+
+        params = [cid, start_period]
         period_clause = ''
         if periods is not None:
             placeholders = ','.join('?' * len(periods))
@@ -11260,7 +13419,7 @@ def execute_late_fee_waiver(wid):
             SELECT id, period, due_date, amount, paid_amount
             FROM repayments
             WHERE contract_id=?
-              AND period>=1
+              AND period>=?
               {period_clause}
             ORDER BY period ASC, id ASC
         """, params)
@@ -11270,19 +13429,40 @@ def execute_late_fee_waiver(wid):
             reducible = max(0.0, parse_money(row['amount']) - parse_money(row['paid_amount']))
             if reducible > 0:
                 available_rows.append((row, reducible))
-        available = round(sum(item[1] for item in available_rows), 2)
-        waive_total = round(min(parse_money(requested), available), 2)
-        if waive_total <= 0:
+
+        c.execute("""
+            SELECT id, period, due_date, amount, paid_amount
+            FROM repayments
+            WHERE contract_id=? AND period=0
+            ORDER BY id DESC
+            LIMIT 1
+        """, (cid,))
+        deposit_row = c.fetchone()
+        deposit_available = 0.0
+        if deposit_row:
+            deposit_available = max(
+                0.0,
+                parse_money(deposit_row['amount']) - parse_money(deposit_row['paid_amount']),
+            )
+        rent_available = round(sum(item[1] for item in available_rows), 2)
+        total_available = round(rent_available + deposit_available, 2)
+        if total_available <= 0:
             conn.close()
-            return jsonify({'success': False, 'message': '目标期数无可减免租金'}), 400
+            return jsonify({'success': False, 'message': '后续租金和押金均无可抵扣余额'}), 400
+        if round(requested, 2) > total_available:
+            conn.close()
+            return jsonify({
+                'success': False,
+                'message': f'后续租金及押金可抵扣¥{total_available:.2f}，不足以核销¥{requested:.2f}',
+            }), 400
 
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        remaining = waive_total
+        remaining = round(requested, 2)
+        rent_waived_total = 0.0
         for idx, (row, reducible) in enumerate(available_rows):
             if remaining <= 0:
                 break
-            alloc = remaining if idx == len(available_rows) - 1 else min(reducible, remaining)
-            alloc = round(min(alloc, reducible), 2)
+            alloc = round(min(reducible, remaining), 2)
             if alloc <= 0:
                 continue
             new_amount = round(parse_money(row['amount']) - alloc, 2)
@@ -11307,15 +13487,76 @@ def execute_late_fee_waiver(wid):
                     (repayment_id, contract_id, fee_item_id, allocation_type, allocated_amount, note, created_by)
                 VALUES (?, ?, NULL, 'rent_waiver', ?, ?, ?)
             """, (row['id'], cid, alloc, f"K租金减免#{wid} 第{row['period']}期", user['display_name']))
+            rent_waived_total = round(rent_waived_total + alloc, 2)
             remaining = round(remaining - alloc, 2)
 
-        c.execute("UPDATE waivers SET status='已生效', waive_amount=?, finance_reviewed_by=?, finance_reviewed_at=? WHERE id=?",
-                  (waive_total, user['display_name'], now, wid))
+        deposit_deduction = 0.0
+        if remaining > 0 and deposit_row:
+            deposit_deduction = round(min(deposit_available, remaining), 2)
+            new_deposit_amount = round(parse_money(deposit_row['amount']) - deposit_deduction, 2)
+            paid = parse_money(deposit_row['paid_amount'])
+            c.execute("""
+                UPDATE repayments
+                SET amount=?,
+                    status=CASE
+                        WHEN COALESCE(paid_amount, 0) >= ? THEN '已还款'
+                        ELSE '待还款'
+                    END,
+                    waterfall_summary=COALESCE(NULLIF(waterfall_summary, ''), 'rent waiver deducted from deposit')
+                WHERE id=?
+            """, (new_deposit_amount, new_deposit_amount, deposit_row['id']))
+            c.execute("""
+                INSERT INTO reconciliation_allocations
+                    (repayment_id, contract_id, fee_item_id, allocation_type, allocated_amount, note, created_by)
+                VALUES (?, ?, NULL, 'deposit_waiver', ?, ?, ?)
+            """, (
+                deposit_row['id'],
+                cid,
+                deposit_deduction,
+                f"K租金减免#{wid} 押金抵扣",
+                user['display_name'],
+            ))
+            remaining = round(remaining - deposit_deduction, 2)
+
+        if remaining > 0:
+            conn.rollback()
+            conn.close()
+            return jsonify({'success': False, 'message': '可抵扣租金和押金不足，请重新填写金额'}), 400
+
+        c.execute("""
+            UPDATE waivers
+            SET status='已生效',
+                waive_amount=?,
+                approved_waive_amount=?,
+                bad_debt_amount=?,
+                carryover_remaining=0,
+                carryover_start_period=?,
+                deposit_deduction=?,
+                finance_reviewed_by=?,
+                finance_reviewed_at=?
+            WHERE id=?
+        """, (
+            round(requested, 2),
+            round(approved_waive_amount, 2),
+            round(bad_debt_amount, 2),
+            start_period,
+            round(deposit_deduction, 2),
+            user['display_name'],
+            now,
+            wid,
+        ))
         log_audit(conn, '执行租金减免', 'waiver', wid,
-                  f"合同{cid} 减免¥{waive_total}", user['display_name'])
+                  f"合同{cid} 核销¥{requested:.2f}（租金¥{rent_waived_total:.2f}，押金¥{deposit_deduction:.2f}）",
+                  user['display_name'])
         conn.commit()
         conn.close()
-        return jsonify({'success': True, 'message': f'已减免租金 ¥{waive_total}', 'waived_amount': waive_total})
+        return jsonify({
+            'success': True,
+            'message': f'已核销 ¥{requested:.2f}',
+            'waived_amount': round(requested, 2),
+            'rent_waived_amount': rent_waived_total,
+            'deposit_deduction': deposit_deduction,
+        })
 
     # 解析命中期数（'all' 或 JSON 数组）
     period_filter = w['target_period_list']
@@ -11550,8 +13791,17 @@ def deliver_vehicle(vid):
         conn.close()
         return jsonify({'success': False, 'message': '请先上传出库照片和出库单照片，再执行出库'}), 400
 
-    c.execute("UPDATE contracts SET delivery_status='已出库', delivery_date=? WHERE id=?",
-              (datetime.now().strftime('%Y-%m-%d'), ct['id']))
+    delivery_payload = request.get_json(silent=True) or {}
+    delivery_date = normalize_date(delivery_payload.get('delivery_date')) or datetime.now().strftime('%Y-%m-%d')
+    billing_start_date = (
+        datetime.strptime(delivery_date, '%Y-%m-%d') + timedelta(days=1)
+    ).strftime('%Y-%m-%d')
+    c.execute("""
+        UPDATE contracts
+        SET delivery_status='已出库', delivery_date=?, actual_delivery_date=?, billing_start_date=?
+        WHERE id=?
+    """, (delivery_date, delivery_date, billing_start_date, ct['id']))
+    rebase_customer_repayment_plan(conn, ct['id'], billing_start_date)
     c.execute("""
         UPDATE repayments
         SET status='待还款'
@@ -11595,6 +13845,9 @@ def urge_repayment(rid):
     if not row:
         conn.close()
         return jsonify({'success': False, 'message': '还款记录不存在'}), 404
+    if not contract_is_visible_to_user(conn, row['cid'], user):
+        conn.close()
+        return jsonify({'success': False, 'message': '无权催收其他销售名下客户的账单'}), 403
     if int(row['period'] or 0) <= 0 or row['status'] == '已还款':
         conn.close()
         return jsonify({'success': False, 'message': '该记录不需要催收'}), 400
@@ -11622,6 +13875,13 @@ def urge_repayment(rid):
     result = (data.get('result') or '').strip() or '已联系，待跟进'
     remark = (data.get('remark') or '').strip()
     promised_repay_date = (data.get('promised_repay_date') or '').strip() or None
+    contact_name = (data.get('contact_name') or '').strip() or user['display_name']
+    contact_method = (data.get('contact_method') or '').strip() or '电话'
+    contacted_at = (
+        data.get('contacted_at')
+        or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    )
+    next_contact_date = normalize_date(data.get('next_contact_date')) or None
     if not evidence_path:
         conn.close()
         return jsonify({'success': False, 'message': '请上传催收证据后再提交'}), 400
@@ -11646,6 +13906,10 @@ def urge_repayment(rid):
             remark=?,
             evidence_path=?,
             promised_repay_date=?,
+            contact_name=?,
+            contact_method=?,
+            contacted_at=?,
+            next_contact_date=?,
             operator_id=?,
             operator_name=?,
             closed_by=?,
@@ -11656,6 +13920,10 @@ def urge_repayment(rid):
         remark or None,
         evidence_path,
         promised_repay_date,
+        contact_name,
+        contact_method,
+        contacted_at,
+        next_contact_date,
         user['id'],
         user['display_name'],
         user['display_name'],
@@ -11677,6 +13945,21 @@ def get_urge_records(rid):
     """获取某笔还款的催促记录"""
     conn = get_db()
     c = conn.cursor()
+    repayment = c.execute("""
+        SELECT r.contract_id
+        FROM repayments r
+        WHERE r.id=?
+    """, (rid,)).fetchone()
+    if not repayment:
+        conn.close()
+        return jsonify({'success': False, 'message': '还款记录不存在'}), 404
+    if not contract_is_visible_to_user(
+        conn,
+        repayment['contract_id'],
+        request.current_user,
+    ):
+        conn.close()
+        return jsonify({'success': False, 'message': '无权查看其他销售名下客户的催收记录'}), 403
     c.execute("SELECT * FROM urge_records WHERE repayment_id=? ORDER BY urge_day ASC, created_at DESC", (rid,))
     records = [dict(r) for r in c.fetchall()]
     conn.close()

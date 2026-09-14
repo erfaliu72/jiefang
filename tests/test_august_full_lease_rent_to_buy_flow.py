@@ -198,7 +198,7 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
     def test_inventory_vin_guidance_and_chassis_order_gate(self):
         priced_type = "八月入库车型"
         self.save_lease_guidance(priced_type)
-        self.login("fleet")
+        self.login("ops")
         vin = "INV20260811000001"
         created = self.client.post(
             "/api/vehicles",
@@ -247,7 +247,13 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
                 "first_payment_received_amount": 5000,
             },
         )
-        self.assertEqual(blocked_unpriced.status_code, 400, blocked_unpriced.get_json())
+        self.assertEqual(blocked_unpriced.status_code, 200, blocked_unpriced.get_json())
+        unpriced_order = self.db_row(
+            "SELECT order_status, order_exception_reason FROM sales_orders WHERE vin=?",
+            ("INV20260811000002",),
+        )
+        self.assertEqual(unpriced_order["order_status"], "待老板审批")
+        self.assertIn("缺少租赁指导价", unpriced_order["order_exception_reason"])
 
         chassis_id, chassis_vin = self.create_vehicle(priced_type, box_type="底盘")
         self.login("sales")
@@ -1266,13 +1272,20 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
             ),
             2,
         )
-        self.login("fin")
-        cancelled_reconciliation = self.client.post(
-            f"/api/repayments/{self.db_value('SELECT id FROM repayments WHERE contract_id=? AND period=2', (contract_id,))}/confirm",
-            json={"received_amount": 2000},
+        period_2_id = self.db_value(
+            "SELECT id FROM repayments WHERE contract_id=? AND period=2", (contract_id,)
         )
-        self.assertEqual(cancelled_reconciliation.status_code, 400, cancelled_reconciliation.get_json())
-        self.assertIn("退车结算取消", cancelled_reconciliation.get_json()["message"])
+        self.login("ops")
+        cancelled_period = self.client.post(
+            f"/api/reconciliation/{period_2_id}/screenshot",
+            json={"screenshot_path": "/uploads/cancelled-period.jpg", "reported_amount": 1},
+        )
+        self.assertEqual(cancelled_period.status_code, 400, cancelled_period.get_json())
+        self.assertIn("该期账单已因退车结算取消", cancelled_period.get_json()["message"])
+        self.assertEqual(
+            self.db_value("SELECT status FROM repayments WHERE contract_id=? AND period=3", (contract_id,)),
+            "已取消",
+        )
         self.assertEqual(
             self.db_value("SELECT status FROM vehicles WHERE id=?", (vehicle_id,)),
             "待维修",
@@ -1281,7 +1294,7 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
             self.db_value("SELECT condition FROM vehicles WHERE id=?", (vehicle_id,)),
             "二手车",
         )
-        self.login("fleet")
+        self.login("ops")
         missing_repair_note = self.client.post(f"/api/vehicles/{vehicle_id}/repair/complete", json={})
         self.assertEqual(missing_repair_note.status_code, 400, missing_repair_note.get_json())
         self.assertIn("维修完成情况", missing_repair_note.get_json()["message"])
@@ -1291,12 +1304,15 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
                 "repair_completed_at": "2026-08-22",
                 "repair_completion_note": "已更换磨损轮胎并完成路试",
                 "repair_cost": 500,
+                "repair_appearance_photos": "/uploads/repair-appearance.jpg",
+                "repair_mileage_photos": "/uploads/repair-mileage.jpg",
+                "repair_tools_photos": "/uploads/repair-tools.jpg",
             },
         )
         self.assertEqual(repaired.status_code, 200, repaired.get_json())
         self.assertEqual(
             self.db_value("SELECT status FROM vehicles WHERE id=?", (vehicle_id,)),
-            "在库",
+            "待整备",
         )
         self.assertEqual(
             self.db_value("SELECT condition FROM vehicles WHERE id=?", (vehicle_id,)),
@@ -1305,6 +1321,35 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
         self.assertEqual(
             self.db_value("SELECT repair_completion_note FROM return_inspections WHERE id=?", (return_id,)),
             "已更换磨损轮胎并完成路试",
+        )
+        refurbishment_id = self.db_value(
+            "SELECT id FROM refurbishment_records WHERE return_inspection_id=?",
+            (return_id,),
+        )
+        self.assertIsNotNone(refurbishment_id)
+        self.assertEqual(
+            self.db_value("SELECT status FROM refurbishment_records WHERE id=?", (refurbishment_id,)),
+            "待整备",
+        )
+
+        started = self.client.post(f"/api/refurbishment-records/{refurbishment_id}/start", json={})
+        self.assertEqual(started.status_code, 200, started.get_json())
+        self.assertEqual(
+            self.db_value("SELECT status FROM vehicles WHERE id=?", (vehicle_id,)),
+            "整备中",
+        )
+        completed = self.client.post(
+            f"/api/refurbishment-records/{refurbishment_id}/complete",
+            json={"completion_note": "完成清洁复检", "available_for": "可租/可售"},
+        )
+        self.assertEqual(completed.status_code, 200, completed.get_json())
+        self.assertEqual(
+            self.db_value("SELECT status FROM vehicles WHERE id=?", (vehicle_id,)),
+            "在库",
+        )
+        self.assertEqual(
+            self.db_value("SELECT status FROM refurbishment_records WHERE id=?", (refurbishment_id,)),
+            "整备完成",
         )
 
     def test_init_db_backfills_completed_returned_vehicle_as_used(self):

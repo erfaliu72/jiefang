@@ -120,6 +120,16 @@ class InitialPaymentRulesTestCase(unittest.TestCase):
         self.assertEqual(rows[1]["due_date"], "2025-01-20")
         self.assertEqual(rows[1]["amount"], 5000)
 
+    def test_capped_repayment_amount_sql_uses_backend_specific_function(self):
+        original_use_mysql = app_module.USE_MYSQL
+        try:
+            app_module.USE_MYSQL = False
+            self.assertEqual(app_module.capped_repayment_amount_sql(), "MIN(amount, ?)")
+            app_module.USE_MYSQL = True
+            self.assertEqual(app_module.capped_repayment_amount_sql(), "LEAST(amount, ?)")
+        finally:
+            app_module.USE_MYSQL = original_use_mysql
+
     def test_completed_initial_payment_rows_cannot_be_reconciled_again(self):
         contract_id = self.create_contract_shell("租赁")
         conn = database.get_db()

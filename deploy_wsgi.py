@@ -10,12 +10,25 @@ ssh.connect(host, username='root', password=password, timeout=15)
 
 sftp = ssh.open_sftp()
 
+stdin, stdout, stderr = ssh.exec_command(
+    'mkdir -p /opt/jinjuyuan/templates /opt/jinjuyuan/static/vendor'
+)
+if stdout.channel.recv_exit_status() != 0:
+    raise RuntimeError(stderr.read().decode().strip() or 'Failed to create remote asset directories')
+
 # 上传文件
 for local_name, remote_path in [
     ('app.py', '/opt/jinjuyuan/app.py'),
     ('database.py', '/opt/jinjuyuan/database.py'),
     ('wsgi.py', '/opt/jinjuyuan/wsgi.py'),
     ('templates/index.html', '/opt/jinjuyuan/templates/index.html'),
+    ('static/style.css', '/opt/jinjuyuan/static/style.css'),
+    ('static/vendor/chart.umd.min.js', '/opt/jinjuyuan/static/vendor/chart.umd.min.js'),
+    ('static/vendor/element-plus-icons.min.js', '/opt/jinjuyuan/static/vendor/element-plus-icons.min.js'),
+    ('static/vendor/element-plus-locale-zh-cn.min.js', '/opt/jinjuyuan/static/vendor/element-plus-locale-zh-cn.min.js'),
+    ('static/vendor/element-plus.css', '/opt/jinjuyuan/static/vendor/element-plus.css'),
+    ('static/vendor/element-plus.min.js', '/opt/jinjuyuan/static/vendor/element-plus.min.js'),
+    ('static/vendor/vue.global.prod.js', '/opt/jinjuyuan/static/vendor/vue.global.prod.js'),
 ]:
     sftp.put(f'/Users/liuyuanchang/code/jiefang/{local_name}', remote_path)
     print(f'✅ {local_name}')

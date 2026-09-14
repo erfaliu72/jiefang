@@ -80,10 +80,10 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
                 INSERT INTO contracts
                     (vehicle_id, customer_id, contract_type, start_date, end_date, rent,
                      loan_periods, deposit, contract_file, contract_status, delivery_status,
-                     lease_bank_name, lease_bank_card_no)
+                     lease_bank_name, lease_bank_card_no, created_by)
                 VALUES (?, ?, '租赁', '2026-01-01', '2026-12-31', 3000, 12, 2000,
                         '/uploads/accepted-contract.pdf', '执行中', '已出库',
-                        '测试银行', '6222000012345678')
+                        '测试银行', '6222000012345678', '周销售')
                 """,
                 (vehicle_id, customer_id),
             )
@@ -92,6 +92,193 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
             return vehicle_id, contract_id, needs_repair
         finally:
             conn.close()
+
+    def test_contract_attachment_limit_is_ten(self):
+        self.login("ops")
+        contract_payload = {
+            "customer_name": "合同附件客户",
+            "customer_phone": "13800000009",
+            "contract_type": "租赁",
+            "start_date": "2026-08-24",
+            "loan_periods": 2,
+            "rent": 3000,
+            "deposit": 2000,
+        }
+
+        vehicle_id, _ = self.create_vehicle("十附件合同车型")
+        ten_files = ",".join(f"/uploads/contract-{index}.pdf" for index in range(1, 11))
+        response = self.client.post(
+            "/api/contracts",
+            json={**contract_payload, "vehicle_id": vehicle_id, "contract_file": ten_files},
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            app_module.attachment_csv_count(
+                self.db_value("SELECT contract_file FROM contracts WHERE id=?", (response.get_json()["id"],))
+            ),
+            10,
+        )
+
+        overflow_vehicle_id, _ = self.create_vehicle("超限合同车型")
+        eleven_files = ",".join(f"/uploads/contract-{index}.pdf" for index in range(1, 12))
+        overflow = self.client.post(
+            "/api/contracts",
+            json={**contract_payload, "vehicle_id": overflow_vehicle_id, "contract_file": eleven_files},
+        )
+        self.assertEqual(overflow.status_code, 400, overflow.get_json())
+        self.assertEqual(overflow.get_json()["message"], "每份合同最多上传 10 个附件")
+
+    def test_renewal_approval_deposit_topup_and_daily_billing(self):
+        vehicle_id, contract_id, _ = self.create_active_rental_contract()
+        conn = database.get_db()
+        try:
+            conn.execute(
+                """
+                UPDATE contracts
+                SET start_date='2026-01-01', end_date='2026-11-30',
+                    rent=3000, deposit=2500, collected_deposit=2000
+                WHERE id=?
+                """,
+                (contract_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO repayments
+                    (contract_id, period, due_date, amount, status, remark)
+                VALUES (?, 20, '2026-08-01', 1000, '逾期', '原合同逾期账单')
+                """,
+                (contract_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login("sales")
+        renewal_payload = {
+            "billing_cycle": "按天",
+            "monthly_rent": 3100,
+            "rental_days": 10,
+            "new_start_date": "2026-12-01",
+            "deposit_required": 2500,
+            "application_note": "原合同逾期账单继续挂账",
+        }
+        premature = self.client.post(
+            f"/api/contracts/{contract_id}/renewals",
+            json={**renewal_payload, "new_start_date": "2026-11-30"},
+        )
+        self.assertEqual(premature.status_code, 400, premature.get_json())
+        self.assertIn("次日", premature.get_json()["message"])
+
+        created = self.client.post(
+            f"/api/contracts/{contract_id}/renewals",
+            json=renewal_payload,
+        )
+        self.assertEqual(created.status_code, 200, created.get_json())
+        renewal_id = created.get_json()["id"]
+        self.assertEqual(
+            self.db_value(
+                "SELECT new_start_date FROM renewal_applications WHERE id=?",
+                (renewal_id,),
+            ),
+            "2026-12-01",
+        )
+        self.assertEqual(
+            self.db_value(
+                "SELECT status FROM repayments WHERE contract_id=? AND period=20",
+                (contract_id,),
+            ),
+            "逾期",
+        )
+
+        self.login("boss")
+        flow_id = self.db_value(
+            """
+            SELECT id FROM approval_flows
+            WHERE ref_type='renewal' AND ref_id=? AND status='待审批'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (renewal_id,),
+        )
+        approved = self.client.post(
+            f"/api/approvals/{flow_id}/approve",
+            json={"comment": "同意续租"},
+        )
+        self.assertEqual(approved.status_code, 200, approved.get_json())
+        self.assertEqual(
+            self.db_value(
+                "SELECT status FROM renewal_applications WHERE id=?",
+                (renewal_id,),
+            ),
+            "待运营处理",
+        )
+
+        self.login("ops")
+        missing_topup = self.client.post(
+            f"/api/renewals/{renewal_id}/activate",
+            json={
+                "contract_file": "/uploads/renewal-contract.pdf",
+                "contract_number": "XZ-2026-001",
+                "deposit_topup_confirmed": False,
+                "deposit_topup_amount": 500,
+            },
+        )
+        self.assertEqual(missing_topup.status_code, 400, missing_topup.get_json())
+        self.assertIn("押金不足", missing_topup.get_json()["message"])
+
+        activated = self.client.post(
+            f"/api/renewals/{renewal_id}/activate",
+            json={
+                "contract_file": "/uploads/renewal-contract.pdf",
+                "contract_number": "XZ-2026-001",
+                "deposit_topup_confirmed": True,
+                "deposit_topup_amount": 500,
+                "deposit_bank_serial": "BANK-20260914-001",
+            },
+        )
+        self.assertEqual(activated.status_code, 200, activated.get_json())
+        self.assertEqual(activated.get_json()["appended_periods"], 10)
+        self.assertEqual(
+            self.db_value(
+                "SELECT end_date FROM contracts WHERE id=?",
+                (contract_id,),
+            ),
+            "2026-12-10",
+        )
+        self.assertEqual(
+            self.db_value(
+                "SELECT contract_number FROM renewal_applications WHERE id=?",
+                (renewal_id,),
+            ),
+            "XZ-2026-001",
+        )
+        self.assertEqual(
+            self.db_value(
+                """
+                SELECT COUNT(*) FROM repayments
+                WHERE contract_id=? AND period BETWEEN 21 AND 30
+                  AND remark='续租按日账单'
+                """,
+                (contract_id,),
+            ),
+            10,
+        )
+        self.assertEqual(
+            self.db_value(
+                """
+                SELECT amount FROM repayments
+                WHERE contract_id=? AND period=21
+                """,
+                (contract_id,),
+            ),
+            100,
+        )
+        self.assertEqual(
+            self.db_value(
+                "SELECT status FROM repayments WHERE contract_id=? AND period=20",
+                (contract_id,),
+            ),
+            "逾期",
+        )
 
     def test_guidance_unique_manual_contract_and_finance_receipt(self):
         car_type = "八月租赁指导价车型"
@@ -457,7 +644,7 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
                 conn, car_type, vehicle
             )
             self.assertEqual(validation_status, "warning")
-            self.assertIn("仅支持按已维护的以租代售方案报单", validation_message)
+            self.assertIn("未维护租赁指导价", validation_message)
             conn.execute(
                 """UPDATE vehicles
                    SET box_type='冷藏', vehicle_box_type='冷藏',
@@ -475,7 +662,7 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
                     "vehicle_box_type": "冷藏",
                 },
             )
-            self.assertEqual(no_plan_status, "invalid")
+            self.assertEqual(no_plan_status, "warning")
             conn.commit()
         finally:
             conn.close()
