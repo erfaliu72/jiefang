@@ -208,6 +208,42 @@
                             </el-table>
                         </div>
 
+                        <div v-if="['运营','老板'].includes(currentUser.role) && legacyPendingContracts.length" class="card" style="margin-top:16px">
+                            <div class="card-title-row">
+                                <div class="card-title" style="margin-bottom:0">历史迁移待确认</div>
+                                <div>
+                                    <span class="card-count" style="margin-right:10px">待确认 {{ legacyPendingContracts.length }} 条</span>
+                                    <el-button type="primary" size="small" :disabled="!legacyPendingSelection.length" :loading="legacyPendingConfirming" @click="confirmLegacyPending()">确认选中</el-button>
+                                    <el-button type="primary" plain size="small" :loading="legacyPendingConfirming" @click="confirmAllLegacyPending">全部确认</el-button>
+                                </div>
+                            </div>
+                            <el-alert type="info" :closable="false" show-icon
+                                title="历史迁移导入的合同需运营确认后才全端可见；确认前不进入合同、账单、对账、客户库与仪表盘统计。"
+                                style="margin-bottom:14px"></el-alert>
+                            <el-table :data="legacyPendingContracts" stripe style="width:100%" max-height="320" @selection-change="legacyPendingSelection = $event">
+                                <el-table-column type="selection" width="45"></el-table-column>
+                                <el-table-column label="客户" width="120"><template #default="s">{{ s.row.customer_name || '-' }}</template></el-table-column>
+                                <el-table-column label="车辆" min-width="200">
+                                    <template #default="s">
+                                        <div style="display:flex;flex-direction:column;gap:3px">
+                                            <span>{{ s.row.plate_number || '-' }}</span>
+                                            <span class="mono-text">{{ s.row.vin || '-' }}</span>
+                                        </div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="原合同编号" width="140"><template #default="s">{{ s.row.original_contract_number || '-' }}</template></el-table-column>
+                                <el-table-column prop="rental_method" label="租赁方式" width="100"></el-table-column>
+                                <el-table-column label="租期" width="185"><template #default="s">{{ s.row.start_date || '-' }} ~ {{ s.row.end_date || '-' }}</template></el-table-column>
+                                <el-table-column label="月租" width="110" align="right"><template #default="s">¥{{ numberFormat(s.row.monthly_payment) }}</template></el-table-column>
+                                <el-table-column label="导入批次" width="190"><template #default="s"><span class="mono-text" style="font-size:12px">{{ s.row.batch_code || '-' }}</span></template></el-table-column>
+                                <el-table-column label="操作" width="110" fixed="right">
+                                    <template #default="s">
+                                        <el-button type="success" size="small" :loading="legacyPendingConfirming" @click="confirmLegacyPending([s.row.id])">确认</el-button>
+                                    </template>
+                                </el-table-column>
+                            </el-table>
+                        </div>
+
                     </div>
 
                     <!-- ================== GUIDANCE BOARD ================== -->
@@ -298,7 +334,7 @@
                                 <div class="stat-card-icon" style="background:#dbeafe;color:#2563eb"><span>📝</span></div>
                                 <div class="stat-card-content">
                                     <span class="stat-label">进行中报单</span>
-                                    <span class="stat-value">{{ salesOrders.filter(x => ['待财务确认','已激活'].includes(x.order_status)).length }}</span>
+                                    <span class="stat-value">{{ salesOrders.filter(x => ['待提交','待老板审批','待财务确认','已激活'].includes(x.order_status)).length }}</span>
                                 </div>
                             </div>
                             <div class="stat-card">
@@ -324,7 +360,7 @@
                         <div style="display:flex;gap:10px;flex-wrap:wrap;margin:0 0 14px">
                             <el-input v-model="orderFilters.plate_number" placeholder="车牌号（模糊搜索）" clearable style="width:180px" @keyup.enter="fetchSalesOrders"></el-input>
                             <el-select v-model="orderFilters.order_status" placeholder="订单状态" clearable style="width:150px">
-                                <el-option v-for="status in ['草稿','待价格特批','待财务确认','已激活','已作废']" :key="status" :label="status" :value="status"></el-option>
+                                <el-option v-for="status in ['待提交','待老板审批','待财务确认','已激活','已作废']" :key="status" :label="status" :value="status"></el-option>
                             </el-select>
                             <el-input v-model="orderFilters.customer" placeholder="客户" clearable style="width:150px" @keyup.enter="fetchSalesOrders"></el-input>
                             <el-input v-model="orderFilters.car_type" placeholder="车型" clearable style="width:170px" @keyup.enter="fetchSalesOrders"></el-input>
@@ -410,9 +446,9 @@
                                 </el-table-column>
                                 <el-table-column label="操作" :width="opWidthSales" fixed="right">
                                     <template #default="s">
-                                        <el-button v-if="currentUser.role==='销售' && s.row.order_status==='草稿'" type="primary" size="small" plain round @click="editSalesOrderDraft(s.row)">编辑</el-button>
-                                        <el-button v-if="currentUser.role==='销售' && s.row.order_status==='草稿'" type="danger" size="small" plain round @click="deleteSalesOrderDraft(s.row)">删除</el-button>
-                                        <el-button v-if="currentUser.role==='销售' && s.row.order_status==='已作废'" type="warning" size="small" plain round @click="copySalesOrderDraft(s.row)">复制草稿</el-button>
+                                        <el-button v-if="currentUser.role==='销售' && s.row.order_status==='待提交'" type="primary" size="small" plain round @click="editSalesOrderDraft(s.row)">编辑</el-button>
+                                        <el-button v-if="currentUser.role==='销售' && s.row.order_status==='待提交'" type="danger" size="small" plain round @click="deleteSalesOrderDraft(s.row)">删除</el-button>
+                                        <el-button v-if="currentUser.role==='销售' && s.row.order_status==='已作废'" type="warning" size="small" plain round @click="copySalesOrderDraft(s.row)">复制报单</el-button>
                                         <el-button v-if="canReturnFromOrder(s.row)" type="success" size="small" round @click="initiateReturnFromOrder(s.row)">发起退车</el-button>
                                         <el-button v-if="canRenewFromOrder(s.row)" type="warning" size="small" round @click="openRenewalDialog(s.row)">发起续租</el-button>
                                         <el-button v-if="currentUser.role==='财务' && s.row.order_status==='待财务确认' && isInstallmentSalesOrder(s.row)" type="primary" size="small" plain round @click="openPlanningDialog(s.row)">{{ salesOrderPlanActionLabel(s.row) }}</el-button>
@@ -421,6 +457,133 @@
                                     </template>
                                 </el-table-column>
                             </el-table>
+                        </div>
+                    </div>
+
+                    <!-- ================== CUSTOMER LIBRARY ================== -->
+                    <div v-if="currentPage === 'customer_library'" class="page fade-in">
+                        <div class="stat-cards three-cols">
+                            <div class="stat-card">
+                                <div class="stat-card-icon" style="background:#ede9fe;color:#7c3aed"><span>客</span></div>
+                                <div class="stat-card-content">
+                                    <span class="stat-label">客户总数</span>
+                                    <span class="stat-value">{{ customerLibrary.length }}</span>
+                                </div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-card-icon" style="background:#fee2e2;color:#dc2626"><span>逾</span></div>
+                                <div class="stat-card-content">
+                                    <span class="stat-label">逾期客户</span>
+                                    <span class="stat-value text-red">{{ customerLibrary.filter(x => Number(x.overdue_amount || 0) > 0).length }}</span>
+                                </div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-card-icon" style="background:#fef3c7;color:#d97706"><span>黑</span></div>
+                                <div class="stat-card-content">
+                                    <span class="stat-label">黑名单客户</span>
+                                    <span class="stat-value">{{ customerLibrary.filter(x => x.is_blacklist).length }}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card" style="margin-top:16px">
+                            <div class="card-title-row">
+                                <div class="card-title">客户库</div>
+                                <span class="card-count">销售仅显示本人名下客户，展开行可查看催收记录</span>
+                            </div>
+                            <div style="display:flex;gap:10px;flex-wrap:wrap;margin:0 0 14px">
+                                <el-input v-model="customerLibraryFilters.customer_name" placeholder="客户/公司名称" clearable style="width:170px" @keyup.enter="fetchCustomerLibrary"></el-input>
+                                <el-input v-model="customerLibraryFilters.phone" placeholder="电话" clearable style="width:140px" @keyup.enter="fetchCustomerLibrary"></el-input>
+                                <el-input v-model="customerLibraryFilters.id_card" placeholder="身份证号/信用代码" clearable style="width:190px" @keyup.enter="fetchCustomerLibrary"></el-input>
+                                <el-input v-model="customerLibraryFilters.sales_name" placeholder="销售员" clearable style="width:140px" @keyup.enter="fetchCustomerLibrary"></el-input>
+                                <el-input v-model="customerLibraryFilters.plate_number" placeholder="车牌号" clearable style="width:140px" @keyup.enter="fetchCustomerLibrary"></el-input>
+                                <el-select v-model="customerLibraryFilters.order_status" placeholder="订单状态" clearable style="width:150px">
+                                    <el-option v-for="status in ['待提交','待老板审批','待财务确认','已激活','已作废']" :key="status" :label="status" :value="status"></el-option>
+                                </el-select>
+                                <el-select v-model="customerLibraryFilters.is_blacklist" placeholder="是否黑名单" clearable style="width:130px">
+                                    <el-option label="是" value="是"></el-option>
+                                    <el-option label="否" value="否"></el-option>
+                                </el-select>
+                                <el-select v-model="customerLibraryFilters.is_overdue" placeholder="是否逾期" clearable style="width:130px">
+                                    <el-option label="是" value="是"></el-option>
+                                    <el-option label="否" value="否"></el-option>
+                                </el-select>
+                                <el-button type="primary" plain @click="fetchCustomerLibrary">查询</el-button>
+                                <el-button plain @click="resetCustomerLibraryFilters">重置</el-button>
+                            </div>
+
+                            <el-table :data="customerLibrary" stripe row-key="id" style="width:100%" max-height="620">
+                                <el-table-column type="expand" width="48">
+                                    <template #default="s">
+                                        <div style="padding:8px 20px 14px;background:#f8fafc">
+                                            <div style="font-size:13px;font-weight:650;color:#334155;margin:0 0 8px">催收记录</div>
+                                            <el-table v-if="s.row.urge_records && s.row.urge_records.length" :data="s.row.urge_records" size="small" stripe style="width:100%">
+                                                <el-table-column label="催收时间" width="160">
+                                                    <template #default="u">{{ u.row.contacted_at || u.row.created_at || '-' }}</template>
+                                                </el-table-column>
+                                                <el-table-column prop="contact_method" label="催收方式" width="100"></el-table-column>
+                                                <el-table-column prop="contact_name" label="联系对象" width="110"></el-table-column>
+                                                <el-table-column prop="result" label="沟通结果" min-width="150" show-overflow-tooltip></el-table-column>
+                                                <el-table-column prop="promised_repay_date" label="承诺还款日期" width="125"></el-table-column>
+                                                <el-table-column prop="next_contact_date" label="下次联系日期" width="125"></el-table-column>
+                                                <el-table-column prop="operator_name" label="催收人" width="100"></el-table-column>
+                                                <el-table-column prop="remark" label="备注" min-width="160" show-overflow-tooltip></el-table-column>
+                                                <el-table-column label="附件" width="90">
+                                                    <template #default="u">
+                                                        <a v-if="u.row.evidence_path" :href="u.row.evidence_path" target="_blank" style="color:#2563eb">查看</a>
+                                                        <span v-else>-</span>
+                                                    </template>
+                                                </el-table-column>
+                                            </el-table>
+                                            <el-empty v-else description="暂无催收记录" :image-size="48"></el-empty>
+                                        </div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="客户/公司名称" prop="customer_name" width="150" fixed="left" show-overflow-tooltip></el-table-column>
+                                <el-table-column prop="phone" label="电话" width="125"></el-table-column>
+                                <el-table-column prop="id_card" label="身份证号/信用代码" width="190" show-overflow-tooltip></el-table-column>
+                                <el-table-column prop="address" label="地址" min-width="180" show-overflow-tooltip></el-table-column>
+                                <el-table-column prop="sales_advisor" label="负责销售" width="100"></el-table-column>
+                                <el-table-column prop="historical_contract_count" label="历史合同数" width="105" align="center"></el-table-column>
+                                <el-table-column prop="current_vehicle" label="当前车辆" min-width="160" show-overflow-tooltip></el-table-column>
+                                <el-table-column prop="plate_number" label="车牌号" width="110"></el-table-column>
+                                <el-table-column prop="rental_method" label="租赁方式" width="110"></el-table-column>
+                                <el-table-column label="当前租期" width="205">
+                                    <template #default="s">{{ s.row.rental_start_date || '-' }} 至 {{ s.row.rental_end_date || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column label="月租" width="110" align="right">
+                                    <template #default="s"><span class="num">¥{{ numberFormat(s.row.monthly_rent) }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="押金" width="110" align="right">
+                                    <template #default="s"><span class="num">¥{{ numberFormat(s.row.deposit) }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="当前应收" width="120" align="right">
+                                    <template #default="s"><span class="num">¥{{ numberFormat(s.row.current_receivable) }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="已回款" width="120" align="right">
+                                    <template #default="s"><span class="num">¥{{ numberFormat(s.row.repaid_amount) }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="逾期金额" width="120" align="right">
+                                    <template #default="s"><span class="num" :class="Number(s.row.overdue_amount || 0) > 0 ? 'text-red' : ''">¥{{ numberFormat(s.row.overdue_amount) }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="逾期天数" width="95" align="center">
+                                    <template #default="s"><span :class="Number(s.row.overdue_days || 0) > 0 ? 'text-red' : ''">{{ Number(s.row.overdue_days || 0) }} 天</span></template>
+                                </el-table-column>
+                                <el-table-column label="坏账" width="80" align="center">
+                                    <template #default="s"><el-tag size="small" :type="s.row.has_bad_debt ? 'danger' : 'info'">{{ s.row.has_bad_debt ? '是' : '否' }}</el-tag></template>
+                                </el-table-column>
+                                <el-table-column label="黑名单" width="90" align="center">
+                                    <template #default="s"><el-tag size="small" :type="s.row.is_blacklist ? 'danger' : 'info'">{{ s.row.is_blacklist ? '是' : '否' }}</el-tag></template>
+                                </el-table-column>
+                                <el-table-column prop="blacklist_reason" label="黑名单原因" min-width="150" show-overflow-tooltip></el-table-column>
+                                <el-table-column prop="blacklist_marked_by" label="标记人" width="100"></el-table-column>
+                                <el-table-column prop="blacklist_marked_at" label="标记时间" width="160"></el-table-column>
+                                <el-table-column label="订单状态" width="110">
+                                    <template #default="s"><span v-if="s.row.order_status" class="status-badge" :class="deliveryStatusClass(s.row.order_status)">{{ s.row.order_status }}</span><span v-else>-</span></template>
+                                </el-table-column>
+                                <el-table-column prop="next_contact_date" label="下次联系日期" width="125" fixed="right"></el-table-column>
+                            </el-table>
+                            <el-empty v-if="!customerLibrary.length" description="暂无客户数据"></el-empty>
                         </div>
                     </div>
 
@@ -1421,7 +1584,7 @@
                             </div>
                         </div>
 
-                        <div id="pending-repair-section" v-if="currentUser.role==='运营' && pendingRepairVehicles.length" class="card" style="margin-bottom:20px;padding:18px 20px;border:1px solid #fed7aa;background:linear-gradient(135deg,#fff7ed 0%,#ffffff 100%)">
+                        <div id="pending-repair-section" v-if="currentUser.role==='车管' && pendingRepairVehicles.length" class="card" style="margin-bottom:20px;padding:18px 20px;border:1px solid #fed7aa;background:linear-gradient(135deg,#fff7ed 0%,#ffffff 100%)">
                             <div class="card-title-row" style="margin-bottom:12px">
                                 <div style="display:flex;align-items:center;gap:10px">
                                     <div class="card-title">车辆整备队列</div>
@@ -2186,7 +2349,7 @@
                         <div class="card" style="margin-top:16px">
                             <div class="card-title-row">
                                 <div class="card-title">客户黑名单</div>
-                                <el-button v-if="['财务','老板'].includes(currentUser.role)" type="danger" plain @click="submitBlacklist">保存黑名单</el-button>
+                                <el-button v-if="currentUser.role==='老板'" type="danger" plain @click="submitBlacklist">保存黑名单</el-button>
                             </div>
                             <el-form :model="blacklistForm" label-position="top" style="margin-top:14px">
                                 <el-row :gutter="16">
@@ -2924,21 +3087,55 @@
                             </el-select>
                         </el-form-item>
                     </el-col>
-                    <el-col :span="12">
+                    <el-col :span="18">
                         <el-form-item label="车架号">
-                            <el-input v-model="newOrder.vin" maxlength="17" show-word-limit style="font-family:monospace"></el-input>
+                            <el-select
+                                v-model="newOrder.vin"
+                                filterable
+                                clearable
+                                allow-create
+                                default-first-option
+                                placeholder="输入 VIN 关键词或后几位"
+                                style="width:100%">
+                                <el-option
+                                    v-for="v in orderVehicleOptions"
+                                    :key="'vin_' + v.id"
+                                    :label="`${v.vin || '-'} / ${v.plate_number || '无车牌'} / ${v.car_type || '-'}`"
+                                    :value="(v.vin || '').toUpperCase()">
+                                </el-option>
+                            </el-select>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
+                <el-row :gutter="16">
+                    <el-col :span="12">
+                        <el-form-item label="车型">
+                            <el-input v-model="newOrder.car_type" disabled></el-input>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="6">
+                        <el-form-item label="车牌号">
+                            <el-select
+                                v-model="newOrder.plate_number"
+                                filterable
+                                clearable
+                                allow-create
+                                default-first-option
+                                placeholder="关键词搜索车牌"
+                                style="width:100%"
+                                @change="onOrderPlateSelect">
+                                <el-option
+                                    v-for="v in orderPlateOptions"
+                                    :key="'plate_' + v.id"
+                                    :label="`${v.plate_number} / ${v.vin || '-'} / ${v.car_type || '-'}`"
+                                    :value="v.plate_number">
+                                </el-option>
+                            </el-select>
                         </el-form-item>
                     </el-col>
                     <el-col :span="6">
                         <el-form-item label="品牌">
                             <el-input v-model="newOrder.vehicle_brand" placeholder="如 解放/东风"></el-input>
-                        </el-form-item>
-                    </el-col>
-                </el-row>
-                <el-row :gutter="16">
-                    <el-col :span="24">
-                        <el-form-item label="车型">
-                            <el-input v-model="newOrder.car_type" disabled></el-input>
                         </el-form-item>
                     </el-col>
                 </el-row>
@@ -3038,15 +3235,26 @@
                     </el-col>
                     <el-col :span="8">
                         <el-form-item label="起租日">
-                            <el-date-picker v-model="newOrder.lease_start_date" type="date" value-format="YYYY-MM-DD" style="width:100%"></el-date-picker>
+                            <el-input v-model="newOrder.lease_start_date" disabled placeholder="车管出库后按出库日次日自动生成"></el-input>
                         </el-form-item>
                     </el-col>
                     <el-col :span="8">
                         <el-form-item label="收款公司">
-                            <el-input v-model="newOrder.receiving_company" placeholder="默认金聚源主体"></el-input>
+                            <el-select v-model="newOrder.receiving_company" filterable clearable allow-create default-first-option placeholder="请选择收款公司" style="width:100%">
+                                <el-option v-for="company in receivingCompanies" :key="company.id" :label="company.company_name" :value="company.company_name"></el-option>
+                            </el-select>
                         </el-form-item>
                     </el-col>
                 </el-row>
+                <el-alert
+                    v-if="orderBlacklistMatch"
+                    type="error"
+                    :closable="false"
+                    show-icon
+                    style="margin-top:6px"
+                    :title="`客户命中黑名单：${orderBlacklistMatch.reason || '未填写原因'}`"
+                    :description="`标记人：${orderBlacklistMatch.created_by || '-'}，标记时间：${orderBlacklistMatch.created_at || '-'}。仍可提交，提交后将自动转老板审批。`">
+                </el-alert>
                 <el-row v-if="newOrder.sales_mode==='经营租赁' && (leaseGuidanceForOrder.deposit>0 || leaseGuidanceForOrder.monthly>0)" style="margin-top:8px">
                     <el-col :span="24">
                         <div style="padding:8px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:13px;color:#92400e">
@@ -3109,7 +3317,7 @@
             </el-form>
             <template #footer>
                 <el-button @click="showOrderDialog = false">取消</el-button>
-                <el-button plain @click="submitSalesOrder(true)" :loading="submitting">暂存草稿</el-button>
+                <el-button plain @click="submitSalesOrder(true)" :loading="submitting">保存待提交</el-button>
                 <el-button type="primary" @click="submitSalesOrder(false)" :loading="submitting">提交报单</el-button>
             </template>
         </el-dialog>
@@ -3734,7 +3942,7 @@
                 if (!currentUser.value) return false;
                 if (currentUser.value.role === '老板') return true;
                 if (page === 'orders') return ['销售', '老板'].includes(currentUser.value.role);
-                if (page === 'assets') return currentUser.value.role === '车管';
+                if (page === 'assets') return currentUser.value.role === '运营';
                 return false;
             }
             function isSalesOrAdmin() {
@@ -3760,10 +3968,10 @@
                 if (!['租赁', '经营租赁', '以租代售', '以租代购'].includes(row.sales_mode)) return false;
                 if (['已结清', '已终止'].includes(row.contract_status)) return false;
                 if (['已结清', '已过户'].includes(row.vehicle_status)) return false;
-                if (!row.contract_end_date || row.contract_end_date < todayString()) return false;
+                if (!row.contract_end_date || row.contract_end_date <= todayString()) return false;
                 return !renewals.value.some(item =>
                     Number(item.original_contract_id) === Number(row.contract_id)
-                    && ['待老板审批', '待运营处理', '已生效'].includes(item.status)
+                    && ['待老板审批', '待运营处理'].includes(item.status)
                 );
             }
             function initiateReturnFromOrder(row) {
@@ -3988,6 +4196,9 @@
             const renewals = ref([]);
             const refurbishmentRecords = ref([]);
             const pendingOwnershipTransfers = ref([]);
+            const legacyPendingContracts = ref([]);
+            const legacyPendingSelection = ref([]);
+            const legacyPendingConfirming = ref(false);
             const legacyImportFileUrl = ref('');
             const legacyImportFileName = ref('');
             const legacyImportCutoverDate = ref(new Date().toISOString().slice(0, 10));
@@ -4015,7 +4226,7 @@
                 del: 36, // <el-icon><Delete/></el-icon> link button: icon 14 + padding 4 + margin 6*2
                 edit: _bw('编辑'),
                 delOrder: _bw('删除'),
-                copyDraft: _bw('复制草稿'),
+                copyDraft: _bw('复制报单'),
                 returnOrder: _bw('发起退车'),
                 genPlan: _bw('生成客户计划'),
                 confirm: _bw('确认报单'),
@@ -4039,7 +4250,7 @@
             };
             const _salesBtns = (row, role) => {
                 const b = [];
-                if (role === '销售' && row.order_status === '草稿') { b.push(BTN.edit, BTN.delOrder); }
+                if (role === '销售' && row.order_status === '待提交') { b.push(BTN.edit, BTN.delOrder); }
                 if (role === '销售' && row.order_status === '已作废') b.push(BTN.copyDraft);
                 if (canReturnFromOrder(row)) b.push(BTN.returnOrder);
                 if (role === '财务' && row.order_status === '待财务确认' && isInstallmentSalesOrder(row)) b.push(BTN.genPlan);
@@ -4055,8 +4266,8 @@
                 if (!row.is_deleted && canInitiateVehicleOrder(row)) b.push(BTN.order);
                 if (!row.is_deleted && role === '运营' && row.contract_type === '以租代售') b.push(BTN.transfer);
                 if (!row.is_deleted && canInitiateVehicleReturn(row)) b.push(BTN.returnCar);
-                if (!row.is_deleted && role === '运营' && row.status === '待维修') b.push(BTN.startRepair);
-                if (!row.is_deleted && role === '运营' && ['待维修', '维修中'].includes(row.status)) b.push(BTN.completeRepair);
+                if (!row.is_deleted && role === '车管' && row.status === '待维修') b.push(BTN.startRepair);
+                if (!row.is_deleted && role === '车管' && ['待维修', '维修中'].includes(row.status)) b.push(BTN.completeRepair);
                 if (row.is_deleted && role === '老板') b.push(BTN.restore);
                 if (!row.is_deleted && role === '老板') b.push(BTN.del);
                 return b;
@@ -4080,6 +4291,17 @@
                 customer: '',
                 car_type: '',
                 salesperson: ''
+            });
+            const customerLibrary = ref([]);
+            const customerLibraryFilters = reactive({
+                customer_name: '',
+                phone: '',
+                id_card: '',
+                sales_name: '',
+                plate_number: '',
+                order_status: '',
+                is_blacklist: '',
+                is_overdue: ''
             });
             const overdueList = ref([]);
             const insuranceWarnings = ref([]);
@@ -4449,6 +4671,28 @@
                 // 20260810 SKU 改造：多车报单（VIN 数组，主车仍写 vin）
                 vehicle_ids: []
             });
+            const orderVehicleOptions = computed(() =>
+                vehicles.value
+                    .filter(v => !v.is_deleted && ['在库', '报单锁定中'].includes(v.status || ''))
+                    .sort((a, b) => String(a.vin || '').localeCompare(String(b.vin || '')))
+            );
+            const orderPlateOptions = computed(() =>
+                orderVehicleOptions.value
+                    .filter(v => String(v.plate_number || '').trim())
+                    .sort((a, b) => String(a.plate_number || '').localeCompare(String(b.plate_number || '')))
+            );
+            const orderBlacklistMatch = computed(() => {
+                const name = String(newOrder.customer_name || '').trim();
+                const phone = String(newOrder.customer_phone || '').trim();
+                if (!name && !phone) return null;
+                return customerBlacklist.value.find(item =>
+                    item.status === '生效'
+                    && (
+                        (phone && String(item.customer_phone || '').trim() === phone)
+                        || (name && String(item.customer_name || '').trim() === name)
+                    )
+                ) || null;
+            });
 
             const deliveryForm = reactive({
                 contract_id: null,
@@ -4598,6 +4842,7 @@
                 { key: 'dashboard', label: '仪表盘', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>' },
                 { key: 'guidance_board', label: '指导价看板', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M7 15l4-4 3 2 4-5"/><circle cx="7" cy="15" r="1"/><circle cx="11" cy="11" r="1"/><circle cx="14" cy="13" r="1"/><circle cx="18" cy="8" r="1"/></svg>' },
                 { key: 'orders', label: '销售报单', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 17A2.5 2.5 0 014 14.5V5a2 2 0 012-2h14v14"/><path d="M8 7h8"/><path d="M8 11h8"/></svg>' },
+                { key: 'customer_library', label: '客户库', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
                 { key: 'assets', label: '车辆管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-2-2.1-3.2C13.2 5.9 12.2 5.5 11.1 5.5H5c-1.1 0-2 .9-2 2v7.5c0 .6.4 1 1 1h1"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/></svg>' },
                 { key: 'completion_history', label: '历史完结', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5"/><path d="M3.6 12a8.4 8.4 0 1 0 2.1-5.6L3 8"/><path d="M12 7v5l3.5 2"/></svg>' },
                 { key: 'approvals', label: '审批中心', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
@@ -4620,6 +4865,7 @@
                 dashboard: { title: '仪表盘', desc: '车辆资产运营数据总览', action: '' },
                 guidance_board: { title: '指导价看板', desc: '全员查看当前租赁指导价与以租代售方案', action: '' },
                 orders: { title: '销售报单', desc: '销售录单锁车、财务确认客户意向，驱动后续线下合同上传', action: '新建报单' },
+                customer_library: { title: '客户库', desc: '客户合同、车辆、应收、逾期、黑名单与催收记录', action: '' },
                 assets: { title: '车辆管理', desc: '上传经销商买断库存 Excel 批量入库，按表格维度展示车辆信息', action: '上传入库' },
                 completion_history: { title: '历史完结', desc: '已完成退车入库与以租代售过户记录', action: '' },
                 approvals: { title: '审批中心', desc: '报单确认 · 合同上传 · 发票处理 · 锁车审批 · 退车入库与退还押金', action: '' },
@@ -4802,6 +5048,33 @@
                 const suffix = params.toString() ? '?' + params.toString() : '';
                 salesOrders.value = await (await fetch('/api/sales-orders' + suffix)).json();
             };
+            const fetchCustomerLibrary = async () => {
+                const params = new URLSearchParams();
+                Object.entries(customerLibraryFilters).forEach(([key, value]) => {
+                    if (String(value || '').trim()) params.set(key, String(value).trim());
+                });
+                const suffix = params.toString() ? '?' + params.toString() : '';
+                try {
+                    const response = await fetch('/api/customer-library' + suffix);
+                    const data = await response.json();
+                    customerLibrary.value = Array.isArray(data) ? data : [];
+                } catch (e) {
+                    customerLibrary.value = [];
+                }
+            };
+            function resetCustomerLibraryFilters() {
+                Object.assign(customerLibraryFilters, {
+                    customer_name: '',
+                    phone: '',
+                    id_card: '',
+                    sales_name: '',
+                    plate_number: '',
+                    order_status: '',
+                    is_blacklist: '',
+                    is_overdue: ''
+                });
+                fetchCustomerLibrary();
+            }
             const fetchRenewals = async () => {
                 try {
                     const res = await fetch('/api/renewals');
@@ -4812,7 +5085,7 @@
                 }
             };
             const fetchRefurbishmentRecords = async () => {
-                if (!currentUser.value || currentUser.value.role !== '运营') {
+                if (!currentUser.value || currentUser.value.role !== '车管') {
                     refurbishmentRecords.value = [];
                     return;
                 }
@@ -4845,6 +5118,68 @@
                     pendingOwnershipTransfers.value = Array.isArray(data.items) ? data.items : [];
                 } catch (e) {
                     pendingOwnershipTransfers.value = [];
+                }
+            };
+            const fetchLegacyPendingContracts = async () => {
+                if (!currentUser.value || !['运营', '老板'].includes(currentUser.value.role)) {
+                    legacyPendingContracts.value = [];
+                    return;
+                }
+                try {
+                    const res = await fetch('/api/legacy-import/pending-contracts');
+                    const data = await res.json();
+                    legacyPendingContracts.value = res.ok && Array.isArray(data.items) ? data.items : [];
+                } catch (e) {
+                    legacyPendingContracts.value = [];
+                }
+            };
+            const confirmLegacyPending = async (ids) => {
+                const targetIds = Array.isArray(ids) && ids.length
+                    ? ids
+                    : legacyPendingSelection.value.map(row => row.id);
+                if (!targetIds.length) return;
+                legacyPendingConfirming.value = true;
+                try {
+                    const res = await fetch('/api/legacy-import/pending-contracts/confirm', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ contract_ids: targetIds }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok || !data.success) throw new Error(data.message || '确认失败');
+                    ElementPlus.ElMessage.success(data.message || '已确认，合同现已全端可见');
+                    legacyPendingSelection.value = [];
+                    await Promise.all([fetchLegacyPendingContracts(), fetchContracts(), refreshDashboardPanels()]);
+                } catch (e) {
+                    ElementPlus.ElMessage.error(e.message || '确认失败');
+                } finally {
+                    legacyPendingConfirming.value = false;
+                }
+            };
+            const confirmAllLegacyPending = async () => {
+                try {
+                    await ElementPlus.ElMessageBox.confirm(
+                        `将一键确认全部 ${legacyPendingContracts.value.length} 条历史迁移合同，确认后全端可见。`,
+                        '全部确认',
+                        { type: 'warning' }
+                    );
+                } catch (e) { return; }
+                legacyPendingConfirming.value = true;
+                try {
+                    const res = await fetch('/api/legacy-import/pending-contracts/confirm', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ confirm_all: true }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok || !data.success) throw new Error(data.message || '确认失败');
+                    ElementPlus.ElMessage.success(data.message || '已确认，合同现已全端可见');
+                    legacyPendingSelection.value = [];
+                    await Promise.all([fetchLegacyPendingContracts(), fetchContracts(), refreshDashboardPanels()]);
+                } catch (e) {
+                    ElementPlus.ElMessage.error(e.message || '确认失败');
+                } finally {
+                    legacyPendingConfirming.value = false;
                 }
             };
             const fetchOverdue = async () => { overdueList.value = await (await fetch('/api/risk/overdue')).json(); };
@@ -4949,7 +5284,7 @@
                 if (!ready) return;
                 try {
                     await ElementPlus.ElMessageBox.confirm(
-                        `将导入 ${ready} 条已通过校验的历史履约合同。`,
+                        `将导入 ${ready} 条已通过校验的历史履约合同。导入后合同为"待确认"状态，需运营在仪表盘确认后才全端可见。`,
                         '确认历史履约迁移',
                         { type: 'warning', confirmButtonText: '确认导入', cancelButtonText: '取消' },
                     );
@@ -5017,11 +5352,17 @@
                 receivingCompanies.value = await (await fetch('/api/receiving-companies')).json();
             };
             const fetchCustomerBlacklist = async () => {
-                if (!currentUser.value || !['财务','老板'].includes(currentUser.value.role)) {
+                if (!currentUser.value || !['销售','老板'].includes(currentUser.value.role)) {
                     customerBlacklist.value = [];
                     return;
                 }
-                customerBlacklist.value = await (await fetch('/api/customer-blacklist')).json();
+                try {
+                    const response = await fetch('/api/customer-blacklist');
+                    const data = await response.json();
+                    customerBlacklist.value = response.ok && Array.isArray(data) ? data : [];
+                } catch (e) {
+                    customerBlacklist.value = [];
+                }
             };
             const fetchVehicleRebates = async () => {
                 if (!currentUser.value || !['财务','老板'].includes(currentUser.value.role)) {
@@ -5061,6 +5402,7 @@
 	                await Promise.all([
                         fetchDashboardWorkspace(),
 	                    fetchPendingOwnershipTransfers(),
+	                    fetchLegacyPendingContracts(),
 	                ]);
 	            };
 	            function loadInitialDataForUser() {
@@ -5132,10 +5474,11 @@
             };
 
 	            watch(currentPage, (page) => {
-	                if (page === 'dashboard') refreshDashboardPanels();
-                if (page === 'guidance_board') loadGuidanceBoard();
-                if (page === 'orders') { fetchSalesOrders(); loadFinancePlans(); }
-                if (page === 'assets') { fetchAll(); fetchContracts(); loadSkuInventory(); }
+		                if (page === 'dashboard') refreshDashboardPanels();
+		                if (page === 'guidance_board') loadGuidanceBoard();
+		                if (page === 'orders') { fetchSalesOrders(); loadFinancePlans(); }
+		                if (page === 'customer_library') fetchCustomerLibrary();
+		                if (page === 'assets') { fetchAll(); fetchContracts(); loadSkuInventory(); }
                 if (page === 'completion_history') { fetchCompletionHistory(); fetchReturns(); }
                 if (page === 'approvals' && !navigatingToPendingApproval) refreshApprovalCenter();
                 if (page === 'risk') { fetchOverdue(); fetchInsuranceWarnings(); fetchLockRequests(); }
@@ -6060,14 +6403,7 @@
                 if (!newOrder.payment_category || ['定金',''].includes(newOrder.payment_category))
                     newOrder.payment_category = defaultPaymentCategory(mode);
             });
-            watch(() => newOrder.vin, (vin) => {
-                const cleanVin = (vin || '').trim().toUpperCase();
-                if (newOrder.vin !== cleanVin) {
-                    newOrder.vin = cleanVin;
-                    return;
-                }
-                if (cleanVin.length !== 17) return;
-                const matched = vehicles.value.find(v => (v.vin || '').toUpperCase() === cleanVin);
+            function applyOrderVehicle(matched) {
                 if (!matched) return;
                 newOrder.car_type = matched.car_type || newOrder.car_type;
                 newOrder.plate_number = matched.plate_number || newOrder.plate_number;
@@ -6083,6 +6419,43 @@
                 if (matchedBoxType) newOrder.vehicle_box_type = matchedBoxType;
                 newOrder.tail_plate = normalizeOrderTailgate(matched.tailgate || matched.tail_plate);
                 if (!newOrder.sales_advisor && currentUser.value) newOrder.sales_advisor = currentUser.value.display_name || '';
+            }
+            function onOrderPlateSelect(plateNumber) {
+                const cleanPlate = String(plateNumber || '').trim().toUpperCase();
+                if (!cleanPlate) return;
+                const matched = orderPlateOptions.value.find(
+                    v => String(v.plate_number || '').trim().toUpperCase() === cleanPlate
+                );
+                if (!matched) return;
+                newOrder.vin = String(matched.vin || '').trim().toUpperCase();
+                applyOrderVehicle(matched);
+            }
+            function matchOrderVehicleByVinInput(input, options = orderVehicleOptions.value) {
+                const cleanVin = String(input || '').trim().toUpperCase();
+                if (!cleanVin) return null;
+                const rows = Array.isArray(options) ? options : [];
+                const exact = rows.find(
+                    v => String(v.vin || '').trim().toUpperCase() === cleanVin
+                );
+                if (exact) return exact;
+                if (cleanVin.length < 4) return null;
+                const suffixMatches = rows.filter(v => {
+                    const candidate = String(v.vin || '').trim().toUpperCase();
+                    return candidate.length > cleanVin.length && candidate.endsWith(cleanVin);
+                });
+                return suffixMatches.length === 1 ? suffixMatches[0] : null;
+            }
+            watch([() => newOrder.vin, orderVehicleOptions], ([vin]) => {
+                const cleanVin = String(vin || '').trim().toUpperCase();
+                if (newOrder.vin !== cleanVin) {
+                    newOrder.vin = cleanVin;
+                    return;
+                }
+                const matched = matchOrderVehicleByVinInput(cleanVin);
+                if (!matched) return;
+                const fullVin = String(matched.vin || '').trim().toUpperCase();
+                if (fullVin && fullVin !== cleanVin) newOrder.vin = fullVin;
+                applyOrderVehicle(matched);
             });
             const pendingApprovalItems = computed(() => {
                 if (!currentUser.value) return [];
@@ -6114,7 +6487,7 @@
             });
             const assetMenuCount = computed(() => pendingOwnershipTransferCount.value);
             const pendingRepairVehicles = computed(() => {
-                if (!currentUser.value || currentUser.value.role !== '运营') return [];
+                if (!currentUser.value || currentUser.value.role !== '车管') return [];
                 return refurbishmentRecords.value.filter(r =>
                     ['待整备', '整备中'].includes(r.status)
                 );
@@ -6430,6 +6803,7 @@
             function deliveryStatusClass(status) {
                 return {
                     '待审批': 'badge-orange',
+                    '待提交': 'badge-gray',
                     '待价格特批': 'badge-red',
                     '待老板审批': 'badge-red',
                     '已作废': 'badge-gray',
@@ -7189,7 +7563,11 @@
                 currentPage.value = key;
             }
             function handlePageAction() {
-                if (currentPage.value === 'orders') { resetOrderForm(); showOrderDialog.value = true; }
+                if (currentPage.value === 'orders') {
+                    resetOrderForm();
+                    fetchCustomerBlacklist();
+                    showOrderDialog.value = true;
+                }
                 if (currentPage.value === 'assets') openVehicleImport();
             }
             async function handleContractExpand(row, expandedRows) {
@@ -7532,17 +7910,18 @@
             }
             async function submitSalesOrder(saveDraft = false) {
                 newOrder.vin = (newOrder.vin || '').trim().toUpperCase();
-                // 以租代售/租赁不走草稿流程，直接提交（需要老板价格特批，保存草稿无意义）
-                if (saveDraft && ['以租代售', '经营租赁'].includes(newOrder.sales_mode)) saveDraft = false;
+                if (!newOrder.sales_mode) return ElementPlus.ElMessage.warning('请选择销售方式');
+                if (!newOrder.customer_name) return ElementPlus.ElMessage.warning('请填写客户姓名');
+                if (!newOrder.customer_phone) return ElementPlus.ElMessage.warning('请填写客户联系方式');
+                if (!newOrder.customer_screenshot_path) return ElementPlus.ElMessage.warning('请上传定金付款截图');
+                if (newOrder.vin && newOrder.vin.length !== 17) {
+                    return ElementPlus.ElMessage.warning('如填写车架号，请填写17位 VIN');
+                }
                 if (!saveDraft) {
-                    if (!newOrder.sales_mode) return ElementPlus.ElMessage.warning('请选择销售方式');
-                    if (!newOrder.customer_name) return ElementPlus.ElMessage.warning('请填写客户姓名');
-                    if (!newOrder.customer_phone) return ElementPlus.ElMessage.warning('请填写客户联系方式');
                     if (newOrder.deposit_amount === null || newOrder.deposit_amount === undefined) return ElementPlus.ElMessage.warning('请填写首付款/押金');
                     if (newOrder.vehicle_rent_amount === null || newOrder.vehicle_rent_amount === undefined) return ElementPlus.ElMessage.warning('请填写每期租金');
                     if (!newOrder.lease_term) return ElementPlus.ElMessage.warning('请填写分期数/租期');
                     if (newOrder.sales_mode === '以租代售' && !newOrder.finance_plan_id) return ElementPlus.ElMessage.warning('请选择金融方案');
-                    if (!newOrder.customer_screenshot_path) return ElementPlus.ElMessage.warning('请上传客户首付截图');
                     if (newOrder.first_payment_received_amount === null || newOrder.first_payment_received_amount === undefined) return ElementPlus.ElMessage.warning('请填写实收金额');
                     if (firstPaymentShortage.value > 0) {
                         if (!newOrder.first_payment_shortage_reason) return ElementPlus.ElMessage.warning('首付不足，请填写不足原因');
@@ -7550,34 +7929,53 @@
                     }
                     if (!newOrder.payment_category) newOrder.payment_category = defaultPaymentCategory(newOrder.sales_mode);
                 }
-                if (newOrder.vin && newOrder.vin.length !== 17) {
-                    return ElementPlus.ElMessage.warning('如填写车架号，请填写17位 VIN');
-                }
                 submitting.value = true;
                 try {
                     const payload = { ...newOrder };
-                    if (saveDraft) payload.save_as_draft = true;
-                    if (!saveDraft && currentOrderDraftId.value) payload.action = 'submit';
-                    const url = currentOrderDraftId.value ? `/api/sales-orders/${currentOrderDraftId.value}` : '/api/sales-orders';
-                    const res = await fetch(url, {
-                        method: currentOrderDraftId.value ? 'PUT' : 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
-                    const contentType = res.headers.get('content-type') || '';
-                    const data = contentType.includes('application/json') ? await res.json() : {};
-                    if (!res.ok || !data.success) {
-                        return ElementPlus.ElMessage.error(data.message || `销售报单提交失败（${res.status}）`);
+                    let orderId = Number(currentOrderDraftId.value || 0);
+                    if (!orderId) {
+                        const createRes = await fetch('/api/sales-orders', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+                        const createData = await readApiJson(createRes, '待提交报单保存失败');
+                        orderId = Number(createData.id || 0);
+                        if (!orderId) {
+                            throw new Error('服务端未返回报单编号');
+                        }
+                        currentOrderDraftId.value = orderId;
                     }
-                    ElementPlus.ElMessage.success(data.message || (saveDraft ? '草稿已保存' : '销售报单已创建'));
+
+                    if (saveDraft) {
+                        if (Number(currentOrderDraftId.value) !== orderId) {
+                            throw new Error('报单编号异常，请刷新后重试');
+                        }
+                        const saveRes = await fetch(`/api/sales-orders/${orderId}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+                        const saveData = await readApiJson(saveRes, '待提交报单保存失败');
+                        ElementPlus.ElMessage.success(saveData.message || '待提交报单已保存');
+                    } else {
+                        const submitRes = await fetch(`/api/sales-orders/${orderId}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ ...payload, action: 'submit' })
+                        });
+                        const submitData = await readApiJson(submitRes, '销售报单提交失败');
+                        ElementPlus.ElMessage.success(submitData.message || '销售报单已提交审批');
+                    }
                     showOrderDialog.value = false;
                     resetOrderForm();
                     fetchSalesOrders();
                     fetchApprovals();
+                    fetchCustomerBlacklist();
                     fetchAll();
                 } catch (error) {
                     console.error('销售报单提交失败', error);
-                    ElementPlus.ElMessage.error('销售报单提交失败，请检查网络连接后重试');
+                    ElementPlus.ElMessage.error(error.message || '销售报单提交失败，请检查网络连接后重试');
                 } finally {
                     submitting.value = false;
                 }
@@ -7585,21 +7983,22 @@
             function editSalesOrderDraft(row) {
                 currentOrderDraftId.value = row.id;
                 fillOrderFormFromRow(row);
+                fetchCustomerBlacklist();
                 showOrderDialog.value = true;
             }
             async function deleteSalesOrderDraft(row) {
-                await ElementPlus.ElMessageBox.confirm(`确认删除 ${row.plate_number || row.vin} 的草稿？`, '删除草稿', { type: 'warning' });
+                await ElementPlus.ElMessageBox.confirm(`确认删除 ${row.plate_number || row.vin} 的待提交报单？`, '删除待提交报单', { type: 'warning' });
                 const res = await fetch(`/api/sales-orders/${row.id}`, { method: 'DELETE' });
                 const data = await res.json();
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '删除失败');
-                ElementPlus.ElMessage.success(data.message || '草稿已删除');
+                ElementPlus.ElMessage.success(data.message || '待提交报单已删除');
                 fetchSalesOrders();
             }
             async function copySalesOrderDraft(row) {
                 const res = await fetch(`/api/sales-orders/${row.id}/copy-draft`, { method: 'POST' });
                 const data = await res.json();
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '复制失败');
-                ElementPlus.ElMessage.success(data.message || '已复制为草稿');
+                ElementPlus.ElMessage.success(data.message || '已复制为待提交报单');
                 fetchSalesOrders();
             }
             async function activateOrder(row) {
@@ -8798,7 +9197,7 @@
                 search, assetFilter, carTypeFilter, conditionFilter, boxTypeFilter, energyFilter, batteryCapacityFilter, horsepowerFilter, showDeleted, contractSearch, contractFilter,
                 hiddenColumns, toggleColumn, colVisible, ALL_COLUMNS, showColSettings, selectAllColumns, deselectAllColumns,
                 carTypeOptions, carTypeGroups, normalizeOrderBaseCarType, batteryCapacityOptions, horsepowerOptions, assetBoxTypeOptions, assetEnergyOf, assetConditionOf, salesOrderCarOptions, currentSalesOrderCarConfig, currentVehicleCarConfig, availableGearboxOptions, availableColorOptions, availableBoxOptions, availableVehicleGearboxOptions, availableVehicleColorOptions, availableVehicleBoxOptions, boxRemarkPlaceholder, vehicleBoxRemarkPlaceholder,
-                vehicles, contracts, pendingOwnershipTransfers, stats, dashboardWorkspace, salesOrders, orderFilters, fetchSalesOrders, resetOrderFilters, overdueList, insuranceWarnings, pendingBills, feeItems, profitData, profitSummary, returnList, completionHistory, completionHistoryFilter, completionHistoryDateRange, returnableAssetRows,
+                vehicles, contracts, pendingOwnershipTransfers, legacyPendingContracts, legacyPendingSelection, legacyPendingConfirming, fetchLegacyPendingContracts, confirmLegacyPending, confirmAllLegacyPending, stats, dashboardWorkspace, salesOrders, orderFilters, fetchSalesOrders, resetOrderFilters, customerLibrary, customerLibraryFilters, fetchCustomerLibrary, resetCustomerLibraryFilters, overdueList, insuranceWarnings, pendingBills, feeItems, profitData, profitSummary, returnList, completionHistory, completionHistoryFilter, completionHistoryDateRange, returnableAssetRows,
                 invoiceRequests, receivingCompanies, bossDashboard, slaReminders, customerBlacklist, vehicleRebates,
                 reconList, reconFilter, reconSearch, reconSummary, filteredGroupedReconList, reconExpandedKeys, reconTableRef,
                 receivablesList, showReceivableScreenshotDialog, showReceivableSettleDialog, receivableTarget, receivableScreenshotPath, receivableSettleForm, receivableOutstanding, openReceivableScreenshot, onReceivableScreenshotUpload, submitReceivableScreenshot, openReceivableSettle, submitReceivableSettle,
@@ -8847,6 +9246,7 @@
                 guidanceTab, financePlanForm, openFinancePlanManager, resetFinancePlanForm, editFinancePlan, submitFinancePlan, deleteFinancePlan,
                 dictCategories, dictRows, dictFilterCategory, dictSearch, dictForm, dictEnergyOptions, filteredDictRows, dictCategoryLabel, loadDictRows, resetDictForm, onDictCategoryChange, editDictRow, submitDictForm, deleteDictRow,
                 skuInventory, skuFilterCondition, skuFilterBoxType, filteredSkuInventory, dictOptionsByCategory, loadSkuInventory, showSkuPickDialog, skuPickTarget, skuPickVehicles, skuPickSelected, onSkuPickSelectionChange, openSkuPickVehicle, pickSkuVehicle, pickSelectedSkuVehicles, toggleSku,
+                orderVehicleOptions, orderPlateOptions, orderBlacklistMatch, applyOrderVehicle, onOrderPlateSelect,
                 submitVehicle, openVehicleImport, beforeVehicleImport, onVehicleImportSuccess, onVehicleImportError, openVehicleDetail, openVehicleValidationFix, submitVehicleValidationFix, submitContract, submitSalesOrder, editSalesOrderDraft, deleteSalesOrderDraft, copySalesOrderDraft, activateOrder, createContractFromOrder, confirmRepayment, confirmFactoryRepayment, requestLock, onUrgeEvidenceUpload, openApprovalReminderCenter, focusApprovalItem,
                 deliverVehicle, matchContractVehicle, openSalesOrderFromVehicle,
                 openPlanningDialog, onPlanningFactoryUpload, savePlanningContract, importPlanningFactory, confirmPlanningDifference,

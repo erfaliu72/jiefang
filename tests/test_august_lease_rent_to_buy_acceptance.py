@@ -45,6 +45,14 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
         row = self.db_row(sql, params)
         return next(iter(row.values())) if row else None
 
+    def submit_sales_order(self, order_id):
+        self.login("sales")
+        submitted = self.client.put(
+            f"/api/sales-orders/{order_id}",
+            json={"action": "submit"},
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.get_json())
+
     def create_vehicle(self, car_type, status="在库"):
         self.vehicle_seq += 1
         vin = f"V{self.vehicle_seq:016d}"
@@ -92,6 +100,109 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
             return vehicle_id, contract_id, needs_repair
         finally:
             conn.close()
+
+    def test_customer_receivable_lists_respect_sales_contract_scope(self):
+        own_vehicle_id, _ = self.create_vehicle("本人应收车型", "租赁中")
+        other_vehicle_id, _ = self.create_vehicle("他人应收车型", "租赁中")
+        conn = database.get_db()
+        try:
+            receivable_ids = {}
+            repayment_ids = {}
+            for sales_name, customer_name, vehicle_id in (
+                ("周销售", "周销售名下客户", own_vehicle_id),
+                ("王销售", "王销售名下客户", other_vehicle_id),
+            ):
+                conn.execute(
+                    "INSERT INTO customers (name, phone) VALUES (?, ?)",
+                    (customer_name, "13800000001" if sales_name == "周销售" else "13800000002"),
+                )
+                customer_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                conn.execute(
+                    """
+                    INSERT INTO contracts
+                        (vehicle_id, customer_id, contract_type, contract_status,
+                         delivery_status, contract_file, created_by)
+                    VALUES (?, ?, '租赁', '执行中', '已出库',
+                            '/uploads/receivable-scope-contract.pdf', ?)
+                    """,
+                    (vehicle_id, customer_id, sales_name),
+                )
+                contract_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                conn.execute(
+                    """
+                    INSERT INTO receivables
+                        (contract_id, receivable_type, source_period, amount, status)
+                    VALUES (?, 'initial_payment_shortfall', 0, 1000, '待归还')
+                    """,
+                    (contract_id,),
+                )
+                receivable_ids[sales_name] = conn.execute(
+                    "SELECT last_insert_rowid()"
+                ).fetchone()[0]
+                conn.execute(
+                    """
+                    INSERT INTO repayments
+                        (contract_id, period, due_date, amount, status)
+                    VALUES (?, 1, '2026-08-01', 2000, '逾期')
+                    """,
+                    (contract_id,),
+                )
+                repayment_ids[sales_name] = conn.execute(
+                    "SELECT last_insert_rowid()"
+                ).fetchone()[0]
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login("sales")
+        sales_response = self.client.get("/api/receivables")
+        self.assertEqual(sales_response.status_code, 200, sales_response.get_json())
+        self.assertEqual(
+            [row["id"] for row in sales_response.get_json()],
+            [receivable_ids["周销售"]],
+        )
+        sales_bills_response = self.client.get("/api/bills/pending")
+        self.assertEqual(
+            sales_bills_response.status_code,
+            200,
+            sales_bills_response.get_json(),
+        )
+        self.assertEqual(
+            [row["id"] for row in sales_bills_response.get_json()],
+            [repayment_ids["周销售"]],
+        )
+
+        self.login("boss")
+        boss_response = self.client.get("/api/receivables")
+        self.assertEqual(boss_response.status_code, 200, boss_response.get_json())
+        self.assertEqual(
+            {row["id"] for row in boss_response.get_json()},
+            set(receivable_ids.values()),
+        )
+        boss_bills_response = self.client.get("/api/bills/pending")
+        self.assertEqual(boss_bills_response.status_code, 200, boss_bills_response.get_json())
+        self.assertEqual(
+            {row["id"] for row in boss_bills_response.get_json()},
+            set(repayment_ids.values()),
+        )
+
+        self.login("fin")
+        finance_response = self.client.get("/api/receivables")
+        self.assertEqual(finance_response.status_code, 200, finance_response.get_json())
+        self.assertEqual(
+            {row["id"] for row in finance_response.get_json()},
+            set(receivable_ids.values()),
+        )
+        finance_bills_response = self.client.get("/api/bills/pending")
+        self.assertEqual(
+            finance_bills_response.status_code,
+            200,
+            finance_bills_response.get_json(),
+        )
+        self.assertEqual(
+            {row["id"] for row in finance_bills_response.get_json()},
+            set(repayment_ids.values()),
+        )
 
     def test_contract_attachment_limit_is_ten(self):
         self.login("ops")
@@ -359,6 +470,7 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
         )
         self.assertEqual(order.status_code, 200, order.get_json())
         order_id = order.get_json()["id"]
+        self.submit_sales_order(order_id)
         self.login("fin")
         activation = self.client.post(
             f"/api/sales-orders/{order_id}/activate",
@@ -414,6 +526,7 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
         )
         self.assertEqual(order.status_code, 200, order.get_json())
         order_id = order.get_json()["id"]
+        self.submit_sales_order(order_id)
         flow = self.db_row(
             """
             SELECT id FROM approval_flows
@@ -554,6 +667,7 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
         )
         self.assertEqual(order_response.status_code, 200, order_response.get_json())
         order_id = order_response.get_json()["id"]
+        self.submit_sales_order(order_id)
         order = self.db_row(
             "SELECT contract_id, snapshot_finance_plan FROM sales_orders WHERE id=?",
             (order_id,),
@@ -687,6 +801,7 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(order_response.status_code, 200, order_response.get_json())
+        self.submit_sales_order(order_response.get_json()["id"])
 
     def test_t3_due_soon_reminder_text_generated(self):
         """流程图 4.1：T-3 还款日前 3 天，系统生成黄色预警提醒文案（幂等）。"""
@@ -825,6 +940,9 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
                 "mileage": "30000", "body_tire_clean": "已清理", "accident_info": "无出险",
                 "insurance_surcharge": "无", "violation_info": "无违章", "etc_info": "已注销",
                 "maintenance_info": "正常",
+                "appearance_photos": "/uploads/return-appearance.jpg",
+                "mileage_photos": "/uploads/return-mileage.jpg",
+                "tools_photos": "/uploads/return-tools.jpg",
             },
         )
         self.assertEqual(fleet.status_code, 200, fleet.get_json())
@@ -882,6 +1000,9 @@ class AugustLeaseRentToBuyAcceptanceTestCase(unittest.TestCase):
                     "mileage": "30000", "body_tire_clean": "已清理", "accident_info": "无出险",
                     "insurance_surcharge": "无", "violation_info": "无违章", "etc_info": "已注销",
                     "maintenance_info": "正常",
+                    "appearance_photos": "/uploads/return-appearance-2.jpg",
+                    "mileage_photos": "/uploads/return-mileage-2.jpg",
+                    "tools_photos": "/uploads/return-tools-2.jpg",
                 },
             ).status_code,
             200,

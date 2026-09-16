@@ -114,7 +114,13 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
         self.login("sales")
         response = self.client.post("/api/sales-orders", json=payload)
         self.assertEqual(response.status_code, 200, response.get_json())
-        return response.get_json()["id"]
+        order_id = response.get_json()["id"]
+        submitted = self.client.put(
+            f"/api/sales-orders/{order_id}",
+            json={"action": "submit"},
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.get_json())
+        return order_id
 
     def approve_pending_flows(self, ref_type, ref_id):
         role_to_user = {"老板": "boss", "财务": "fin", "运营": "ops", "车管": "fleet", "销售": "sales"}
@@ -248,6 +254,11 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(blocked_unpriced.status_code, 200, blocked_unpriced.get_json())
+        submitted_unpriced = self.client.put(
+            f"/api/sales-orders/{blocked_unpriced.get_json()['id']}",
+            json={"action": "submit"},
+        )
+        self.assertEqual(submitted_unpriced.status_code, 200, submitted_unpriced.get_json())
         unpriced_order = self.db_row(
             "SELECT order_status, order_exception_reason FROM sales_orders WHERE vin=?",
             ("INV20260811000002",),
@@ -257,7 +268,7 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
 
         chassis_id, chassis_vin = self.create_vehicle(priced_type, box_type="底盘")
         self.login("sales")
-        blocked_chassis = self.client.post(
+        allowed_chassis = self.client.post(
             "/api/sales-orders",
             json={
                 "payment_date": "2026-08-01",
@@ -275,7 +286,18 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(chassis_id > 0, True)
-        self.assertEqual(blocked_chassis.status_code, 400, blocked_chassis.get_json())
+        self.assertEqual(allowed_chassis.status_code, 200, allowed_chassis.get_json())
+        submitted_chassis = self.client.put(
+            f"/api/sales-orders/{allowed_chassis.get_json()['id']}",
+            json={"action": "submit"},
+        )
+        self.assertEqual(submitted_chassis.status_code, 200, submitted_chassis.get_json())
+        chassis_order = self.db_row(
+            "SELECT order_status, order_exception_reason FROM sales_orders WHERE id=?",
+            (allowed_chassis.get_json()["id"],),
+        )
+        self.assertEqual(chassis_order["order_status"], "待老板审批")
+        self.assertTrue(chassis_order["order_exception_reason"])
 
     def test_lease_price_exception_approval_finance_receipt_and_delivery(self):
         car_type = "八月租赁特批车型"
@@ -345,7 +367,15 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
                 "first_payment_received_amount": 18000,
             },
         )
-        self.assertEqual(expired.status_code, 400, expired.get_json())
+        self.assertEqual(expired.status_code, 200, expired.get_json())
+        expired_order_id = expired.get_json()["id"]
+        expired_submit = self.client.put(
+            f"/api/sales-orders/{expired_order_id}",
+            json={"action": "submit"},
+        )
+        self.assertEqual(expired_submit.status_code, 400, expired_submit.get_json())
+        deleted_expired = self.client.delete(f"/api/sales-orders/{expired_order_id}")
+        self.assertEqual(deleted_expired.status_code, 200, deleted_expired.get_json())
 
         order_id = self.create_order(
             vin,
@@ -1001,7 +1031,7 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
             json={"loan_periods": 6, "rent": 9999},
         )
         self.assertEqual(response.status_code, 400, response.get_json())
-        self.assertIn("不能重新生成客户还款计划", response.get_json()["message"])
+        self.assertIn("不能生成分期计划", response.get_json()["message"])
 
     def test_initial_rent_correction_reverses_only_the_wrong_late_fee(self):
         vehicle_id, _ = self.create_vehicle("八月滞纳金冲回车型", status="租赁中")
@@ -1077,8 +1107,8 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
             conn.execute("""
                 INSERT INTO contracts
                     (vehicle_id, customer_id, contract_type, contract_status,
-                     delivery_status, contract_file)
-                VALUES (?, ?, '租赁', '执行中', '已出库', '/uploads/signed-contract.pdf')
+                     delivery_status, contract_file, created_by)
+                VALUES (?, ?, '租赁', '执行中', '已出库', '/uploads/signed-contract.pdf', '周销售')
             """, (vehicle_id, customer_id))
             contract_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             conn.executemany("""
@@ -1222,6 +1252,9 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
                     "mileage": "30000", "body_tire_clean": "已清理", "accident_info": "无出险",
                     "insurance_surcharge": "无", "violation_info": "无违章", "etc_info": "已注销",
                     "maintenance_info": "正常",
+                    "appearance_photos": "/uploads/return-appearance.jpg",
+                    "mileage_photos": "/uploads/return-mileage.jpg",
+                    "tools_photos": "/uploads/return-tools.jpg",
                 },
             ).status_code,
             200,
@@ -1294,7 +1327,7 @@ class AugustFullLeaseRentToBuyFlowTestCase(unittest.TestCase):
             self.db_value("SELECT condition FROM vehicles WHERE id=?", (vehicle_id,)),
             "二手车",
         )
-        self.login("ops")
+        self.login("fleet")
         missing_repair_note = self.client.post(f"/api/vehicles/{vehicle_id}/repair/complete", json={})
         self.assertEqual(missing_repair_note.status_code, 400, missing_repair_note.get_json())
         self.assertIn("维修完成情况", missing_repair_note.get_json()["message"])

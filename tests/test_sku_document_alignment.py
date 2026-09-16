@@ -129,6 +129,43 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
         self.assertEqual(row["battery_capacity"], "134度")
         self.assertEqual(row["energy_type"], "纯电")
 
+    def test_sales_vehicle_list_returns_all_order_snapshot_fields(self):
+        """VIN 关键词带出车辆后，报单前端需要完整的车辆快照字段。"""
+        vin = "ORDERFIELDS000001"
+        conn = database.get_db()
+        try:
+            conn.execute(
+                """
+                INSERT INTO vehicles
+                    (vin, plate_number, car_type, condition, status, box_type,
+                     vehicle_box_type, fuel_form, brand, cab_type, cab_style,
+                     battery_brand, engine_spec, battery_capacity, horsepower,
+                     gear_position, gearbox_spec, vehicle_color, tailgate,
+                     purchase_price)
+                VALUES
+                    (?, '陕A字段', '解放报单字段车型', '二手车', '在库', '厢货',
+                     '厢货', '纯电', '解放', '排半', '排半',
+                     '宁德', '永磁同步', '100度', '180马力',
+                     '自动', 'AMT', '珠光白', '有', 128000)
+                """,
+                (vin,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login("sales")
+        response = self.client.get("/api/vehicles/list")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        row = next(item for item in response.get_json() if item["vin"] == vin)
+        self.assertEqual(row["brand"], "解放")
+        self.assertEqual(row["cab_type"], "排半")
+        self.assertEqual(row["engine_spec"], "永磁同步")
+        self.assertEqual(row["gearbox_spec"], "AMT")
+        self.assertEqual(row["vehicle_color"], "珠光白")
+        self.assertEqual(row["vehicle_box_type"], "厢货")
+        self.assertEqual(row["tailgate"], "有")
+
     def test_missing_guidance_is_warning_and_sales_can_submit_for_owner_approval(self):
         """新导入库存车缺指导价时仍可通过报单流进入老板审批。"""
         vin = "GUIDANCEWARN00001"
@@ -195,6 +232,11 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertTrue(response.get_json()["success"])
+        submitted = self.client.put(
+            f"/api/sales-orders/{response.get_json()['id']}",
+            json={"action": "submit"},
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.get_json())
 
         order = self.db_row(
             "SELECT order_status, order_exception_reason FROM sales_orders WHERE vin=?",
@@ -436,10 +478,15 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(order_response.status_code, 200, order_response.get_json())
+        submitted = self.client.put(
+            f"/api/sales-orders/{order_response.get_json()['id']}",
+            json={"action": "submit"},
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.get_json())
 
         order = self.db_row(
             """
-            SELECT car_type, vehicle_box_type, tail_plate, order_status, price_exception_reason,
+            SELECT car_type, vehicle_box_type, tail_plate, order_status, order_exception_reason,
                    customer_screenshot_path
             FROM sales_orders WHERE id=?
             """,
@@ -449,7 +496,7 @@ class SkuDocumentAlignmentTestCase(unittest.TestCase):
         self.assertEqual(order["vehicle_box_type"], "冷藏")
         self.assertEqual(order["tail_plate"], "有")
         self.assertEqual(order["order_status"], "待老板审批")
-        self.assertIn("指导月供 ¥3800.0", order["price_exception_reason"])
+        self.assertIn("指导月供 ¥3800.0", order["order_exception_reason"])
         self.assertEqual(
             order["customer_screenshot_path"],
             "/uploads/sku-first-payment.jpg,/uploads/sku-second-payment.pdf",

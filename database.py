@@ -360,7 +360,7 @@ def init_db():
         wechat_private_fee REAL DEFAULT 0,
         gifted_items TEXT,
         deposit_amount REAL DEFAULT 0,
-        order_status TEXT DEFAULT '待财务确认',
+        order_status TEXT DEFAULT '待提交',
         snapshot_guidance_price REAL DEFAULT 0,
         snapshot_lease_installment_price REAL DEFAULT 0,
         snapshot_sale_total_price REAL DEFAULT 0,
@@ -1680,6 +1680,34 @@ def init_db():
         except Exception:
             pass
 
+    # 8.25 报单状态基线：新意向单统一为“待提交”，老板审批统一为
+    # “待老板审批”。历史草稿不再自动过期，历史驳回单归入已作废。
+    c.execute("""
+        UPDATE sales_orders
+        SET order_status='待提交',
+            expires_at=NULL,
+            saved_at=COALESCE(saved_at, datetime('now','localtime'))
+        WHERE order_status='草稿'
+    """)
+    c.execute("""
+        UPDATE sales_orders
+        SET order_status='待老板审批'
+        WHERE order_status IN ('待价格特批', '待老板价格审批')
+    """)
+    c.execute("""
+        UPDATE sales_orders
+        SET order_status='已作废',
+            voided_at=COALESCE(voided_at, datetime('now','localtime')),
+            void_reason=COALESCE(NULLIF(void_reason, ''), '历史驳回单迁移'),
+            voided_by=COALESCE(NULLIF(voided_by, ''), '系统')
+        WHERE order_status IN ('价格特批驳回', '财务驳回', '已取消')
+    """)
+    if USE_MYSQL:
+        c.execute("""
+            ALTER TABLE sales_orders
+            MODIFY COLUMN order_status VARCHAR(191) DEFAULT '待提交'
+        """)
+
     # 历史退车单此前只把车辆状态改回在库/待维修，遗漏了成色变更。
     # 租赁车辆完成退车后再次入库一律按二手车管理；兼容旧库中的“已入库”状态。
     c.execute("""
@@ -1834,6 +1862,28 @@ def init_db():
 # ================================================================
 #  种子数据 — 仅在表为空时插入，幂等安全
 # ================================================================
+def migrate_plaintext_passwords(conn):
+    """D-04 安全基线：users 表明文密码迁移为 pbkdf2 哈希（幂等，已是哈希的跳过）。"""
+    from werkzeug.security import generate_password_hash
+    c = conn.cursor()
+    c.execute("SELECT id, password FROM users")
+    rows = c.fetchall()
+    changed = 0
+    for row in rows:
+        uid = row['id'] if isinstance(row, dict) else row[0]
+        pw = (row['password'] if isinstance(row, dict) else row[1]) or ''
+        if pw.startswith(('pbkdf2:', 'scrypt:')):
+            continue
+        c.execute(
+            "UPDATE users SET password=? WHERE id=?",
+            (generate_password_hash(pw, method='pbkdf2:sha256:260000'), uid),
+        )
+        changed += 1
+    if changed:
+        conn.commit()
+        print(f"Plaintext passwords migrated to hash: {changed} user(s).")
+
+
 def seed_data():
     conn = get_db()
     c = conn.cursor()
@@ -1853,21 +1903,22 @@ def seed_data():
     if created_users:
         conn.commit()
         print("Default users ensured.")
+    migrate_plaintext_passwords(conn)
     c.execute("UPDATE users SET is_active=0 WHERE username='legal'")
     conn.commit()
 
     role_pages = {
-        '老板': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'receiving_companies', 'reconciliation', 'risk', 'profit', 'settings'],
+        '老板': ['dashboard', 'guidance_board', 'orders', 'customer_library', 'assets', 'completion_history', 'approvals', 'bills', 'receiving_companies', 'reconciliation', 'risk', 'profit', 'settings'],
         '运营': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'reconciliation', 'risk', 'invoice'],
-        '财务': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'bills', 'receiving_companies', 'reconciliation', 'profit'],
+        '财务': ['dashboard', 'guidance_board', 'orders', 'customer_library', 'assets', 'completion_history', 'approvals', 'bills', 'receiving_companies', 'reconciliation', 'profit'],
         '车管': ['dashboard', 'guidance_board', 'assets', 'completion_history', 'approvals'],
-        '销售': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'risk'],
+        '销售': ['dashboard', 'guidance_board', 'orders', 'customer_library', 'assets', 'completion_history', 'approvals', 'risk'],
     }
     role_actions = {
         '老板': ['*'],
-        '运营': ['view_contracts', 'view_overdue', 'lock_vehicle', 'execute_lock', 'confirm_repayment', 'initiate_return', 'view_orders'],
+        '运营': ['view_contracts', 'view_overdue', 'lock_vehicle', 'execute_lock', 'confirm_repayment', 'initiate_return', 'view_orders', 'add_vehicle'],
         '财务': ['view_contracts', 'confirm_repayment', 'confirm_factory', 'view_bills', 'view_profit', 'upload_receipt', 'collect_payment', 'verify_return', 'upload_initial_receipt', 'activate_order'],
-        '车管': ['add_vehicle', 'update_vehicle', 'return_inspect', 'deliver_vehicle'],
+        '车管': ['update_vehicle', 'return_inspect', 'deliver_vehicle'],
         '销售': ['create_contract', 'view_contracts', 'upload_screenshot', 'view_overdue', 'initiate_return', 'request_lock', 'initiate_initial_payment', 'create_order'],
     }
     hidden_fields = {
@@ -1925,6 +1976,8 @@ def seed_data():
     for role, actions in role_actions.items():
         for action in actions:
             c.execute("INSERT OR IGNORE INTO role_actions (role, action_key) VALUES (?, ?)", (role, action))
+    # 车辆入库权限已从车管迁移到运营，清理历史库中的旧授权，避免旧权限缓存覆盖矩阵。
+    c.execute("DELETE FROM role_actions WHERE action_key='add_vehicle' AND role NOT IN ('运营', '老板')")
     for role, resources in hidden_fields.items():
         for resource, fields in resources.items():
             for field in fields:
