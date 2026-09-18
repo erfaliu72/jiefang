@@ -134,6 +134,18 @@ class Plan20260916ApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         return response.get_json()
 
+    def confirm_intent_deposit(self, order_id, serial="INTENT20260916001", username="fin", receipt_path=""):
+        self.login(username)
+        payload = {"serial": serial}
+        if receipt_path:
+            payload["receipt_path"] = receipt_path
+        response = self.client.post(
+            f"/api/sales-orders/{order_id}/confirm-intent-deposit",
+            json=payload,
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return response.get_json()
+
     def create_active_contract(self, end_date="2026-12-31", created_by="周销售",
                                deposit=2000, collected=2000, rent=3000):
         vehicle_id, _ = self.create_vehicle("续租测试车型", "租赁中")
@@ -448,6 +460,298 @@ class Plan20260916ApiTestCase(unittest.TestCase):
         self.assertEqual(delivered_cancel.status_code, 400, delivered_cancel.get_json())
         self.assertIn("退车流程", delivered_cancel.get_json()["message"])
 
+    def test_api04b_cancel_intent_only_order_refunds_full_intent_deposit(self):
+        """仅支付意向定金（未补押金/首付款）的意向单取消：全额退意向定金。"""
+        car_type = "API04B意向定金车型"
+        self.save_lease_guidance(car_type)
+        vehicle_id, vin = self.create_vehicle(car_type)
+        order_id = self.create_order(
+            vin, car_type,
+            intent_deposit_amount=1500,
+            deposit_amount=8000,
+            first_payment_received_amount=0,
+            first_payment_shortage_reason="客户仅付意向定金，首付未补",
+            first_payment_promised_date="2026-09-30",
+        )
+        self.confirm_intent_deposit(order_id)
+        self.submit_order(order_id)
+
+        self.login("sales")
+        created = self.client.post(
+            "/api/order-refunds",
+            json={"sales_order_id": order_id, "reason": "客户仅付定金后放弃"},
+        )
+        self.assertEqual(created.status_code, 200, created.get_json())
+        refund_id = created.get_json()["id"]
+        self.assertEqual(
+            self.db_value("SELECT refund_amount FROM order_refunds WHERE id=?", (refund_id,)),
+            1500,
+            "仅意向阶段的取消应退全额意向定金，而不是押金/首付款",
+        )
+
+        self.login("boss")
+        approved = self.client.post(f"/api/order-refunds/{refund_id}/approve", json={})
+        self.assertEqual(approved.status_code, 200, approved.get_json())
+
+        self.login("fin")
+        wrong_amount = self.client.post(
+            f"/api/order-refunds/{refund_id}/pay",
+            json={"refund_serial": "REFUND20260916002", "refund_paid_amount": 8000},
+        )
+        self.assertEqual(wrong_amount.status_code, 400, wrong_amount.get_json())
+        paid = self.client.post(
+            f"/api/order-refunds/{refund_id}/pay",
+            json={"refund_serial": "REFUND20260916002", "refund_paid_amount": 1500},
+        )
+        self.assertEqual(paid.status_code, 200, paid.get_json())
+        self.assertEqual(
+            self.db_value("SELECT order_status FROM sales_orders WHERE id=?", (order_id,)),
+            "已作废",
+        )
+        self.assertEqual(
+            self.db_value("SELECT status FROM vehicles WHERE id=?", (vehicle_id,)),
+            "在库",
+        )
+
+        # 已补款（实收>0）的订单维持押金/首付款口径，不受意向定金影响
+        vehicle2_id, vin2 = self.create_vehicle(car_type)
+        order2_id = self.create_order(
+            vin2, car_type,
+            customer_phone="13400000000",
+            intent_deposit_amount=1500,
+            deposit_amount=2000,
+            first_payment_received_amount=5000,
+        )
+        self.confirm_intent_deposit(order2_id, serial="INTENT20260916002")
+        self.submit_order(order2_id)
+        self.login("sales")
+        created2 = self.client.post(
+            "/api/order-refunds",
+            json={"sales_order_id": order2_id, "reason": "已补款后取消"},
+        )
+        self.assertEqual(created2.status_code, 200, created2.get_json())
+        self.assertEqual(
+            self.db_value(
+                "SELECT refund_amount FROM order_refunds WHERE id=?",
+                (created2.get_json()["id"],),
+            ),
+            2000,
+            "已补款订单应退金额仍按押金/首付款口径",
+        )
+
+    def test_api04c_intent_deposit_finance_confirmation_gating(self):
+        """意向定金财务确认闸口：未确认不能提交/不能取消；销售无权确认；确认后放行；改金额旧确认作废。"""
+        car_type = "API04C定金确认车型"
+        self.save_lease_guidance(car_type)
+        vehicle_id, vin = self.create_vehicle(car_type)
+        order_id = self.create_order(
+            vin, car_type,
+            intent_deposit_amount=1200,
+            deposit_amount=8000,
+            first_payment_received_amount=0,
+            first_payment_shortage_reason="客户仅付意向定金，首付未补",
+            first_payment_promised_date="2026-09-30",
+        )
+        self.login("fin")
+        finance_orders = self.client.get("/api/sales-orders")
+        self.assertEqual(finance_orders.status_code, 200, finance_orders.get_json())
+        finance_order = next(row for row in finance_orders.get_json() if row["id"] == order_id)
+        self.assertEqual(
+            finance_order["customer_screenshot_path"],
+            "/uploads/customer-first-payment.jpg",
+            "财务端列表必须返回销售上传的客户定金支付凭证",
+        )
+
+        # 未确认：提交报单被拦
+        self.login("sales")
+        blocked_submit = self.client.put(f"/api/sales-orders/{order_id}", json={"action": "submit"})
+        self.assertEqual(blocked_submit.status_code, 400, blocked_submit.get_json())
+        self.assertIn("尚未财务确认入账", blocked_submit.get_json()["message"])
+
+        # 未确认：发起取消退款被拦
+        blocked_cancel = self.client.post(
+            "/api/order-refunds",
+            json={"sales_order_id": order_id, "reason": "未确认就取消"},
+        )
+        self.assertEqual(blocked_cancel.status_code, 400, blocked_cancel.get_json())
+        self.assertIn("尚未财务确认入账", blocked_cancel.get_json()["message"])
+
+        # 即使已收到首付款，只要存在未核对的意向定金，也不能进入退款流程
+        vehicle2_id, vin2 = self.create_vehicle(car_type)
+        paid_order_id = self.create_order(
+            vin2, car_type,
+            customer_phone="13500000000",
+            intent_deposit_amount=1200,
+            deposit_amount=2000,
+            first_payment_received_amount=5000,
+        )
+        self.login("sales")
+        blocked_paid_cancel = self.client.post(
+            "/api/order-refunds",
+            json={"sales_order_id": paid_order_id, "reason": "已补首付但定金未核对"},
+        )
+        self.assertEqual(blocked_paid_cancel.status_code, 400, blocked_paid_cancel.get_json())
+        self.assertIn("尚未财务确认入账", blocked_paid_cancel.get_json()["message"])
+
+        # 销售无权确认定金（403）
+        denied = self.client.post(f"/api/sales-orders/{order_id}/confirm-intent-deposit", json={})
+        self.assertEqual(denied.status_code, 403, denied.get_json())
+
+        # 财务必须有销售支付凭证和公司到账流水号才能完成核对
+        self.login("fin")
+        missing_serial = self.client.post(
+            f"/api/sales-orders/{order_id}/confirm-intent-deposit",
+            json={},
+        )
+        self.assertEqual(missing_serial.status_code, 400, missing_serial.get_json())
+        self.assertIn("流水号", missing_serial.get_json()["message"])
+
+        self.db_exec(
+            "UPDATE sales_orders SET customer_screenshot_path=NULL WHERE id=?",
+            (order_id,),
+        )
+        missing_customer_proof = self.client.post(
+            f"/api/sales-orders/{order_id}/confirm-intent-deposit",
+            json={"serial": "BANK20260916XYZ"},
+        )
+        self.assertEqual(missing_customer_proof.status_code, 400, missing_customer_proof.get_json())
+        self.assertIn("客户定金支付凭证", missing_customer_proof.get_json()["message"])
+        self.db_exec(
+            "UPDATE sales_orders SET customer_screenshot_path=? WHERE id=?",
+            ("/uploads/customer-first-payment.jpg", order_id),
+        )
+
+        # 财务确认入账（带流水号 + 公司回单）
+        self.confirm_intent_deposit(
+            order_id,
+            serial="BANK20260916XYZ",
+            receipt_path="/uploads/company-deposit-receipt.jpg",
+        )
+        self.assertEqual(
+            self.db_value("SELECT intent_deposit_serial FROM sales_orders WHERE id=?", (order_id,)),
+            "BANK20260916XYZ",
+        )
+        self.assertEqual(
+            self.db_value("SELECT intent_deposit_receipt_path FROM sales_orders WHERE id=?", (order_id,)),
+            "/uploads/company-deposit-receipt.jpg",
+        )
+        self.assertEqual(
+            self.db_value("SELECT intent_deposit_confirmed_by FROM sales_orders WHERE id=?", (order_id,)),
+            self.db_value("SELECT display_name FROM users WHERE username='fin'"),
+        )
+
+        # 重复确认被拦
+        self.login("fin")
+        dup = self.client.post(f"/api/sales-orders/{order_id}/confirm-intent-deposit", json={})
+        self.assertEqual(dup.status_code, 400, dup.get_json())
+
+        # 同一请求内修改客户支付凭证并提交时，必须先作废旧确认，不能借用旧确认放行
+        self.login("sales")
+        blocked_changed_submit = self.client.put(
+            f"/api/sales-orders/{order_id}",
+            json={
+                "customer_screenshot_path": "/uploads/customer-first-payment-v2.jpg",
+                "action": "submit",
+            },
+        )
+        self.assertEqual(blocked_changed_submit.status_code, 400, blocked_changed_submit.get_json())
+        self.assertIn("尚未财务确认入账", blocked_changed_submit.get_json()["message"])
+
+        # 确认后改动客户支付凭证 → 旧确认作废，提交再次被拦
+        edited_proof = self.client.put(
+            f"/api/sales-orders/{order_id}",
+            json={"customer_screenshot_path": "/uploads/customer-first-payment-v2.jpg"},
+        )
+        self.assertEqual(edited_proof.status_code, 200, edited_proof.get_json())
+        self.assertIsNone(
+            self.db_value("SELECT intent_deposit_confirmed_at FROM sales_orders WHERE id=?", (order_id,))
+        )
+        blocked_after_proof = self.client.put(f"/api/sales-orders/{order_id}", json={"action": "submit"})
+        self.assertEqual(blocked_after_proof.status_code, 400, blocked_after_proof.get_json())
+
+        # 再次确认后改动意向定金金额 → 旧确认再次作废
+        self.confirm_intent_deposit(order_id, serial="BANK20260916YYY")
+        self.login("sales")
+        edited = self.client.put(f"/api/sales-orders/{order_id}", json={"intent_deposit_amount": 2000})
+        self.assertEqual(edited.status_code, 200, edited.get_json())
+        self.assertIsNone(
+            self.db_value("SELECT intent_deposit_confirmed_at FROM sales_orders WHERE id=?", (order_id,))
+        )
+        blocked_again = self.client.put(f"/api/sales-orders/{order_id}", json={"action": "submit"})
+        self.assertEqual(blocked_again.status_code, 400, blocked_again.get_json())
+
+        # 重新确认后提交放行
+        self.confirm_intent_deposit(order_id, serial="BANK20260916ZZZ")
+        self.submit_order(order_id)
+
+        # 确认后取消退款放行（仅意向阶段，应退=意向定金新金额 2000）
+        self.login("sales")
+        created = self.client.post(
+            "/api/order-refunds",
+            json={"sales_order_id": order_id, "reason": "确认后正常取消"},
+        )
+        self.assertEqual(created.status_code, 200, created.get_json())
+        self.assertEqual(
+            self.db_value(
+                "SELECT refund_amount FROM order_refunds WHERE id=?",
+                (created.get_json()["id"],),
+            ),
+            2000,
+        )
+
+    def test_api04d_hidden_legacy_contract_cannot_initiate_return(self):
+        """历史合同未匹配销售时不可见且不能退车；补齐销售归属后恢复正常。"""
+        vehicle_id, contract_id = self.create_active_contract(created_by="历史导入")
+        self.db_exec(
+            "UPDATE contracts SET contract_origin='legacy', legacy_visibility_status='已启用' WHERE id=?",
+            (contract_id,),
+        )
+
+        self.login("sales")
+        contracts = self.client.get("/api/contracts").get_json()
+        self.assertNotIn(contract_id, {row["id"] for row in contracts})
+
+        blocked = self.client.post(
+            "/api/return-inspections",
+            json={"vehicle_id": vehicle_id, "return_reason": "历史合同退车"},
+        )
+        self.assertEqual(blocked.status_code, 403, blocked.get_json())
+        self.assertIn("销售归属", blocked.get_json()["message"])
+        self.assertEqual(
+            self.db_value("SELECT COUNT(*) FROM return_inspections WHERE vehicle_id=?", (vehicle_id,)),
+            0,
+        )
+        self.assertEqual(
+            self.db_value("SELECT status FROM vehicles WHERE id=?", (vehicle_id,)),
+            "租赁中",
+        )
+
+        sales_user_id = self.db_value("SELECT id FROM users WHERE username='sales'")
+        self.db_exec(
+            """
+            INSERT INTO contract_role_assignments
+                (contract_id, assignment_role, user_id, source_name, status, assigned_by)
+            VALUES (?, 'signing_sales', ?, '周销售', '启用', '测试')
+            """,
+            (contract_id, sales_user_id),
+        )
+
+        visible_contracts = self.client.get("/api/contracts").get_json()
+        self.assertIn(contract_id, {row["id"] for row in visible_contracts})
+        created = self.client.post(
+            "/api/return-inspections",
+            json={"vehicle_id": vehicle_id, "return_reason": "历史合同退车"},
+        )
+        self.assertEqual(created.status_code, 200, created.get_json())
+        self.assertEqual(
+            self.db_value("SELECT contract_id FROM return_inspections WHERE id=?", (created.get_json()["id"],)),
+            contract_id,
+        )
+        self.assertEqual(
+            self.db_value("SELECT status FROM vehicles WHERE id=?", (vehicle_id,)),
+            "退车中",
+        )
+
     # ---------------- API-05 续租全规则 ----------------
     def test_api05_renewal_guard_rules(self):
         _, contract_id = self.create_active_contract(end_date="2026-09-15")
@@ -687,6 +991,215 @@ class Plan20260916ApiTestCase(unittest.TestCase):
         self.assertEqual(mid["days_in_month"], 31)
         self.assertEqual(mid["days_used"], 15)
 
+    # ---------------- 对账单合同级详情 ----------------
+    def test_reconciliation_contract_detail_fields_and_scope(self):
+        vehicle_id, contract_id = self.create_active_contract(
+            end_date="2026-10-31", created_by="周销售"
+        )
+        self.db_exec(
+            """
+            UPDATE contracts
+            SET company='陕西解放公司', rental_method='经营租赁',
+                start_date='2026-08-01', end_date='2026-10-31'
+            WHERE id=?
+            """,
+            (contract_id,),
+        )
+        self.db_exec(
+            "UPDATE vehicles SET company='车辆所属公司', plate_number='陕A12345' WHERE id=?",
+            (vehicle_id,),
+        )
+        conn = database.get_db()
+        try:
+            conn.executemany(
+                """
+                INSERT INTO repayments
+                    (contract_id, period, due_date, amount, paid_amount, status,
+                     paid_at, screenshot_path, bank_serial, reported_amount,
+                     verified_by, verified_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        contract_id, 1, "2026-08-01", 3000, 1000, "部分核销",
+                        "2026-08-03", "/uploads/customer-payment-1.jpg",
+                        "BANK-DETAIL-001", 1000, "财务甲", "2026-08-03 10:00:00",
+                    ),
+                    (
+                        contract_id, 2, "2026-09-01", 3000, 3000, "已还款",
+                        "2026-09-01", "/uploads/customer-payment-2.jpg",
+                        "BANK-DETAIL-002", 3000, "财务甲", "2026-09-01 10:00:00",
+                    ),
+                    (
+                        contract_id, 3, "2026-10-01", 3000, 0, "待还款",
+                        "", "", "", 0, "", "",
+                    ),
+                ],
+            )
+            repayment_id = conn.execute(
+                "SELECT id FROM repayments WHERE contract_id=? AND period=1",
+                (contract_id,),
+            ).fetchone()[0]
+            conn.executemany(
+                """
+                INSERT INTO reconciliation_allocations
+                    (repayment_id, contract_id, allocation_type, allocated_amount, created_by)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (repayment_id, contract_id, "rent_waiver", 100, "财务甲"),
+                    (repayment_id, contract_id, "bad_debt", 200, "财务甲"),
+                    (repayment_id, contract_id, "late_fee_waiver", 30, "财务甲"),
+                ],
+            )
+            conn.executemany(
+                """
+                INSERT INTO late_fee_ledger
+                    (repayment_id, contract_id, period, accrued_date,
+                     outstanding, daily_amount, cumulative_amount, waived, waived_amount)
+                VALUES (?, ?, 1, ?, 2000, 1.5, ?, 0, 0)
+                """,
+                [
+                    (repayment_id, contract_id, "2026-08-02", 1.5),
+                    (repayment_id, contract_id, "2026-08-03", 3.0),
+                ],
+            )
+            conn.execute(
+                """
+                INSERT INTO invoice_requests
+                    (contract_id, period, amount, invoice_no, invoice_date,
+                     status, applied_by, processed_by)
+                VALUES (?, 2, 3000, 'INV-DETAIL-002', '2026-09-05',
+                        '已开票', '运营甲', '财务甲')
+                """,
+                (contract_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login("sales")
+        response = self.client.get(f"/api/reconciliation/{repayment_id}/detail")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["summary"]["company"], "车辆所属公司")
+        self.assertEqual(payload["summary"]["customer_name"], "续租测试客户")
+        self.assertEqual(payload["summary"]["plate_number"], "陕A12345")
+        self.assertEqual(payload["summary"]["rental_method"], "经营租赁")
+        self.assertEqual(payload["summary"]["sales_advisor"], "周销售")
+        self.assertEqual([item["period"] for item in payload["periods"]], [1, 2, 3])
+
+        first, second, third = payload["periods"]
+        self.assertEqual(first["period_start"], "2026-08-01")
+        self.assertEqual(first["period_end"], "2026-08-31")
+        self.assertEqual(first["paid_at"], "2026-08-03")
+        self.assertEqual(first["waiver_amount"], 100)
+        self.assertEqual(first["bad_debt_amount"], 200)
+        self.assertEqual(first["overdue_amount"], 2000)
+        self.assertGreater(first["overdue_days"], 0)
+        self.assertEqual(first["breach_days"], 2)
+        self.assertEqual(first["breach_rate"], "0.05%")
+        self.assertEqual(first["late_fee_amount"], 3)
+        self.assertEqual(first["late_fee_waived_amount"], 30)
+        self.assertEqual(first["screenshot_path"], "/uploads/customer-payment-1.jpg")
+        self.assertEqual(second["invoice_date"], "2026-09-05")
+        self.assertEqual(second["invoice_no"], "INV-DETAIL-002")
+        self.assertEqual(second["paid_amount"], 3000)
+        self.assertEqual(second["overdue_amount"], 0)
+        self.assertEqual(third["period_start"], "2026-10-01")
+        self.assertEqual(third["period_end"], "2026-10-31")
+
+        self.create_second_sales()
+        self.login("sales2")
+        denied = self.client.get(f"/api/reconciliation/{repayment_id}/detail")
+        self.assertEqual(denied.status_code, 403, denied.get_json())
+
+    def test_reconciliation_detail_bad_debt_split_from_finance_execution(self):
+        vehicle_id, contract_id = self.create_active_contract(
+            end_date="2026-12-31", created_by="周销售"
+        )
+        self.db_exec(
+            "UPDATE vehicles SET company='车辆所属公司' WHERE id=?",
+            (vehicle_id,),
+        )
+        conn = database.get_db()
+        try:
+            conn.execute(
+                """
+                INSERT INTO repayments
+                    (contract_id, period, due_date, amount, paid_amount, status)
+                VALUES (?, 1, '2026-10-01', 3000, 0, '待还款')
+                """,
+                (contract_id,),
+            )
+            repayment_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                """
+                INSERT INTO waivers
+                    (contract_id, waiver_kind, target_period_list, waive_amount,
+                     reason, attachment_path, status, sales_applied_by)
+                VALUES (?, 'rent', 'all', 300, '历史欠款核销',
+                        '/uploads/customer-payment.jpg', '待审批', '周销售')
+                """,
+                (contract_id,),
+            )
+            waiver_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login("boss")
+        approved = self.client.post(
+            f"/api/waivers/{waiver_id}/approve",
+            json={"decision": "approve", "comment": "同意"},
+        )
+        self.assertEqual(approved.status_code, 200, approved.get_json())
+
+        self.login("ops")
+        operations = self.client.post(
+            f"/api/waivers/{waiver_id}/operations",
+            json={
+                "approved_waive_amount": 100,
+                "bad_debt_amount": 200,
+                "carryover_start_period": 1,
+            },
+        )
+        self.assertEqual(operations.status_code, 200, operations.get_json())
+
+        self.login("fin")
+        executed = self.client.post(f"/api/waivers/{waiver_id}/execute", json={})
+        self.assertEqual(executed.status_code, 200, executed.get_json())
+        self.assertEqual(
+            self.db_value(
+                """
+                SELECT ROUND(SUM(allocated_amount), 2)
+                FROM reconciliation_allocations
+                WHERE repayment_id=? AND allocation_type='rent_waiver'
+                """,
+                (repayment_id,),
+            ),
+            100,
+        )
+        self.assertEqual(
+            self.db_value(
+                """
+                SELECT ROUND(SUM(allocated_amount), 2)
+                FROM reconciliation_allocations
+                WHERE repayment_id=? AND allocation_type='bad_debt'
+                """,
+                (repayment_id,),
+            ),
+            200,
+        )
+
+        detail = self.client.get(f"/api/reconciliation/{repayment_id}/detail")
+        self.assertEqual(detail.status_code, 200, detail.get_json())
+        period = detail.get_json()["periods"][0]
+        self.assertEqual(period["waiver_amount"], 100)
+        self.assertEqual(period["bad_debt_amount"], 200)
+        self.assertEqual(period["amount"], 2700)
+
     # ---------------- API-11 发票作废/红冲 ----------------
     def test_api11_invoice_void_red_and_reject(self):
         _, contract_id = self.create_active_contract()
@@ -768,6 +1281,64 @@ class Plan20260916ApiTestCase(unittest.TestCase):
             json={"reason": "待审批尝试作废"},
         )
         self.assertEqual(pending_void.status_code, 400, pending_void.get_json())
+
+    def test_invoice_records_list_role_scope_and_status_filter(self):
+        self.create_second_sales()
+        _, own_contract_id = self.create_active_contract(created_by="周销售")
+        _, other_contract_id = self.create_active_contract(created_by="李销售")
+        self.db_exec(
+            """
+            INSERT INTO invoice_requests
+                (contract_id, period, amount, receiving_company, invoice_entity_name,
+                 invoice_no, invoice_date, status, applied_by, processed_by)
+            VALUES
+                (?, 1, 3000, '金聚源', '自有客户公司', 'INV-OWN-001',
+                 '2026-09-16', '已开票', '李运营', '张财务'),
+                (?, 1, 5000, '金聚源', '其他客户公司', 'INV-OTHER-001',
+                 '2026-09-17', '已开票', '李运营', '张财务')
+            """,
+            (own_contract_id, other_contract_id),
+        )
+        self.db_exec(
+            """
+            INSERT INTO invoice_requests
+                (contract_id, period, amount, invoice_entity_name, status, applied_by)
+            VALUES (?, 1, 9000, '待开票公司', '待开票', '李运营')
+            """,
+            (own_contract_id,),
+        )
+
+        anonymous = self.client.get("/api/invoice-records")
+        self.assertEqual(anonymous.status_code, 401, anonymous.get_json())
+
+        self.login("fin")
+        finance = self.client.get("/api/invoice-records")
+        self.assertEqual(finance.status_code, 200, finance.get_json())
+        self.assertEqual(len(finance.get_json()), 2)
+
+        self.login("ops")
+        operations = self.client.get("/api/invoice-records")
+        self.assertEqual(operations.status_code, 200, operations.get_json())
+        self.assertEqual(
+            {row["invoice_no"] for row in operations.get_json()},
+            {"INV-OWN-001", "INV-OTHER-001"},
+        )
+
+        self.login("boss")
+        boss = self.client.get("/api/invoice-records")
+        self.assertEqual(boss.status_code, 200, boss.get_json())
+        self.assertEqual(len(boss.get_json()), 2)
+
+        self.login("sales")
+        own_records = self.client.get("/api/invoice-records")
+        self.assertEqual(own_records.status_code, 200, own_records.get_json())
+        self.assertEqual([row["invoice_no"] for row in own_records.get_json()], ["INV-OWN-001"])
+        self.assertEqual(own_records.get_json()[0]["processed_by"], "张财务")
+
+        self.login("sales2")
+        other_records = self.client.get("/api/invoice-records")
+        self.assertEqual(other_records.status_code, 200, other_records.get_json())
+        self.assertEqual([row["invoice_no"] for row in other_records.get_json()], ["INV-OTHER-001"])
 
     # ---------------- API-12 Excel 导入入库 ----------------
     def _build_vehicle_import_workbook(self, vin):

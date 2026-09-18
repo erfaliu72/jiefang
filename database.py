@@ -1595,6 +1595,11 @@ def init_db():
         ("receivables", "verified_at", "TEXT"),
         # === 20260804 大改版：首付前移 / 合并审批 / 金融方案 / 驳回退款 ===
         ("sales_orders", "customer_screenshot_path", "TEXT"),
+        ("sales_orders", "intent_deposit_amount", "REAL DEFAULT 0"),
+        ("sales_orders", "intent_deposit_confirmed_by", "TEXT"),
+        ("sales_orders", "intent_deposit_confirmed_at", "TEXT"),
+        ("sales_orders", "intent_deposit_serial", "TEXT"),
+        ("sales_orders", "intent_deposit_receipt_path", "TEXT"),
         ("sales_orders", "first_payment_received_amount", "REAL DEFAULT 0"),
         ("sales_orders", "first_payment_shortage_amount", "REAL DEFAULT 0"),
         ("sales_orders", "first_payment_shortage_reason", "TEXT"),
@@ -1733,8 +1738,35 @@ def init_db():
               FROM return_inspections
               WHERE vehicle_id IS NOT NULL
                 AND needs_repair=1
-                AND status NOT IN ('已完成', '已入库')
+              AND status NOT IN ('已完成', '已入库')
           )
+    """)
+
+    # 历史已完结退车单若车辆仍停在待维修/维修中/整备中，补建整备记录，
+    # 使车管端可以继续完成维修与整备；已回库或已重新出租的历史车辆不追溯。
+    c.execute("""
+        INSERT INTO refurbishment_records
+            (vehicle_id, return_inspection_id, status, source_status,
+             available_for, condition, repair_reason, created_by)
+        SELECT ri.vehicle_id,
+               MAX(ri.id),
+               '待整备',
+               v.status,
+               '可租/可售',
+               '二手车',
+               COALESCE(NULLIF(MAX(ri.repair_reason), ''), '历史退车待整备'),
+               '历史数据补录'
+        FROM return_inspections ri
+        JOIN vehicles v ON v.id=ri.vehicle_id
+        WHERE ri.vehicle_id IS NOT NULL
+          AND ri.status IN ('已完成', '已入库')
+          AND v.status IN ('待维修', '维修中', '整备中')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM refurbishment_records fr
+              WHERE fr.vehicle_id=ri.vehicle_id
+          )
+        GROUP BY ri.vehicle_id, v.status
     """)
 
     # 指导价 upsert 以车型和成色为自然键。旧库可能有重复/空成色数据，先归一化并去重。
@@ -1908,11 +1940,11 @@ def seed_data():
     conn.commit()
 
     role_pages = {
-        '老板': ['dashboard', 'guidance_board', 'orders', 'customer_library', 'assets', 'completion_history', 'approvals', 'bills', 'receiving_companies', 'reconciliation', 'risk', 'profit', 'settings'],
-        '运营': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'reconciliation', 'risk', 'invoice'],
-        '财务': ['dashboard', 'guidance_board', 'orders', 'customer_library', 'assets', 'completion_history', 'approvals', 'bills', 'receiving_companies', 'reconciliation', 'profit'],
-        '车管': ['dashboard', 'guidance_board', 'assets', 'completion_history', 'approvals'],
-        '销售': ['dashboard', 'guidance_board', 'orders', 'customer_library', 'assets', 'completion_history', 'approvals', 'risk'],
+        '老板': ['dashboard', 'guidance_board', 'orders', 'customer_library', 'assets', 'completion_history', 'approvals', 'bills', 'waivers', 'receiving_companies', 'reconciliation', 'invoice_records', 'risk', 'profit', 'settings'],
+        '运营': ['dashboard', 'guidance_board', 'orders', 'assets', 'completion_history', 'approvals', 'waivers', 'reconciliation', 'risk', 'invoice', 'invoice_records'],
+        '财务': ['dashboard', 'guidance_board', 'orders', 'customer_library', 'assets', 'completion_history', 'approvals', 'bills', 'waivers', 'receiving_companies', 'reconciliation', 'invoice_records', 'profit'],
+        '车管': ['dashboard', 'guidance_board', 'assets', 'refurbishment', 'completion_history', 'approvals'],
+        '销售': ['dashboard', 'guidance_board', 'orders', 'customer_library', 'assets', 'completion_history', 'approvals', 'waivers', 'invoice_records', 'risk'],
     }
     role_actions = {
         '老板': ['*'],

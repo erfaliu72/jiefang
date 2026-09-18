@@ -352,6 +352,17 @@
                                 </div>
                             </div>
                         </div>
+                        <el-alert
+                            v-if="['财务','老板'].includes(currentUser.role) && salesOrders.some(row => canConfirmIntentDeposit(row, currentUser.role))"
+                            type="warning"
+                            :closable="false"
+                            show-icon
+                            style="margin-top:16px"
+                        >
+                            <template #title>
+                                待核对意向定金 {{ salesOrders.filter(row => canConfirmIntentDeposit(row, currentUser.role)).length }} 笔，请在“收款金额”列点击“立即核对”
+                            </template>
+                        </el-alert>
                         <div class="card" style="margin-top:16px">
                         <div class="card-title-row">
                             <div class="card-title">销售报单台账</div>
@@ -418,9 +429,20 @@
                                 </el-table-column>
                                 <el-table-column label="收款金额" width="150">
                                     <template #default="s">
-                                        <div style="display:flex;align-items:center;gap:6px">
-                                            <span class="status-badge" :class="paymentCategoryClass(s.row.payment_category || defaultPaymentCategory(s.row.sales_mode))">{{ s.row.payment_category || defaultPaymentCategory(s.row.sales_mode) }}</span>
-                                            <span class="num text-blue">¥{{ numberFormat(s.row.deposit_amount || 0) }}</span>
+                                        <div style="display:flex;flex-direction:column;gap:2px">
+                                            <div style="display:flex;align-items:center;gap:6px">
+                                                <span class="status-badge" :class="paymentCategoryClass(s.row.payment_category || defaultPaymentCategory(s.row.sales_mode))">{{ s.row.payment_category || defaultPaymentCategory(s.row.sales_mode) }}</span>
+                                                <span class="num text-blue">¥{{ numberFormat(s.row.deposit_amount || 0) }}</span>
+                                            </div>
+                                            <span v-if="Number(s.row.intent_deposit_amount || 0) > 0" style="font-size:12px;color:#b45309;display:flex;align-items:center;flex-wrap:wrap;gap:6px">
+                                                意向定金 ¥{{ numberFormat(s.row.intent_deposit_amount) }}
+                                                <el-tooltip v-if="s.row.intent_deposit_confirmed_at" :content="`核对人：${s.row.intent_deposit_confirmed_by || '-'}，流水号：${s.row.intent_deposit_serial || '-'}`">
+                                                    <el-tag type="success" size="small" effect="plain">已财务核对</el-tag>
+                                                </el-tooltip>
+                                                <el-tag v-else type="warning" size="small" effect="plain">待财务确认</el-tag>
+                                                <el-button v-if="canConfirmIntentDeposit(s.row, currentUser.role)" type="success" size="small" plain round @click="openIntentDepositDialog(s.row)">立即核对</el-button>
+                                                <a v-if="s.row.intent_deposit_receipt_path" :href="s.row.intent_deposit_receipt_path" target="_blank" style="color:#2563eb">回单</a>
+                                            </span>
                                         </div>
                                     </template>
                                 </el-table-column>
@@ -448,6 +470,7 @@
                                     <template #default="s">
                                         <el-button v-if="currentUser.role==='销售' && s.row.order_status==='待提交'" type="primary" size="small" plain round @click="editSalesOrderDraft(s.row)">编辑</el-button>
                                         <el-button v-if="currentUser.role==='销售' && s.row.order_status==='待提交'" type="danger" size="small" plain round @click="deleteSalesOrderDraft(s.row)">删除</el-button>
+                                        <el-button v-if="currentUser.role==='销售' && ['待提交','待老板审批','待财务确认'].includes(s.row.order_status) && !s.row.refund_id" type="danger" size="small" plain round @click="initiateCancelOrder(s.row)">取消订单</el-button>
                                         <el-button v-if="currentUser.role==='销售' && s.row.order_status==='已作废'" type="warning" size="small" plain round @click="copySalesOrderDraft(s.row)">复制报单</el-button>
                                         <el-button v-if="canReturnFromOrder(s.row)" type="success" size="small" round @click="initiateReturnFromOrder(s.row)">发起退车</el-button>
                                         <el-button v-if="canRenewFromOrder(s.row)" type="warning" size="small" round @click="openRenewalDialog(s.row)">发起续租</el-button>
@@ -827,6 +850,9 @@
                                 <el-table-column label="合同状态" width="100" v-if="colVisible('contract_status')">
                                     <template #default="s">
                                         <span v-if="s.row.contract_status" class="status-badge" :class="{'执行中':'badge-blue','已结清':'badge-green','逾期中':'badge-red'}[s.row.contract_status]||'badge-gray'">{{ s.row.contract_status }}</span>
+                                        <el-tooltip v-else-if="['租赁中', '经营租赁'].includes(s.row.vehicle_status)" content="车辆已出库租赁，但当前账号没有可见的有效合同。请联系运营核对合同及销售归属。">
+                                            <span class="status-badge badge-orange">合同未分配</span>
+                                        </el-tooltip>
                                         <span v-else style="color:#9ca3af">-</span>
                                     </template>
                                 </el-table-column>
@@ -928,8 +954,8 @@
                         <el-button v-if="!s.row.is_deleted && canInitiateVehicleOrder(s.row)" type="warning" size="small" plain round @click="openSalesOrderFromVehicle(s.row)">发起报单</el-button>
                         <el-button v-if="!s.row.is_deleted && currentUser.role==='运营' && s.row.contract_type==='以租代售'" type="success" size="small" plain round @click="openTransferDialog(s.row)">过户</el-button>
                         <el-button v-if="!s.row.is_deleted && canInitiateVehicleReturn(s.row)" type="success" size="small" round @click="openReturnForm(s.row)">发起退车</el-button>
-                        <el-button v-if="!s.row.is_deleted && currentUser.role==='运营' && s.row.status==='待维修'" type="warning" size="small" plain round @click="startRepair(s.row)">开始维修</el-button>
-                        <el-button v-if="!s.row.is_deleted && currentUser.role==='运营' && ['待维修','维修中'].includes(s.row.status)" type="success" size="small" round @click="openRepairCompleteDialog(s.row)">维修完成</el-button>
+                        <el-button v-if="!s.row.is_deleted && currentUser.role==='车管' && s.row.status==='待维修'" type="warning" size="small" plain round @click="startRepair(s.row)">开始维修</el-button>
+                        <el-button v-if="!s.row.is_deleted && currentUser.role==='车管' && ['待维修','维修中'].includes(s.row.status)" type="success" size="small" round @click="openRepairCompleteDialog(s.row)">维修完成</el-button>
                         <el-button v-if="s.row.is_deleted && currentUser.role==='老板'" type="success" size="small" round @click="restoreVehicle(s.row.id)">恢复</el-button>
                         <el-popconfirm v-if="!s.row.is_deleted && currentUser.role==='老板'" title="确认将车辆及关联数据隐藏？" confirm-button-text="隐藏" @confirm="deleteVehicle(s.row.id)">
                             <template #reference>
@@ -950,50 +976,132 @@
                             </el-pagination>
                             </div>
                         </div>
-                        <div class="card" style="margin-top:16px">
-                            <div class="card-title-row">
-                                <div class="card-title">SKU 库存视图</div>
-                                <div style="display:flex;gap:8px;align-items:center">
-                                    <el-select v-model="skuFilterCondition" placeholder="全部成色" clearable style="width:120px">
-                                        <el-option label="新车" value="新车"></el-option><el-option label="二手车" value="二手车"></el-option>
-                                    </el-select>
-                                    <el-select v-model="skuFilterBoxType" placeholder="全部厢型" clearable style="width:120px">
-                                        <el-option v-for="bt in dictOptionsByCategory('box_type')" :key="bt" :label="bt" :value="bt"></el-option>
-                                    </el-select>
-                                    <el-button size="small" plain @click="loadSkuInventory"><el-icon><Refresh/></el-icon> 刷新</el-button>
+                    </div>
+                    <!-- ================== REFURBISHMENT ================== -->
+                    <div v-if="currentPage === 'refurbishment'" class="page fade-in">
+                        <div class="stat-cards four-cols">
+                            <div class="stat-card" style="cursor:pointer" :style="refurbishmentFilter.status==='' ? 'border:1px solid #93c5fd' : ''" @click="refurbishmentFilter.status=''">
+                                <div class="stat-card-icon" style="background:#e0f2fe;color:#0369a1"><span style="font-weight:700">总</span></div>
+                                <div class="stat-card-content">
+                                    <span class="stat-label">全部整备记录</span>
+                                    <span class="stat-value">{{ refurbishmentStats.total }}</span>
+                                    <span style="font-size:12px;color:#94a3b8;margin-top:3px">含历史已完成记录</span>
                                 </div>
                             </div>
-                            <el-table :data="filteredSkuInventory" stripe style="width:100%" max-height="400">
-                                <el-table-column prop="car_type" label="基准车型" min-width="220"></el-table-column>
+                            <div class="stat-card" style="cursor:pointer" :style="refurbishmentFilter.status==='待整备' ? 'border:1px solid #fdba74' : ''" @click="refurbishmentFilter.status='待整备'">
+                                <div class="stat-card-icon" style="background:#ffedd5;color:#ea580c"><span style="font-weight:700">待</span></div>
+                                <div class="stat-card-content">
+                                    <span class="stat-label">待整备</span>
+                                    <span class="stat-value text-orange">{{ refurbishmentStats.pending }}</span>
+                                    <span style="font-size:12px;color:#94a3b8;margin-top:3px">含待维修、维修中车辆</span>
+                                </div>
+                            </div>
+                            <div class="stat-card" style="cursor:pointer" :style="refurbishmentFilter.status==='整备中' ? 'border:1px solid #93c5fd' : ''" @click="refurbishmentFilter.status='整备中'">
+                                <div class="stat-card-icon" style="background:#dbeafe;color:#2563eb"><span style="font-weight:700">中</span></div>
+                                <div class="stat-card-content">
+                                    <span class="stat-label">整备中</span>
+                                    <span class="stat-value" style="color:#2563eb">{{ refurbishmentStats.inProgress }}</span>
+                                    <span style="font-size:12px;color:#94a3b8;margin-top:3px">正在清洁、保养或复检</span>
+                                </div>
+                            </div>
+                            <div class="stat-card" style="cursor:pointer" :style="refurbishmentFilter.status==='整备完成' ? 'border:1px solid #86efac' : ''" @click="refurbishmentFilter.status='整备完成'">
+                                <div class="stat-card-icon" style="background:#dcfce7;color:#16a34a"><span style="font-weight:700">完</span></div>
+                                <div class="stat-card-content">
+                                    <span class="stat-label">整备完成</span>
+                                    <span class="stat-value text-green">{{ refurbishmentStats.completed }}</span>
+                                    <span style="font-size:12px;color:#94a3b8;margin-top:3px">车辆已重新入库</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card" style="margin-top:16px;padding:16px 20px">
+                            <div class="card-toolbar" style="gap:10px;flex-wrap:wrap">
+                                <el-input v-model="refurbishmentFilter.keyword" clearable placeholder="搜索车牌、VIN、车型或客户" style="width:300px">
+                                    <template #prefix><el-icon><Search/></el-icon></template>
+                                </el-input>
+                                <el-select v-model="refurbishmentFilter.status" clearable placeholder="全部整备状态" style="width:160px">
+                                    <el-option label="待整备" value="待整备"></el-option>
+                                    <el-option label="整备中" value="整备中"></el-option>
+                                    <el-option label="整备完成" value="整备完成"></el-option>
+                                </el-select>
+                                <el-button plain @click="refurbishmentFilter.keyword=''; refurbishmentFilter.status=''"><el-icon><Refresh/></el-icon> 重置</el-button>
+                                <el-button type="primary" :icon="Refresh" :loading="refurbishmentLoading" @click="fetchRefurbishmentRecords" style="margin-left:auto">刷新</el-button>
+                            </div>
+                        </div>
+
+                        <div class="card" style="margin-top:16px">
+                            <div class="card-title-row">
+                                <div class="card-title">退车维修与整备台账</div>
+                                <span class="card-count">当前显示 {{ filteredRefurbishmentRows.length }} 条</span>
+                            </div>
+                            <el-table v-loading="refurbishmentLoading" :data="filteredRefurbishmentRows" stripe style="width:100%;margin-top:12px" max-height="calc(100vh - 390px)">
+                                <el-table-column label="车辆" min-width="220" fixed="left">
+                                    <template #default="s">
+                                        <div class="waiver-primary">{{ s.row.plate_number || s.row.vin || '-' }}</div>
+                                        <div class="mono-text waiver-secondary">VIN：{{ s.row.vin || '-' }}</div>
+                                        <div class="waiver-secondary">{{ s.row.car_type || '车型未填写' }}</div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="客户" min-width="130">
+                                    <template #default="s">{{ s.row.customer_name || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column label="退车来源" width="150">
+                                    <template #default="s">
+                                        <span v-if="s.row.return_inspection_id">退车验收单 #{{ s.row.return_inspection_id }}</span>
+                                        <span v-else class="text-muted">其他维修来源</span>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="维修原因及结果" min-width="240">
+                                    <template #default="s">
+                                        <div><b>原因：</b>{{ s.row.repair_reason || '常规整备' }}</div>
+                                        <div v-if="s.row.repair_note" style="margin-top:5px"><b>结果：</b>{{ s.row.repair_note }}</div>
+                                        <div v-if="Number(s.row.cost || 0) > 0" class="num" style="margin-top:5px;color:#d97706">维修费用：¥{{ numberFormat(s.row.cost) }}</div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="整备状态" width="120">
+                                    <template #default="s">
+                                        <span class="status-badge" :class="s.row.status==='整备完成' ? 'badge-green' : (s.row.status==='整备中' ? 'badge-blue' : 'badge-orange')">{{ s.row.status }}</span>
+                                        <div v-if="s.row.status==='待整备' && Number(s.row.needs_repair || 0)===1 && !s.row.repair_completed_at" class="waiver-secondary" style="margin-top:5px">
+                                            {{ s.row.vehicle_status==='维修中' ? '维修进行中' : (s.row.vehicle_status==='待维修' ? '等待开始维修' : '等待退车流程完成') }}
+                                        </div>
+                                    </template>
+                                </el-table-column>
                                 <el-table-column label="成色" width="90">
+                                    <template #default="s"><span class="status-badge badge-purple">{{ s.row.condition || '二手车' }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="完成用途" width="110">
+                                    <template #default="s">{{ s.row.status==='整备完成' ? (s.row.available_for || '可租/可售') : '-' }}</template>
+                                </el-table-column>
+                                <el-table-column label="流程记录" min-width="250">
                                     <template #default="s">
-                                        <el-tag v-if="s.row.condition==='二手车'" type="warning" size="small" round>二手</el-tag>
-                                        <el-tag v-else type="primary" size="small" round>新车</el-tag>
+                                        <div class="waiver-flow-line"><span>退车</span><b>{{ s.row.created_by || '系统' }}</b><em>{{ s.row.created_at || '-' }}</em></div>
+                                        <div class="waiver-flow-line" v-if="s.row.started_by"><span>整备</span><b>{{ s.row.started_by }}</b><em>{{ s.row.started_at || '-' }}</em></div>
+                                        <div class="waiver-flow-line" v-if="s.row.completed_by"><span>完成</span><b>{{ s.row.completed_by }}</b><em>{{ s.row.completed_at || '-' }}</em></div>
+                                        <div v-if="s.row.completion_note" class="waiver-secondary" style="margin-top:5px">整备说明：{{ s.row.completion_note }}</div>
                                     </template>
                                 </el-table-column>
-                                <el-table-column prop="box_type" label="厢型" width="90"></el-table-column>
-                                <el-table-column prop="tailgate" label="尾板" width="80"></el-table-column>
-                                <el-table-column label="在库数" width="100">
+                                <el-table-column label="操作" width="190" fixed="right">
                                     <template #default="s">
-                                        <span :style="s.row.in_stock_count>0 ? 'color:#16a34a;font-weight:600' : 'color:#9ca3af'">{{ s.row.in_stock_count || 0 }} 台</span>
-                                    </template>
-                                </el-table-column>
-                                <el-table-column label="状态" width="90">
-                                    <template #default="s">
-                                        <el-tag :type="s.row.status==='生效' ? 'success' : 'info'" size="small" round>{{ s.row.status }}</el-tag>
-                                    </template>
-                                </el-table-column>
-                                <el-table-column label="操作" width="200" fixed="right">
-                                    <template #default="s">
-                                        <el-button v-if="s.row.in_stock_count>0" type="warning" size="small" plain round @click="openSkuPickVehicle(s.row)">发起报单</el-button>
-                                        <el-button v-if="currentUser.role==='老板'" size="small" :type="s.row.status==='生效' ? 'danger' : 'success'" link @click="toggleSku(s.row)">
-                                            {{ s.row.status==='生效' ? '停用' : '启用' }}
-                                        </el-button>
+                                        <div class="waiver-actions">
+                                            <template v-if="s.row.status==='待整备' && Number(s.row.needs_repair || 0)===1 && !s.row.repair_completed_at">
+                                                <el-button v-if="s.row.vehicle_status==='待维修'" type="warning" size="small" :loading="submitting" @click="startRepair(s.row)">开始维修</el-button>
+                                                <el-button v-else-if="s.row.vehicle_status==='维修中'" type="success" size="small" :loading="submitting" @click="openRepairCompleteDialog(s.row)">维修完成</el-button>
+                                                <span v-else class="waiver-secondary">{{ s.row.vehicle_status || '流程处理中' }}</span>
+                                            </template>
+                                            <el-button v-else-if="s.row.status==='待整备'" type="warning" size="small" :loading="submitting" @click="startRefurbishment(s.row)">开始整备</el-button>
+                                            <el-button v-else-if="s.row.status==='整备中'" type="success" size="small" :loading="submitting" @click="openRefurbishmentCompleteDialog(s.row)">完成整备</el-button>
+                                            <span v-else class="waiver-secondary">已回库</span>
+                                        </div>
                                     </template>
                                 </el-table-column>
                             </el-table>
+                            <div v-if="!refurbishmentLoading && !filteredRefurbishmentRows.length" class="empty-state">
+                                <el-icon :size="44" style="color:#cbd5e1"><Finished/></el-icon>
+                                <p>{{ refurbishmentRecords.length ? '暂无符合筛选条件的整备记录' : '当前没有待维修或待整备车辆' }}</p>
+                            </div>
                         </div>
                     </div>
+
                     <!-- ================== COMPLETION HISTORY ================== -->
                     <div v-if="currentPage === 'completion_history'" class="page fade-in">
                         <div class="card">
@@ -1105,6 +1213,74 @@
                                     </template>
                                 </el-table-column>
                             </el-table>
+                        </div>
+                    </div>
+                    <!-- ================== INVOICE RECORDS ================== -->
+                    <div v-if="currentPage === 'invoice_records'" class="page fade-in">
+                        <div class="card">
+                            <div class="card-title-row">
+                                <div>
+                                    <div class="card-title">开票信息列表</div>
+                                    <div class="card-count">共 {{ filteredInvoiceRecords.length }} 张已开票，合计 ¥{{ numberFormat(invoiceRecordTotalAmount) }}</div>
+                                </div>
+                                <el-input v-model="invoiceRecordSearch" clearable placeholder="搜索客户、车牌、VIN、发票号" style="width:280px">
+                                    <template #prefix><el-icon><Search/></el-icon></template>
+                                </el-input>
+                            </div>
+                            <el-table :data="filteredInvoiceRecords" stripe style="width:100%;margin-top:12px" max-height="calc(100vh - 300px)" v-if="filteredInvoiceRecords.length">
+                                <el-table-column label="合同 / 车辆" min-width="210" fixed="left">
+                                    <template #default="s">
+                                        <div style="font-weight:600;color:#1f2937">{{ s.row.plate_number || s.row.vin || '-' }}</div>
+                                        <div class="mono-text" style="font-size:12px;color:#6b7280">{{ s.row.contract_number || ('合同#' + s.row.contract_id) }}</div>
+                                        <div class="mono-text" style="font-size:12px;color:#9ca3af">{{ s.row.vin || '-' }}</div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="客户" min-width="140">
+                                    <template #default="s">
+                                        <div>{{ s.row.customer_name || '-' }}</div>
+                                        <div v-if="s.row.customer_phone" style="font-size:12px;color:#9ca3af">{{ s.row.customer_phone }}</div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="开票公司" min-width="180">
+                                    <template #default="s">{{ s.row.receiving_company || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column label="开票抬头" min-width="200">
+                                    <template #default="s">
+                                        <div>{{ s.row.invoice_entity_name || '-' }}</div>
+                                        <div v-if="s.row.invoice_entity_tax_no" class="mono-text" style="font-size:12px;color:#9ca3af">{{ s.row.invoice_entity_tax_no }}</div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="发票号码" width="170">
+                                    <template #default="s"><span class="mono-text">{{ s.row.invoice_no || '-' }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="开票日期" width="130">
+                                    <template #default="s">
+                                        <div>{{ s.row.invoice_date || '-' }}</div>
+                                        <div v-if="s.row.invoiced_at" style="font-size:12px;color:#9ca3af">{{ s.row.invoiced_at }}</div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="开票金额" width="120">
+                                    <template #default="s"><span class="num" style="color:#16a34a">¥{{ numberFormat(s.row.amount) }}</span></template>
+                                </el-table-column>
+                                <el-table-column label="发票文件" min-width="120">
+                                    <template #default="s">
+                                        <div v-if="s.row.invoice_file_path" style="display:flex;flex-direction:column;gap:4px">
+                                            <a v-for="(file, index) in attachmentList(s.row.invoice_file_path)" :key="file.url" :href="file.url" target="_blank" style="color:#2563eb">文件{{ index + 1 }}</a>
+                                        </div>
+                                        <span v-else style="color:#9ca3af">未上传</span>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="开票人" width="110">
+                                    <template #default="s">{{ s.row.processed_by || '-' }}</template>
+                                </el-table-column>
+                                <el-table-column label="状态" width="100" fixed="right">
+                                    <template #default="s"><span class="status-badge badge-green">{{ s.row.status }}</span></template>
+                                </el-table-column>
+                            </el-table>
+                            <div v-else class="empty-state">
+                                <div class="empty-icon">🧾</div>
+                                <p>{{ invoiceRecordSearch ? '没有匹配的开票信息' : '暂无已成功开具的发票' }}</p>
+                            </div>
                         </div>
                     </div>
                     <!-- ================== BILLS ================== -->
@@ -1257,6 +1433,101 @@
                         </div>
                     </div>
 
+                    <!-- ================== RENT WAIVERS ================== -->
+                    <!-- waiver-workbench -->
+                    <div v-if="currentPage === 'waivers'" class="page fade-in">
+                        <el-alert v-if="waiverRolePendingCount > 0" type="warning" :closable="false" show-icon class="waiver-role-alert"
+                            :title="`当前有 ${waiverRolePendingCount} 条${currentUser.role}待处理租金减免，已优先排列`">
+                        </el-alert>
+                        <div class="waiver-status-grid">
+                            <div v-for="card in waiverStatusCards" :key="card.value" class="card waiver-status-card"
+                                :class="{active: waiverFilter.status === card.value}"
+                                @click="waiverFilter.status = card.value">
+                                <div class="waiver-status-label" :style="{color: card.color}">{{ card.label }}</div>
+                                <div class="waiver-status-value" :style="{color: card.color}">{{ card.count }}</div>
+                                <div class="waiver-status-hint">{{ card.hint }}</div>
+                            </div>
+                        </div>
+
+                        <div class="card waiver-toolbar">
+                            <div class="waiver-toolbar-main">
+                                <el-input v-model="waiverFilter.keyword" clearable placeholder="搜索客户、合同、车牌或VIN" style="width:300px">
+                                    <template #prefix><el-icon><Search/></el-icon></template>
+                                </el-input>
+                                <el-select v-model="waiverFilter.status" placeholder="全部状态" clearable style="width:150px">
+                                    <el-option v-for="item in waiverStatusOptions" :key="item.value" :label="item.label" :value="item.value"></el-option>
+                                </el-select>
+                            </div>
+                            <div class="waiver-role-tip">
+                                当前待办 <b>{{ waiverRolePendingCount }}</b> 条
+                            </div>
+                        </div>
+
+                        <div class="card waiver-table-card">
+                            <el-table v-loading="waiverLoading" :data="filteredWaivers" stripe style="width:100%" max-height="650"
+                                :row-class-name="waiverRowClass">
+                                <el-table-column label="申请信息" min-width="220">
+                                    <template #default="s">
+                                        <div class="waiver-primary">{{ s.row.customer_name || '-' }}</div>
+                                        <div class="waiver-secondary">
+                                            合同 #{{ s.row.contract_id }} · {{ s.row.plate_number || s.row.vin || '未绑定车辆' }}
+                                        </div>
+                                        <div class="waiver-secondary" v-if="s.row.car_type">{{ s.row.car_type }}</div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="减免范围" min-width="170">
+                                    <template #default="s">
+                                        <div class="waiver-primary">{{ waiverPeriodText(s.row.target_period_list) }}</div>
+                                        <div class="waiver-secondary">申请金额：{{ s.row.waive_amount == null ? '全额' : '¥' + numberFormat(s.row.waive_amount) }}</div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="运营核定" min-width="180">
+                                    <template #default="s">
+                                        <div>减免：<b class="waiver-money">¥{{ numberFormat(s.row.approved_waive_amount || 0) }}</b></div>
+                                        <div>坏账：<b class="waiver-danger">¥{{ numberFormat(s.row.bad_debt_amount || 0) }}</b></div>
+                                        <div class="waiver-secondary" v-if="s.row.carryover_start_period">自第 {{ s.row.carryover_start_period }} 期抵扣</div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="原因与附件" min-width="210">
+                                    <template #default="s">
+                                        <div class="waiver-reason" :title="s.row.reason">{{ s.row.reason || '-' }}</div>
+                                        <a v-for="(file, index) in attachmentList(s.row.attachment_path)" :key="file.url"
+                                            :href="file.url" target="_blank" class="waiver-attachment">附件{{ index + 1 }}</a>
+                                        <div class="waiver-secondary" v-if="s.row.operations_note">运营备注：{{ s.row.operations_note }}</div>
+                                        <div class="waiver-secondary" v-if="s.row.revoke_reason">处理说明：{{ s.row.revoke_reason }}</div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="状态" width="120">
+                                    <template #default="s">
+                                        <span class="status-badge" :class="waiverStatusClass(s.row.status)">{{ s.row.status }}</span>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="流程记录" min-width="200">
+                                    <template #default="s">
+                                        <div class="waiver-flow-line"><span>发起</span><b>{{ s.row.sales_applied_by || '-' }}</b><em>{{ s.row.sales_applied_at || '-' }}</em></div>
+                                        <div class="waiver-flow-line" v-if="s.row.boss_approved_by"><span>审批</span><b>{{ s.row.boss_approved_by }}</b><em>{{ s.row.boss_approved_at || '-' }}</em></div>
+                                        <div class="waiver-flow-line" v-if="s.row.operations_filled_by"><span>核定</span><b>{{ s.row.operations_filled_by }}</b><em>{{ s.row.operations_filled_at || '-' }}</em></div>
+                                        <div class="waiver-flow-line" v-if="s.row.finance_reviewed_by"><span>核销</span><b>{{ s.row.finance_reviewed_by }}</b><em>{{ s.row.finance_reviewed_at || '-' }}</em></div>
+                                    </template>
+                                </el-table-column>
+                                <el-table-column label="操作" width="190" fixed="right">
+                                    <template #default="s">
+                                        <div class="waiver-actions">
+                                            <el-button v-if="s.row.can_approve" type="success" size="small" @click="openWaiverApprove(s.row)">审批</el-button>
+                                            <el-button v-if="s.row.can_fill_operations" type="warning" size="small" @click="openWaiverOperations(s.row)">填写核定</el-button>
+                                            <el-button v-if="s.row.can_execute" type="danger" size="small" @click="openWaiverExecute(s.row)">确认核销</el-button>
+                                            <el-button v-if="s.row.can_revoke" type="info" size="small" plain @click="openWaiverRevoke(s.row)">撤销</el-button>
+                                            <span v-if="!s.row.can_approve && !s.row.can_fill_operations && !s.row.can_execute && !s.row.can_revoke" class="waiver-secondary">查看</span>
+                                        </div>
+                                    </template>
+                                </el-table-column>
+                            </el-table>
+                            <div v-if="!waiverLoading && !filteredWaivers.length" class="empty-state">
+                                <div class="empty-icon">📄</div>
+                                <p>暂无符合条件的租金减免申请</p>
+                            </div>
+                        </div>
+                    </div>
                     <!-- ================== RECONCILIATION ================== -->
                     <div v-if="currentPage === 'reconciliation'" class="page fade-in">
                         <!-- 统计卡片 -->
@@ -1335,7 +1606,7 @@
                                                             <el-button v-else-if="currentUser.role==='运营' && s.row.screenshot_path" size="small" type="success" plain disabled>📤 已发起，等待财务核销</el-button>
                                                             <el-button v-if="currentUser.role==='财务' && s.row.screenshot_path && !s.row.bank_serial && s.row.status!=='已还款' && s.row.status!=='预抵'"
                                                                 size="small" type="danger" @click="openVerifyDialog(s.row)">🧾 对账</el-button>
-                                                            <el-button v-if="isReconCompleted(s.row) || (currentUser.role==='财务' && (!s.row.screenshot_path || s.row.bank_serial))" size="small" type="info" plain @click="openReconDetail(s.row)">👁 详情</el-button>
+                                                            <el-button size="small" type="info" plain @click="openReconDetail(s.row)">👁 详情</el-button>
                                                         </div>
                                                     </template>
                                                 </el-table-column>
@@ -1381,11 +1652,16 @@
                                         <span class="status-badge" :class="reconGroupStatusClass(s.row)">{{ reconGroupStatusText(s.row) }}</span>
                                     </template>
                                 </el-table-column>
-                                <el-table-column label="操作" width="120" fixed="right">
+                                <el-table-column label="操作" width="230" fixed="right">
                                     <template #default="s">
-                                        <el-button size="small" type="primary" plain @click="toggleReconGroup(s.row)">
-                                            {{ s.row.expanded ? '收起明细' : '查看明细' }}
-                                        </el-button>
+                                        <div style="display:flex;gap:6px;flex-wrap:wrap">
+                                            <el-button size="small" type="primary" @click="openReconDetail(s.row.items[0])">
+                                                对账单详情
+                                            </el-button>
+                                            <el-button size="small" type="primary" plain @click="toggleReconGroup(s.row)">
+                                                {{ s.row.expanded ? '收起分期' : '查看分期' }}
+                                            </el-button>
+                                        </div>
                                     </template>
                                 </el-table-column>
                             </el-table>
@@ -1439,10 +1715,23 @@
                         </template>
                     </el-dialog>
 
-                    <!-- 财务核销欠款弹窗 -->
-                    <el-dialog v-model="showReceivableSettleDialog" title="核销欠款" width="400" :close-on-click-modal="false">
+                    <!-- 财务核销欠款弹窗：财务核对凭证 -->
+                    <el-dialog v-model="showReceivableSettleDialog" title="核销欠款" width="520" :close-on-click-modal="false">
                         <div v-if="receivableTarget" style="margin-bottom:16px;color:#374151">
                             客户：<b>{{ receivableTarget.customer_name }}</b>　剩余欠款：<b class="text-red">¥{{ numberFormat(receivableOutstanding(receivableTarget)) }}</b>
+                        </div>
+                        <div v-if="receivableTarget" style="margin-bottom:16px">
+                            <div style="font-size:13px;color:#6b7280;margin-bottom:6px">运营上传的客户还款凭证</div>
+                            <div v-if="attachmentList(receivableTarget.screenshot_path).length" class="attachment-grid">
+                                <a v-for="file in attachmentList(receivableTarget.screenshot_path)" :key="file.url" :href="file.url" target="_blank" class="attachment-card">
+                                    <img v-if="isImageAttachment(file.url)" :src="file.url" :alt="file.name" class="attachment-thumb">
+                                    <div v-else class="attachment-file">
+                                        <span class="attachment-file-type">{{ attachmentTypeLabel(file.url) }}</span>
+                                    </div>
+                                    <div class="attachment-name">{{ file.name }}</div>
+                                </a>
+                            </div>
+                            <el-alert v-else type="error" :closable="false" show-icon title="运营尚未上传客户还款凭证，不能核销"></el-alert>
                         </div>
                         <el-form label-position="top" size="default">
                             <el-form-item label="本次实收金额">
@@ -1452,12 +1741,12 @@
                         </el-form>
                         <template #footer>
                             <el-button @click="showReceivableSettleDialog = false">取消</el-button>
-                            <el-button type="success" @click="submitReceivableSettle" :loading="submitting">确认核销</el-button>
+                            <el-button type="success" @click="submitReceivableSettle" :loading="submitting" :disabled="!receivableTarget || !attachmentList(receivableTarget.screenshot_path).length">确认核销</el-button>
                         </template>
                     </el-dialog>
 
                     <!-- 财务对账弹窗 -->
-                    <el-dialog v-model="showVerifyDialog" title="对账核销" width="420" :close-on-click-modal="false">
+                    <el-dialog v-model="showVerifyDialog" title="对账核销" width="620" :close-on-click-modal="false">
                         <div v-if="verifyTarget" style="margin-bottom:16px">
                             <div style="display:flex;gap:16px;padding:12px;background:#f8fafc;border-radius:8px;margin-bottom:12px;flex-wrap:wrap">
 <span>车牌：<b>{{ verifyTarget.plate_number }}</b></span>
@@ -1466,6 +1755,19 @@
 <span v-if="(verifyTarget.paid_amount||0)>0">已还：<b style="color:#16a34a">¥{{ numberFormat(verifyTarget.paid_amount||0) }}</b></span>
 <span v-if="(verifyTarget.paid_amount||0)>0">还差：<b style="color:#dc2626">¥{{ numberFormat(Math.max(0,(verifyTarget.amount||0)-(verifyTarget.paid_amount||0))) }}</b></span>
 </div>
+                            <div style="margin-bottom:16px">
+                                <div style="font-size:13px;color:#6b7280;margin-bottom:6px">运营上传的客户支付凭证</div>
+                                <div v-if="attachmentList(verifyTarget.screenshot_path).length" class="attachment-grid">
+                                    <a v-for="file in attachmentList(verifyTarget.screenshot_path)" :key="file.url" :href="file.url" target="_blank" class="attachment-card">
+                                        <img v-if="isImageAttachment(file.url)" :src="file.url" :alt="file.name" class="attachment-thumb">
+                                        <div v-else class="attachment-file">
+                                            <span class="attachment-file-type">{{ attachmentTypeLabel(file.url) }}</span>
+                                        </div>
+                                        <div class="attachment-name">{{ file.name }}</div>
+                                    </a>
+                                </div>
+                                <el-alert v-else type="error" :closable="false" show-icon title="运营尚未上传客户支付凭证，不能核销"></el-alert>
+                            </div>
                             <el-form-item label="本次到账金额">
                                 <el-input-number v-model="verifyAmount" :min="0" :step="100" style="width:100%"></el-input-number>
                                 <div style="font-size:12px;color:#9ca3af;margin-top:4px">少于本期金额时差额顺延到下一期；多于本期金额时需确认抵扣月份。</div>
@@ -1493,15 +1795,28 @@
                         </div>
                         <template #footer>
                             <el-button @click="showVerifyDialog = false">取消</el-button>
-                            <el-button type="primary" @click="submitVerify" :loading="submitting">确认核销</el-button>
+                            <el-button type="primary" @click="submitVerify" :loading="submitting" :disabled="!verifyTarget || !attachmentList(verifyTarget.screenshot_path).length">确认核销</el-button>
                         </template>
                     </el-dialog>
                     <!-- RECON_DETAIL_DIALOG_HERE -->
-                    <el-dialog v-model="showSalesOrderFinanceConfirmDialog" title="财务确认报单" width="460" :close-on-click-modal="false">
+                    <el-dialog v-model="showSalesOrderFinanceConfirmDialog" title="财务确认报单" width="620" :close-on-click-modal="false">
                         <div v-if="salesOrderFinanceConfirmTarget" style="margin-bottom:16px;padding:12px;background:#f8fafc;border-radius:8px;color:#374151;display:grid;grid-template-columns:1fr 1fr;gap:8px 16px">
                             <span>客户：<b>{{ salesOrderFinanceConfirmTarget.customer_name || '-' }}</b></span>
                             <span>车辆：<b>{{ salesOrderFinanceConfirmTarget.plate_number || salesOrderFinanceConfirmTarget.vin || '-' }}</b></span>
                             <span style="grid-column:1/-1">车型：{{ salesOrderFinanceConfirmTarget.car_type || '-' }}</span>
+                        </div>
+                        <div v-if="salesOrderFinanceConfirmTarget" style="margin-bottom:16px">
+                            <div style="font-size:13px;color:#6b7280;margin-bottom:6px">销售上传的客户支付凭证</div>
+                            <div v-if="attachmentList(salesOrderFinanceConfirmTarget.customer_screenshot_path).length" class="attachment-grid">
+                                <a v-for="file in attachmentList(salesOrderFinanceConfirmTarget.customer_screenshot_path)" :key="file.url" :href="file.url" target="_blank" class="attachment-card">
+                                    <img v-if="isImageAttachment(file.url)" :src="file.url" :alt="file.name" class="attachment-thumb">
+                                    <div v-else class="attachment-file">
+                                        <span class="attachment-file-type">{{ attachmentTypeLabel(file.url) }}</span>
+                                    </div>
+                                    <div class="attachment-name">{{ file.name }}</div>
+                                </a>
+                            </div>
+                            <el-alert v-else type="error" :closable="false" show-icon title="销售尚未上传客户支付凭证，不能确认报单"></el-alert>
                         </div>
                         <el-form label-position="top">
                             <el-form-item label="公司到账银行流水号">
@@ -1525,41 +1840,192 @@
                         </el-form>
                         <template #footer>
                             <el-button @click="showSalesOrderFinanceConfirmDialog = false">取消</el-button>
-                            <el-button type="success" @click="submitSalesOrderFinanceConfirm" :loading="submitting">确认报单</el-button>
+                            <el-button type="success" @click="submitSalesOrderFinanceConfirm" :loading="submitting" :disabled="!salesOrderFinanceConfirmTarget || !attachmentList(salesOrderFinanceConfirmTarget.customer_screenshot_path).length">确认报单</el-button>
                         </template>
                     </el-dialog>
-                    <el-dialog v-model="showReconDetailDialog" title="期次详情" width="640" :close-on-click-modal="false">
-                        <div v-if="reconDetail" style="font-size:13px"><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;padding:12px;background:#f8fafc;border-radius:8px;margin-bottom:12px">
-<span>车牌：<b>{{ reconDetail.plate_number }}</b></span>
-<span>第 {{ reconDetail.period }} 期</span>
-<span>应还日期：{{ reconDetail.due_date }}</span>
-<span>状态：{{ reconDetail.status }}</span>
-<span>应还金额：<b style="color:#2563eb">¥{{ numberFormat(reconDetail.amount) }}</b></span>
-<span>已还金额：<b style="color:#16a34a">¥{{ numberFormat(reconDetail.paid_amount||0) }}</b></span>
-<span>剩余金额：<b style="color:#dc2626">¥{{ numberFormat(Math.max(0,(reconDetail.amount||0)-(reconDetail.paid_amount||0))) }}</b></span>
-<span>流水号：{{ reconDetail.bank_serial || '—' }}</span>
-<span>核销人：{{ reconDetail.verified_by || '—' }}</span>
-<span>核销时间：{{ reconDetail.verified_at || '—' }}</span>
-</div>
-<div style="margin-bottom:12px">
-<b style="display:block;margin-bottom:6px">转账截图与回单</b>
-<a v-if="reconDetail.screenshot_path" :href="reconDetail.screenshot_path" target="_blank" class="badge badge-blue">客户付款截图</a>
-<span v-else style="color:#9ca3af">客户付款截图：未上传</span>
-&nbsp;&nbsp;
-<a v-if="reconDetail.bank_receipt_path" :href="reconDetail.bank_receipt_path" target="_blank" class="badge badge-green">银行回单</a>
-<span v-else style="color:#9ca3af">银行回单：未上传</span>
-</div>
-<div v-if="reconDetail.reported_amount" style="margin-bottom:12px;font-size:13px;color:#334155">
-    <b>运营录入金额：</b>¥{{ numberFormat(reconDetail.reported_amount) }}
-</div>
-<b style="display:block;margin-bottom:6px">分配明细</b>
-<el-table :data="reconDetailAllocations" size="small" border style="width:100%">
-<el-table-column label="类型" width="120"><template #default="a">{{ allocTypeLabel(a.row.allocation_type) }}</template></el-table-column>
-<el-table-column label="金额" width="120"><template #default="a">¥{{ numberFormat(a.row.allocated_amount) }}</template></el-table-column>
-<el-table-column label="说明"><template #default="a">{{ a.row.note || a.row.fee_description || '—' }}</template></el-table-column>
-<el-table-column label="时间" width="160"><template #default="a">{{ a.row.created_at || '—' }}</template></el-table-column>
-</el-table>
-<div v-if="!reconDetailAllocations.length" style="color:#9ca3af;text-align:center;padding:12px">暂无分配明细</div></div>
+                    <el-dialog v-model="showInitialPaymentConfirmDialog" title="财务确认首次付款到账" width="680" :close-on-click-modal="false">
+                        <div v-if="initialPaymentConfirmTarget">
+                            <div style="padding:12px;background:#f8fafc;border-radius:8px;display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;color:#374151;margin-bottom:14px">
+                                <span>客户：<b>{{ initialPaymentConfirmTarget.customer_name || '-' }}</b></span>
+                                <span>车辆：<b>{{ initialPaymentConfirmTarget.plate_number || initialPaymentConfirmTarget.vin || '-' }}</b></span>
+                                <span>付款类型：{{ initialPaymentConfirmTarget.initial_payment_type || '首次付款' }}</span>
+                                <span>应收金额：<b style="color:#d97706">¥{{ numberFormat(initialPaymentConfirmTarget.initial_payment_amount || 0) }}</b></span>
+                            </div>
+                            <div style="margin-bottom:16px">
+                                <div style="font-size:13px;color:#6b7280;margin-bottom:6px">运营上传的客户支付凭证</div>
+                                <div v-if="attachmentList(initialPaymentConfirmTarget.customer_screenshot_path).length" class="attachment-grid">
+                                    <a v-for="file in attachmentList(initialPaymentConfirmTarget.customer_screenshot_path)" :key="file.url" :href="file.url" target="_blank" class="attachment-card">
+                                        <img v-if="isImageAttachment(file.url)" :src="file.url" :alt="file.name" class="attachment-thumb">
+                                        <div v-else class="attachment-file">
+                                            <span class="attachment-file-type">{{ attachmentTypeLabel(file.url) }}</span>
+                                        </div>
+                                        <div class="attachment-name">{{ file.name }}</div>
+                                    </a>
+                                </div>
+                                <el-alert v-else type="error" :closable="false" show-icon title="运营尚未上传客户支付凭证，不能确认到账"></el-alert>
+                            </div>
+                            <el-form label-position="top">
+                                <el-row :gutter="16">
+                                    <el-col :span="12">
+                                        <el-form-item label="公司实际到账金额" required>
+                                            <el-input-number v-model="initialPaymentConfirmForm.received_amount" :min="0.01" :precision="2" :step="100" controls-position="right" style="width:100%"></el-input-number>
+                                        </el-form-item>
+                                    </el-col>
+                                    <el-col :span="12">
+                                        <el-form-item label="公司到账银行流水号">
+                                            <el-input v-model="initialPaymentConfirmForm.bank_serial" clearable placeholder="至少填写4位"></el-input>
+                                        </el-form-item>
+                                    </el-col>
+                                </el-row>
+                                <el-form-item label="公司收款回单">
+                                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                        <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onInitialPaymentReceiptUpload" accept=".jpg,.jpeg,.png,.pdf">
+                                            <el-button plain>上传公司回单</el-button>
+                                        </el-upload>
+                                        <a v-if="initialPaymentConfirmForm.bank_receipt_path" :href="initialPaymentConfirmForm.bank_receipt_path" target="_blank" style="color:#16a34a;font-size:13px">已上传，点击查看</a>
+                                    </div>
+                                    <div style="font-size:12px;color:#6b7280;margin-top:4px">银行流水号与公司收款回单任选其一即可确认。</div>
+                                </el-form-item>
+                                <template v-if="Number(initialPaymentConfirmForm.received_amount || 0) < Number(initialPaymentConfirmTarget.initial_payment_amount || 0)">
+                                    <el-form-item label="不足原因" required>
+                                        <el-input v-model="initialPaymentConfirmForm.shortage_reason" type="textarea" :rows="2" placeholder="请说明本次到账不足的原因"></el-input>
+                                    </el-form-item>
+                                    <el-form-item label="剩余金额承诺归还日期" required>
+                                        <el-date-picker v-model="initialPaymentConfirmForm.promised_repay_date" type="date" value-format="YYYY-MM-DD" style="width:100%"></el-date-picker>
+                                    </el-form-item>
+                                </template>
+                                <el-form-item label="审批备注">
+                                    <el-input v-model="initialPaymentConfirmForm.comment" type="textarea" :rows="2" placeholder="备注（选填）"></el-input>
+                                </el-form-item>
+                            </el-form>
+                        </div>
+                        <template #footer>
+                            <el-button @click="showInitialPaymentConfirmDialog = false">取消</el-button>
+                            <el-button type="success" @click="submitInitialPaymentConfirm" :loading="submitting" :disabled="!initialPaymentConfirmTarget || !attachmentList(initialPaymentConfirmTarget.customer_screenshot_path).length">确认到账</el-button>
+                        </template>
+                    </el-dialog>
+                    <el-dialog v-model="showIntentDepositDialog" title="核对意向定金" width="620" :close-on-click-modal="false">
+                        <div v-if="intentDepositTarget" style="margin-bottom:14px;padding:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;color:#374151;font-size:13px">
+                            <span>客户：<b>{{ intentDepositTarget.customer_name || '-' }}</b></span>
+                            <span>定金：<b style="color:#b45309">¥{{ numberFormat(intentDepositTarget.intent_deposit_amount || 0) }}</b></span>
+                            <span style="grid-column:1/-1">收款公司：{{ intentDepositTarget.receiving_company || '-' }}</span>
+                        </div>
+                        <div v-if="intentDepositTarget" style="margin-bottom:14px">
+                            <div style="font-size:13px;color:#6b7280;margin-bottom:6px">销售上传的客户支付凭证</div>
+                            <div v-if="attachmentList(intentDepositTarget.customer_screenshot_path).length" class="attachment-grid">
+                                <a v-for="file in attachmentList(intentDepositTarget.customer_screenshot_path)" :key="file.url" :href="file.url" target="_blank" class="attachment-card">
+                                    <img v-if="isImageAttachment(file.url)" :src="file.url" :alt="file.name" class="attachment-thumb">
+                                    <div v-else class="attachment-file">
+                                        <span class="attachment-file-type">{{ attachmentTypeLabel(file.url) }}</span>
+                                    </div>
+                                    <div class="attachment-name">{{ file.name }}</div>
+                                </a>
+                            </div>
+                            <el-alert v-else type="error" :closable="false" show-icon title="销售尚未上传客户定金支付凭证，不能确认入账"></el-alert>
+                        </div>
+                        <el-form label-position="top">
+                            <el-form-item label="公司到账银行流水号" required>
+                                <el-input v-model="intentDepositForm.serial" clearable placeholder="必填，至少4位">
+                                    <template #prefix><el-icon><Tickets/></el-icon></template>
+                                </el-input>
+                            </el-form-item>
+                            <el-form-item label="公司收款回单（可选）">
+                                <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onIntentDepositReceiptUpload" accept=".jpg,.jpeg,.png,.pdf">
+                                    <el-button plain>上传公司回单</el-button>
+                                </el-upload>
+                                <a v-if="intentDepositForm.receipt_path" :href="intentDepositForm.receipt_path" target="_blank" style="display:inline-block;margin-top:6px;color:#16a34a;font-size:13px">已上传，点击查看</a>
+                            </el-form-item>
+                        </el-form>
+                        <template #footer>
+                            <el-button @click="showIntentDepositDialog = false">取消</el-button>
+                            <el-button type="success" @click="submitIntentDepositCheck" :loading="submitting"
+                                :disabled="!intentDepositTarget || !attachmentList(intentDepositTarget.customer_screenshot_path).length">确认已对账入账</el-button>
+                        </template>
+                    </el-dialog>
+                    <el-dialog v-model="showReconDetailDialog" title="对账单详情" width="min(1180px, calc(100vw - 32px))" :close-on-click-modal="false">
+                        <div v-loading="reconDetailLoading" style="min-height:240px">
+                            <template v-if="reconDetailSummary">
+                                <div class="recon-detail-summary">
+                                    <div class="recon-detail-summary-item"><span>车辆所属公司</span><b>{{ reconDetailSummary.company || '-' }}</b></div>
+                                    <div class="recon-detail-summary-item"><span>客户名称</span><b>{{ reconDetailSummary.customer_name || '-' }}</b></div>
+                                    <div class="recon-detail-summary-item"><span>车架号</span><b>{{ reconDetailSummary.vin || '-' }}</b></div>
+                                    <div class="recon-detail-summary-item"><span>车牌号</span><b>{{ reconDetailSummary.plate_number || '-' }}</b></div>
+                                    <div class="recon-detail-summary-item"><span>租赁方式</span><b>{{ reconDetailSummary.rental_method || '-' }}</b></div>
+                                    <div class="recon-detail-summary-item"><span>销售员</span><b>{{ reconDetailSummary.sales_advisor || '-' }}</b></div>
+                                </div>
+                                <div class="recon-detail-section-title">
+                                    <span>分期明细</span>
+                                    <span class="recon-detail-count">共 {{ reconDetailPeriods.length }} 期</span>
+                                </div>
+                                <div class="recon-detail-table-wrap">
+                                    <el-table :data="reconDetailPeriods" size="small" border stripe style="width:100%;min-width:1880px" max-height="420">
+                                        <el-table-column prop="period" label="期数" width="64" fixed="left"></el-table-column>
+                                        <el-table-column prop="period_start" label="租期起" width="112"></el-table-column>
+                                        <el-table-column prop="period_end" label="租期止" width="112"></el-table-column>
+                                        <el-table-column prop="due_date" label="应还款日期" width="112"></el-table-column>
+                                        <el-table-column label="应还款金额" width="116"><template #default="s"><span class="num">¥{{ numberFormat(s.row.amount) }}</span></template></el-table-column>
+                                        <el-table-column label="减免金额" width="108"><template #default="s"><span class="num">¥{{ numberFormat(s.row.waiver_amount || 0) }}</span></template></el-table-column>
+                                        <el-table-column label="坏账金额" width="108"><template #default="s"><span class="num">¥{{ numberFormat(s.row.bad_debt_amount || 0) }}</span></template></el-table-column>
+                                        <el-table-column label="发票日期" width="112"><template #default="s">{{ s.row.invoice_date || '-' }}</template></el-table-column>
+                                        <el-table-column label="发票号码" width="150"><template #default="s">{{ s.row.invoice_no || '-' }}</template></el-table-column>
+                                        <el-table-column label="回款日期" width="112"><template #default="s">{{ s.row.paid_at || '-' }}</template></el-table-column>
+                                        <el-table-column label="已还款金额" width="116"><template #default="s"><span class="num" style="color:#16a34a">¥{{ numberFormat(s.row.paid_amount || 0) }}</span></template></el-table-column>
+                                        <el-table-column label="逾期金额" width="108"><template #default="s"><span class="num" style="color:#dc2626">¥{{ numberFormat(s.row.overdue_amount || 0) }}</span></template></el-table-column>
+                                        <el-table-column prop="overdue_days" label="逾期天数" width="92"></el-table-column>
+                                        <el-table-column prop="breach_days" label="违约天数" width="92"></el-table-column>
+                                        <el-table-column prop="breach_rate" label="违约费率" width="92"></el-table-column>
+                                        <el-table-column label="违约金" width="108"><template #default="s"><span class="num">¥{{ numberFormat(s.row.late_fee_amount || 0) }}</span></template></el-table-column>
+                                        <el-table-column label="违约金核销金额" width="138"><template #default="s"><span class="num">¥{{ numberFormat(s.row.late_fee_waived_amount || 0) }}</span></template></el-table-column>
+                                    </el-table>
+                                </div>
+                                <div v-if="!reconDetailPeriods.length" class="recon-detail-empty">当前合同暂无分期记录</div>
+                            </template>
+                            <el-alert v-else-if="!reconDetailLoading" type="error" :closable="false" show-icon title="对账单详情加载失败，请关闭后重试"></el-alert>
+
+                            <div v-if="reconDetail" class="recon-detail-proof">
+                                <div class="recon-detail-section-title">
+                                    <span>本期对账凭证</span>
+                                    <span class="recon-detail-count">第 {{ reconDetail.period }} 期</span>
+                                </div>
+                                <div class="recon-detail-meta">
+                                    <span>状态：<b>{{ reconDetail.status || '-' }}</b></span>
+                                    <span>公司收款流水号：<b>{{ reconDetail.bank_serial || '-' }}</b></span>
+                                    <span>运营录入金额：<b>¥{{ numberFormat(reconDetail.reported_amount || 0) }}</b></span>
+                                    <span>核销人：<b>{{ reconDetail.verified_by || '-' }}</b></span>
+                                    <span>核销时间：<b>{{ reconDetail.verified_at || '-' }}</b></span>
+                                </div>
+                                <div class="recon-detail-proof-grid">
+                                    <div>
+                                        <div class="recon-detail-proof-label">运营/销售上传的客户支付截图</div>
+                                        <div v-if="attachmentList(reconDetail.screenshot_path).length" class="attachment-grid attachment-grid-compact">
+                                            <a v-for="file in attachmentList(reconDetail.screenshot_path)" :key="file.url" :href="file.url" target="_blank" class="attachment-card attachment-card-compact">
+                                                <img v-if="isImageAttachment(file.url)" :src="file.url" :alt="file.name" class="attachment-thumb">
+                                                <div v-else class="attachment-file"><span class="attachment-file-type">{{ attachmentTypeLabel(file.url) }}</span></div>
+                                            </a>
+                                        </div>
+                                        <el-alert v-else type="info" :closable="false" show-icon title="未上传客户支付截图"></el-alert>
+                                    </div>
+                                    <div>
+                                        <div class="recon-detail-proof-label">银行回单</div>
+                                        <div v-if="attachmentList(reconDetail.bank_receipt_path).length" class="attachment-grid attachment-grid-compact">
+                                            <a v-for="file in attachmentList(reconDetail.bank_receipt_path)" :key="file.url" :href="file.url" target="_blank" class="attachment-card attachment-card-compact">
+                                                <img v-if="isImageAttachment(file.url)" :src="file.url" :alt="file.name" class="attachment-thumb">
+                                                <div v-else class="attachment-file"><span class="attachment-file-type">{{ attachmentTypeLabel(file.url) }}</span></div>
+                                            </a>
+                                        </div>
+                                        <el-alert v-else type="info" :closable="false" show-icon title="未上传银行回单"></el-alert>
+                                    </div>
+                                </div>
+                                <div class="recon-detail-proof-label" style="margin-top:14px">核销分配明细</div>
+                                <el-table :data="reconDetailAllocations" size="small" border style="width:100%">
+                                    <el-table-column label="类型" width="120"><template #default="a">{{ allocTypeLabel(a.row.allocation_type) }}</template></el-table-column>
+                                    <el-table-column label="金额" width="120"><template #default="a">¥{{ numberFormat(a.row.allocated_amount) }}</template></el-table-column>
+                                    <el-table-column label="说明"><template #default="a">{{ a.row.note || a.row.fee_description || '—' }}</template></el-table-column>
+                                    <el-table-column label="时间" width="160"><template #default="a">{{ a.row.created_at || '—' }}</template></el-table-column>
+                                </el-table>
+                                <div v-if="!reconDetailAllocations.length" class="recon-detail-empty">暂无分配明细</div>
+                            </div>
+                        </div>
                         <template #footer><el-button @click="showReconDetailDialog=false">关闭</el-button></template>
                     </el-dialog>
 
@@ -1786,15 +2252,9 @@
                                     <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;align-items:center">
                                         <a v-for="(file, index) in attachmentList(item.customer_screenshot_path)" :key="file.url" :href="file.url" target="_blank" class="badge badge-blue">客户付款凭证 {{ index + 1 }}</a>
                                         <a v-if="item.bank_receipt_path" :href="item.bank_receipt_path" target="_blank" class="badge badge-green">公司收款回单</a>
-                                        <el-upload v-if="currentUser.role==='财务' && item.ref_type==='initial_payment' && !item.bank_receipt_path && item.overall_status==='审批中'"
-                                            action="/api/upload" :show-file-list="false" :with-credentials="true"
-                                            :on-success="(res) => onInitialReceiptUpload(item.initial_payment_id || item.ref_id, res)"
-                                            accept=".jpg,.jpeg,.png,.pdf">
-                                            <el-button size="small" type="primary" plain>上传公司回单</el-button>
-                                        </el-upload>
-                                        <el-button v-if="currentUser.role==='财务' && item.ref_type==='initial_payment' && !item.bank_receipt_path && item.overall_status==='审批中'"
-                                            size="small" type="success" plain @click="onInitialReceiptSerialOnly(item.initial_payment_id || item.ref_id)">
-                                            仅填流水号确认
+                                        <el-button v-if="currentUser.role==='财务' && item.ref_type==='initial_payment' && item.overall_status==='审批中'"
+                                            size="small" type="success" plain @click="openInitialPaymentConfirmForItem(item)">
+                                            财务确认到账
                                         </el-button>
                                     </div>
                                 </div>
@@ -3203,6 +3663,14 @@
                     </el-col>
                 </el-row>
 
+                <el-divider content-position="left">意向定金</el-divider>
+                <el-row :gutter="16">
+                    <el-col :span="12">
+                        <el-form-item label="意向定金金额（自由填写）">
+                            <el-input-number v-model="newOrder.intent_deposit_amount" :min="0" :step="500" style="width:100%"></el-input-number>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
                 <el-divider content-position="left">分期信息</el-divider>
                 <el-row :gutter="16">
                     <el-col :span="12" v-if="newOrder.sales_mode==='以租代售'">
@@ -3280,7 +3748,7 @@
                 </el-row>
                 <el-row :gutter="16">
                     <el-col :span="24">
-                        <el-form-item label="客户首付凭证（可多张）" required>
+                        <el-form-item label="客户定金/付款凭证（可多张）" required>
                             <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
                                 <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onOrderScreenshotUpload" multiple accept=".jpg,.jpeg,.png,.pdf">
                                     <el-button type="warning" plain>上传付款凭证</el-button>
@@ -3850,6 +4318,180 @@
                 <el-button v-if="returnForm.id && ['财务','老板'].includes(currentUser.role) && returnForm.status==='待出款'" type="success" @click="submitReturnPay(returnForm)" :loading="submitting">退还押金</el-button>
             </template>
         </el-dialog>
+
+        <!-- ========== 租金减免流程 DIALOGS ========== -->
+        <el-dialog v-model="showWaiverApplyDialog" title="发起租金减免" width="760" :close-on-click-modal="false" top="4vh">
+            <el-alert type="warning" :closable="false" show-icon class="waiver-dialog-alert"
+                title="客户定金到账并对账确认后，才能冲抵扣减租金。请上传与本次减免对应的收款或定金支付截图。">
+            </el-alert>
+            <el-form :model="waiverApplyForm" label-position="top">
+                <el-form-item label="租赁合同" required>
+                    <el-select v-model="waiverApplyForm.contract_id" filterable placeholder="搜索并选择合同" style="width:100%" @change="loadWaiverApplyPeriods">
+                        <el-option v-for="ct in contracts" :key="ct.id"
+                            :label="`${ct.plate_number || ct.vin || '未绑定车辆'} / ${ct.customer_name || '未命名客户'} / 合同#${ct.id}`"
+                            :value="ct.id"></el-option>
+                    </el-select>
+                </el-form-item>
+                <el-form-item label="减免期次" required>
+                    <el-radio-group v-model="waiverApplyForm.period_mode" @change="waiverApplyForm.period_mode === 'all' ? waiverApplyForm.target_periods = [] : null">
+                        <el-radio-button label="all">全部未付租金</el-radio-button>
+                        <el-radio-button label="selected">指定期次</el-radio-button>
+                    </el-radio-group>
+                </el-form-item>
+                <el-form-item v-if="waiverApplyForm.period_mode === 'selected'" label="选择可减免期次" required>
+                    <div v-loading="waiverApplyLoading" class="waiver-period-picker">
+                        <el-checkbox-group v-model="waiverApplyForm.target_periods">
+                            <el-checkbox v-for="item in waiverApplyRepayments" :key="item.id" :label="item.period" border>
+                                第 {{ item.period }} 期 · 到期 {{ item.due_date || '-' }} · 待缴 ¥{{ numberFormat(Math.max(0, Number(item.amount || 0) - Number(item.paid_amount || 0))) }}
+                            </el-checkbox>
+                        </el-checkbox-group>
+                        <div v-if="waiverApplyForm.contract_id && !waiverApplyLoading && !waiverApplyRepayments.length" class="waiver-dialog-empty">该合同没有可减免的未付租金期次</div>
+                    </div>
+                </el-form-item>
+                <el-row :gutter="16">
+                    <el-col :span="12">
+                        <el-form-item label="申请减免金额（元）">
+                            <el-input-number v-model="waiverApplyForm.waive_amount" :min="0.01" :precision="2" :step="100" controls-position="right" placeholder="留空表示申请全额减免" style="width:100%"></el-input-number>
+                            <div class="waiver-field-hint">留空时，运营按目标期次和后续可抵扣余额核定实际金额。</div>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="12">
+                        <el-form-item label="定金支付/收款凭证" required>
+                            <div class="waiver-upload-row">
+                                <el-upload action="/api/upload" :show-file-list="false" :with-credentials="true" :on-success="onWaiverApplyUpload" accept=".jpg,.jpeg,.png,.pdf">
+                                    <el-button type="primary" plain><el-icon><Upload/></el-icon> 上传凭证</el-button>
+                                </el-upload>
+                                <a v-if="waiverApplyForm.attachment_path" :href="waiverApplyForm.attachment_path" target="_blank" class="waiver-upload-link">已上传，点击查看</a>
+                                <span v-else class="waiver-field-hint">支持图片或 PDF</span>
+                            </div>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
+                <el-form-item label="减免原因" required>
+                    <el-input v-model="waiverApplyForm.reason" type="textarea" :rows="4" maxlength="500" show-word-limit placeholder="说明客户定金支付、对账情况及本次申请减免的依据"></el-input>
+                </el-form-item>
+            </el-form>
+            <template #footer>
+                <el-button @click="showWaiverApplyDialog = false">取消</el-button>
+                <el-button type="primary" @click="submitWaiverApply" :loading="submitting">提交老板审批</el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog v-model="showWaiverApproveDialog" title="老板审批租金减免" width="620" :close-on-click-modal="false">
+            <div v-if="waiverApproveTarget" class="waiver-dialog-summary">
+                <div class="waiver-dialog-main">{{ waiverApproveTarget.customer_name || '-' }} · 合同 #{{ waiverApproveTarget.contract_id }}</div>
+                <div class="waiver-dialog-meta">{{ waiverApproveTarget.plate_number || waiverApproveTarget.vin || '未绑定车辆' }} · {{ waiverPeriodText(waiverApproveTarget.target_period_list) }}</div>
+                <div class="waiver-dialog-money">申请金额：{{ waiverApproveTarget.waive_amount == null ? '全额减免' : '¥' + numberFormat(waiverApproveTarget.waive_amount) }}</div>
+                <div class="waiver-dialog-reason">{{ waiverApproveTarget.reason || '-' }}</div>
+                <a v-for="(file, index) in attachmentList(waiverApproveTarget.attachment_path)" :key="file.url" :href="file.url" target="_blank" class="waiver-attachment">凭证{{ index + 1 }}</a>
+            </div>
+            <el-form :model="waiverApproveForm" label-position="top">
+                <el-form-item label="审批决定" required>
+                    <el-radio-group v-model="waiverApproveForm.decision">
+                        <el-radio-button label="approve">同意，转运营核定</el-radio-button>
+                        <el-radio-button label="reject">驳回申请</el-radio-button>
+                    </el-radio-group>
+                </el-form-item>
+                <el-form-item :label="waiverApproveForm.decision === 'reject' ? '驳回原因' : '审批意见'" :required="waiverApproveForm.decision === 'reject'">
+                    <el-input v-model="waiverApproveForm.comment" type="textarea" :rows="4" maxlength="500" show-word-limit :placeholder="waiverApproveForm.decision === 'reject' ? '请明确说明驳回原因' : '可填写审批说明（选填）'"></el-input>
+                </el-form-item>
+            </el-form>
+            <template #footer>
+                <el-button @click="showWaiverApproveDialog = false">取消</el-button>
+                <el-button :type="waiverApproveForm.decision === 'reject' ? 'danger' : 'success'" @click="submitWaiverApprove" :loading="submitting">
+                    {{ waiverApproveForm.decision === 'reject' ? '确认驳回' : '审批通过' }}
+                </el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog v-model="showWaiverOperationsDialog" title="运营核定租金减免" width="680" :close-on-click-modal="false">
+            <div v-if="waiverOperationsTarget" class="waiver-dialog-summary">
+                <div class="waiver-dialog-main">{{ waiverOperationsTarget.customer_name || '-' }} · 合同 #{{ waiverOperationsTarget.contract_id }}</div>
+                <div class="waiver-dialog-meta">{{ waiverOperationsTarget.plate_number || waiverOperationsTarget.vin || '未绑定车辆' }} · {{ waiverPeriodText(waiverOperationsTarget.target_period_list) }}</div>
+                <div class="waiver-dialog-money">销售申请：{{ waiverOperationsTarget.waive_amount == null ? '全额减免' : '¥' + numberFormat(waiverOperationsTarget.waive_amount) }}</div>
+                <div class="waiver-dialog-reason">{{ waiverOperationsTarget.reason || '-' }}</div>
+            </div>
+            <el-alert type="info" :closable="false" show-icon class="waiver-dialog-alert"
+                title="减免金额用于冲减后续未付租金，坏账金额转入坏账口径；两项合计将提交财务核销。">
+            </el-alert>
+            <el-form :model="waiverOperationsForm" label-position="top">
+                <el-row :gutter="16">
+                    <el-col :span="12">
+                        <el-form-item label="实际减免金额（元）" required>
+                            <el-input-number v-model="waiverOperationsForm.approved_waive_amount" :min="0" :precision="2" :step="100" controls-position="right" style="width:100%"></el-input-number>
+                        </el-form-item>
+                    </el-col>
+                    <el-col :span="12">
+                        <el-form-item label="坏账金额（元）" required>
+                            <el-input-number v-model="waiverOperationsForm.bad_debt_amount" :min="0" :precision="2" :step="100" controls-position="right" style="width:100%"></el-input-number>
+                        </el-form-item>
+                    </el-col>
+                </el-row>
+                <el-form-item label="开始抵扣期次">
+                    <el-input-number v-model="waiverOperationsForm.carryover_start_period" :min="1" :step="1" controls-position="right" placeholder="留空由财务按最早未付期次抵扣" style="width:100%"></el-input-number>
+                    <div class="waiver-field-hint">填写的期次及之后期次才参与本次减免核销。</div>
+                </el-form-item>
+                <el-form-item label="运营核定说明">
+                    <el-input v-model="waiverOperationsForm.operations_note" type="textarea" :rows="4" maxlength="500" show-word-limit placeholder="说明金额拆分、抵扣口径和特殊事项"></el-input>
+                </el-form-item>
+            </el-form>
+            <template #footer>
+                <el-button @click="showWaiverOperationsDialog = false">取消</el-button>
+                <el-button type="warning" @click="submitWaiverOperations" :loading="submitting">提交财务核销</el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog v-model="showWaiverExecuteDialog" title="财务核销租金减免" width="620" :close-on-click-modal="false">
+            <div v-if="waiverExecuteTarget" class="waiver-dialog-summary waiver-execute-summary">
+                <div class="waiver-dialog-main">{{ waiverExecuteTarget.customer_name || '-' }} · 合同 #{{ waiverExecuteTarget.contract_id }}</div>
+                <div class="waiver-dialog-meta">{{ waiverExecuteTarget.plate_number || waiverExecuteTarget.vin || '未绑定车辆' }} · {{ waiverPeriodText(waiverExecuteTarget.target_period_list) }}</div>
+                <div class="waiver-execute-grid">
+                    <div><span>实际减免</span><b class="waiver-money">¥{{ numberFormat(waiverExecuteTarget.approved_waive_amount || 0) }}</b></div>
+                    <div><span>坏账金额</span><b class="waiver-danger">¥{{ numberFormat(waiverExecuteTarget.bad_debt_amount || 0) }}</b></div>
+                    <div><span>抵扣起始期</span><b>{{ waiverExecuteTarget.carryover_start_period ? '第 ' + waiverExecuteTarget.carryover_start_period + ' 期' : '最早未付期' }}</b></div>
+                </div>
+                <div v-if="waiverExecuteTarget.operations_note" class="waiver-dialog-reason">运营核定：{{ waiverExecuteTarget.operations_note }}</div>
+            </div>
+            <div v-if="waiverExecuteTarget" style="margin-top:14px">
+                <div style="font-size:13px;color:#6b7280;margin-bottom:6px">销售上传的客户支付凭证</div>
+                <div v-if="attachmentList(waiverExecuteTarget.attachment_path).length" class="attachment-grid">
+                    <a v-for="file in attachmentList(waiverExecuteTarget.attachment_path)" :key="file.url" :href="file.url" target="_blank" class="attachment-card">
+                        <img v-if="isImageAttachment(file.url)" :src="file.url" :alt="file.name" class="attachment-thumb">
+                        <div v-else class="attachment-file">
+                            <span class="attachment-file-type">{{ attachmentTypeLabel(file.url) }}</span>
+                        </div>
+                        <div class="attachment-name">{{ file.name }}</div>
+                    </a>
+                </div>
+                <el-alert v-else type="error" :closable="false" show-icon title="销售尚未上传客户支付凭证，不能核销"></el-alert>
+            </div>
+            <el-alert type="error" :closable="false" show-icon class="waiver-dialog-alert"
+                title="确认后将依次冲减后续未付租金，不足部分再抵扣押金。核销后不可撤销，请核对金额和期次。">
+            </el-alert>
+            <template #footer>
+                <el-button @click="showWaiverExecuteDialog = false">取消</el-button>
+                <el-button type="danger" @click="submitWaiverExecute" :loading="submitting" :disabled="!waiverExecuteTarget || !attachmentList(waiverExecuteTarget.attachment_path).length">确认已对账入账并核销</el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog v-model="showWaiverRevokeDialog" title="撤销租金减免申请" width="520" :close-on-click-modal="false">
+            <div v-if="waiverRevokeTarget" class="waiver-dialog-summary">
+                <div class="waiver-dialog-main">{{ waiverRevokeTarget.customer_name || '-' }} · 合同 #{{ waiverRevokeTarget.contract_id }}</div>
+                <div class="waiver-dialog-meta">{{ waiverRevokeTarget.plate_number || waiverRevokeTarget.vin || '未绑定车辆' }} · 当前状态 {{ waiverRevokeTarget.status }}</div>
+            </div>
+            <el-alert type="warning" :closable="false" show-icon class="waiver-dialog-alert"
+                title="撤销后该申请不再进入后续审批和核销；如仍需减免，请重新发起申请。">
+            </el-alert>
+            <el-form label-position="top">
+                <el-form-item label="撤销说明">
+                    <el-input v-model="waiverRevokeReason" type="textarea" :rows="3" maxlength="300" show-word-limit placeholder="填写撤销原因（选填）"></el-input>
+                </el-form-item>
+            </el-form>
+            <template #footer>
+                <el-button @click="showWaiverRevokeDialog = false">取消</el-button>
+                <el-button type="info" @click="submitWaiverRevoke" :loading="submitting">确认撤销</el-button>
+            </template>
+        </el-dialog>
     </div>
 
 
@@ -3940,6 +4582,7 @@
             function hasPage(page) { return currentUser.value && currentUser.value.pages && currentUser.value.pages.includes(page); }
             function canAction(page) {
                 if (!currentUser.value) return false;
+                if (page === 'waivers') return currentUser.value.role === '销售';
                 if (currentUser.value.role === '老板') return true;
                 if (page === 'orders') return ['销售', '老板'].includes(currentUser.value.role);
                 if (page === 'assets') return currentUser.value.role === '运营';
@@ -3954,7 +4597,9 @@
                 return isSalesOrAdmin() && row && row.asset_status === '在库' && row.validation_status !== 'invalid';
             }
             function canInitiateVehicleReturn(row) {
-                return isSalesOrAdmin() && row && row.asset_status === '已经出库（租赁）';
+                return isSalesOrAdmin() && row && row.contract_id
+                    && row.asset_status === '已经出库（租赁）'
+                    && !['已结清', '已终止'].includes(row.contract_status);
             }
             // 报单台账行：销售对“已激活的租赁单（车辆已出库租赁中）”可直接发起退车
             function canReturnFromOrder(row) {
@@ -4092,6 +4737,7 @@
                     wechat_private_fee: 0,
                     gifted_items: '',
                     deposit_amount: 0,
+                    intent_deposit_amount: 0,
                     remark: `由车辆管理发起：${row.plate_number || row.vin || ''}`
                 });
                 nextTick(() => {
@@ -4113,6 +4759,7 @@
             const energyFilter = ref('');
             const batteryCapacityFilter = ref('');
             const horsepowerFilter = ref('');
+            const refurbishmentFilter = reactive({ keyword: '', status: '' });
             const showDeleted = ref(false);
             const contractSearch = ref('');
             const contractFilter = ref('');
@@ -4195,6 +4842,7 @@
             const contracts = ref([]);
             const renewals = ref([]);
             const refurbishmentRecords = ref([]);
+            const refurbishmentLoading = ref(false);
             const pendingOwnershipTransfers = ref([]);
             const legacyPendingContracts = ref([]);
             const legacyPendingSelection = ref([]);
@@ -4314,6 +4962,47 @@
             const completionHistoryFilter = reactive({ keyword: '', source_type: '', date_start: '', date_end: '' });
             const completionHistoryDateRange = ref([]);
             const invoiceRequests = ref([]);
+            const invoiceRecords = ref([]);
+            const invoiceRecordSearch = ref('');
+            // 租金减免工作台：销售发起，老板审批，运营核定，财务核销
+            const waivers = ref([]);
+            const waiverLoading = ref(false);
+            const waiverCounts = reactive({
+                total: 0,
+                pending_approval: 0,
+                pending_operations: 0,
+                pending_finance: 0,
+                effective: 0,
+            });
+            const waiverRolePendingCount = ref(0);
+            const waiverFilter = reactive({ keyword: '', status: '' });
+            const showWaiverApplyDialog = ref(false);
+            const waiverApplyForm = reactive({
+                contract_id: null,
+                period_mode: 'all',
+                target_periods: [],
+                waive_amount: null,
+                reason: '',
+                attachment_path: '',
+            });
+            const waiverApplyRepayments = ref([]);
+            const waiverApplyLoading = ref(false);
+            const showWaiverApproveDialog = ref(false);
+            const waiverApproveTarget = ref(null);
+            const waiverApproveForm = reactive({ decision: 'approve', comment: '' });
+            const showWaiverOperationsDialog = ref(false);
+            const waiverOperationsTarget = ref(null);
+            const waiverOperationsForm = reactive({
+                approved_waive_amount: 0,
+                bad_debt_amount: 0,
+                carryover_start_period: null,
+                operations_note: '',
+            });
+            const showWaiverExecuteDialog = ref(false);
+            const waiverExecuteTarget = ref(null);
+            const showWaiverRevokeDialog = ref(false);
+            const waiverRevokeTarget = ref(null);
+            const waiverRevokeReason = ref('');
             const receivingCompanies = ref([]);
             const bossDashboard = ref({});
             const slaReminders = ref([]);
@@ -4329,6 +5018,258 @@
             const receivableScreenshotPath = ref('');
             const receivableSettleForm = reactive({ bank_serial: '', received_amount: 0 });
             const fetchReceivables = async () => { receivablesList.value = await (await fetch('/api/receivables')).json(); };
+            const waiverStatusOptions = [
+                { value: '', label: '全部状态' },
+                { value: '待审批', label: '待审批' },
+                { value: '待运营填写', label: '待运营填写' },
+                { value: '待财务核销', label: '待财务核销' },
+                { value: '已生效', label: '已生效' },
+                { value: '已驳回', label: '已驳回' },
+                { value: '已撤销', label: '已撤销' },
+            ];
+            const waiverStatusCards = computed(() => [
+                { value: '', label: '全部申请', count: waiverCounts.total, hint: '全部租金减免记录', color: '#475569' },
+                { value: '待审批', label: '待老板审批', count: waiverCounts.pending_approval, hint: '等待审批决策', color: '#2563eb' },
+                { value: '待运营填写', label: '待运营核定', count: waiverCounts.pending_operations, hint: '待填写减免与坏账', color: '#d97706' },
+                { value: '待财务核销', label: '待财务核销', count: waiverCounts.pending_finance, hint: '待确认抵扣入账', color: '#dc2626' },
+                { value: '已生效', label: '已生效', count: waiverCounts.effective, hint: '已完成核销', color: '#059669' },
+            ]);
+            const filteredWaivers = computed(() => {
+                const keyword = String(waiverFilter.keyword || '').trim().toLowerCase();
+                return waivers.value.filter(row => {
+                    if (waiverFilter.status && row.status !== waiverFilter.status) return false;
+                    if (!keyword) return true;
+                    return [
+                        row.customer_name,
+                        row.customer_phone,
+                        row.contract_id,
+                        row.plate_number,
+                        row.vin,
+                        row.car_type,
+                        row.sales_applied_by,
+                        row.reason,
+                    ].some(value => String(value || '').toLowerCase().includes(keyword));
+                });
+            });
+            function waiverStatusClass(status) {
+                return {
+                    '待审批': 'badge-blue',
+                    '待运营填写': 'badge-orange',
+                    '待财务核销': 'badge-red',
+                    '已生效': 'badge-green',
+                    '已驳回': 'badge-red',
+                    '已撤销': 'badge-gray',
+                }[status] || 'badge-gray';
+            }
+            function waiverPeriodText(value) {
+                if (!value || value === 'all' || value === '全部') return '全部未付租金';
+                try {
+                    const parsed = JSON.parse(value);
+                    const periods = Array.isArray(parsed) ? parsed : [parsed];
+                    return periods.length ? `第 ${periods.join('、')} 期` : '全部未付租金';
+                } catch (e) {
+                    return String(value);
+                }
+            }
+            function waiverRowClass({ row }) {
+                return row && row.actionable ? 'waiver-action-row' : '';
+            }
+            async function fetchWaivers() {
+                if (!currentUser.value || !hasPage('waivers')) {
+                    waivers.value = [];
+                    waiverRolePendingCount.value = 0;
+                    return [];
+                }
+                waiverLoading.value = true;
+                try {
+                    const res = await fetch('/api/waivers?waiver_kind=rent');
+                    const data = await readApiJson(res, '租金减免列表加载失败');
+                    waivers.value = Array.isArray(data.items) ? data.items : [];
+                    Object.assign(waiverCounts, {
+                        total: Number(data.counts?.total || 0),
+                        pending_approval: Number(data.counts?.pending_approval || 0),
+                        pending_operations: Number(data.counts?.pending_operations || 0),
+                        pending_finance: Number(data.counts?.pending_finance || 0),
+                        effective: Number(data.counts?.effective || 0),
+                    });
+                    waiverRolePendingCount.value = Number(data.role_pending_count || 0);
+                    return waivers.value;
+                } catch (error) {
+                    waivers.value = [];
+                    console.error('加载租金减免失败', error);
+                    ElementPlus.ElMessage.error(error.message || '租金减免列表加载失败');
+                    return [];
+                } finally {
+                    waiverLoading.value = false;
+                }
+            }
+            function resetWaiverApplyForm() {
+                Object.assign(waiverApplyForm, {
+                    contract_id: null,
+                    period_mode: 'all',
+                    target_periods: [],
+                    waive_amount: null,
+                    reason: '',
+                    attachment_path: '',
+                });
+                waiverApplyRepayments.value = [];
+            }
+            function openWaiverApply() {
+                resetWaiverApplyForm();
+                fetchContracts();
+                showWaiverApplyDialog.value = true;
+            }
+            async function loadWaiverApplyPeriods(contractId) {
+                waiverApplyRepayments.value = [];
+                if (!contractId) return;
+                waiverApplyLoading.value = true;
+                try {
+                    const data = await (await fetch(`/api/contracts/${contractId}/repayments`)).json();
+                    waiverApplyRepayments.value = (Array.isArray(data) ? data : [])
+                        .filter(row => Number(row.period || 0) >= 1 && Number(row.amount || 0) > Number(row.paid_amount || 0));
+                } catch (e) {
+                    ElementPlus.ElMessage.error('可减免期次加载失败');
+                } finally {
+                    waiverApplyLoading.value = false;
+                }
+            }
+            function onWaiverApplyUpload(res) {
+                if (!res.success || !res.url) return ElementPlus.ElMessage.error('定金截图上传失败');
+                waiverApplyForm.attachment_path = res.url;
+                ElementPlus.ElMessage.success('定金截图已上传');
+            }
+            async function submitWaiverApply() {
+                if (!waiverApplyForm.contract_id) return ElementPlus.ElMessage.warning('请选择合同');
+                if (!waiverApplyForm.reason.trim()) return ElementPlus.ElMessage.warning('请填写减免原因');
+                if (!waiverApplyForm.attachment_path) return ElementPlus.ElMessage.warning('请上传定金支付截图或凭证');
+                const preferredPeriods = waiverApplyForm.period_mode === 'all' ? null : waiverApplyForm.target_periods;
+                if (waiverApplyForm.period_mode === 'selected' && !preferredPeriods.length) {
+                    return ElementPlus.ElMessage.warning('请至少选择一个减免期次');
+                }
+                const waiveAmount = waiverApplyForm.waive_amount === '' || waiverApplyForm.waive_amount === null
+                    ? null
+                    : Number(waiverApplyForm.waive_amount);
+                if (waiveAmount !== null && (!Number.isFinite(waiveAmount) || waiveAmount <= 0)) {
+                    return ElementPlus.ElMessage.warning('申请金额必须大于0，或留空表示全额');
+                }
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/contracts/${waiverApplyForm.contract_id}/waivers`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            waiver_kind: 'rent',
+                            target_period_list: preferredPeriods || 'all',
+                            waive_amount: waiveAmount,
+                            reason: waiverApplyForm.reason.trim(),
+                            attachment_path: waiverApplyForm.attachment_path,
+                        }),
+                    });
+                    const data = await readApiJson(res, '减免申请提交失败');
+                    ElementPlus.ElMessage.success(data.message || '减免申请已提交');
+                    showWaiverApplyDialog.value = false;
+                    await fetchWaivers();
+                }, '减免申请提交失败');
+            }
+            function openWaiverApprove(row) {
+                waiverApproveTarget.value = row;
+                waiverApproveForm.decision = 'approve';
+                waiverApproveForm.comment = '';
+                showWaiverApproveDialog.value = true;
+            }
+            async function submitWaiverApprove() {
+                if (!waiverApproveTarget.value) return;
+                if (waiverApproveForm.decision === 'reject' && !waiverApproveForm.comment.trim()) {
+                    return ElementPlus.ElMessage.warning('请输入驳回原因');
+                }
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/waivers/${waiverApproveTarget.value.id}/approve`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            decision: waiverApproveForm.decision,
+                            comment: waiverApproveForm.comment.trim(),
+                        }),
+                    });
+                    const data = await readApiJson(res, '审批失败');
+                    ElementPlus.ElMessage.success(data.message || '审批已完成');
+                    showWaiverApproveDialog.value = false;
+                    await fetchWaivers();
+                }, '审批失败');
+            }
+            function openWaiverOperations(row) {
+                waiverOperationsTarget.value = row;
+                Object.assign(waiverOperationsForm, {
+                    approved_waive_amount: Number(row.waive_amount || row.approved_waive_amount || 0),
+                    bad_debt_amount: Number(row.bad_debt_amount || 0),
+                    carryover_start_period: row.carryover_start_period || null,
+                    operations_note: row.operations_note || '',
+                });
+                showWaiverOperationsDialog.value = true;
+            }
+            async function submitWaiverOperations() {
+                if (!waiverOperationsTarget.value) return;
+                const approved = Number(waiverOperationsForm.approved_waive_amount || 0);
+                const badDebt = Number(waiverOperationsForm.bad_debt_amount || 0);
+                if (!Number.isFinite(approved) || !Number.isFinite(badDebt) || approved < 0 || badDebt < 0 || approved + badDebt <= 0) {
+                    return ElementPlus.ElMessage.warning('减免金额和坏账金额需不小于0，且至少一项大于0');
+                }
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/waivers/${waiverOperationsTarget.value.id}/operations`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            approved_waive_amount: approved,
+                            bad_debt_amount: badDebt,
+                            carryover_start_period: waiverOperationsForm.carryover_start_period || null,
+                            operations_note: waiverOperationsForm.operations_note.trim(),
+                        }),
+                    });
+                    const data = await readApiJson(res, '运营核定提交失败');
+                    ElementPlus.ElMessage.success(data.message || '运营核定已提交');
+                    showWaiverOperationsDialog.value = false;
+                    await fetchWaivers();
+                }, '运营核定提交失败');
+            }
+            function openWaiverExecute(row) {
+                waiverExecuteTarget.value = row;
+                showWaiverExecuteDialog.value = true;
+            }
+            async function submitWaiverExecute() {
+                if (!waiverExecuteTarget.value) return;
+                if (!attachmentList(waiverExecuteTarget.value.attachment_path).length) {
+                    return ElementPlus.ElMessage.warning('销售尚未上传客户支付凭证，不能核销');
+                }
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/waivers/${waiverExecuteTarget.value.id}/execute`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({}),
+                    });
+                    const data = await readApiJson(res, '财务核销失败');
+                    ElementPlus.ElMessage.success(data.message || '财务核销完成');
+                    showWaiverExecuteDialog.value = false;
+                    await fetchWaivers();
+                }, '财务核销失败');
+            }
+            function openWaiverRevoke(row) {
+                waiverRevokeTarget.value = row;
+                waiverRevokeReason.value = '';
+                showWaiverRevokeDialog.value = true;
+            }
+            async function submitWaiverRevoke() {
+                if (!waiverRevokeTarget.value) return;
+                await runSubmitting(async () => {
+                    const res = await fetch(`/api/waivers/${waiverRevokeTarget.value.id}/revoke`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ reason: waiverRevokeReason.value.trim() }),
+                    });
+                    const data = await readApiJson(res, '撤销失败');
+                    ElementPlus.ElMessage.success(data.message || '减免申请已撤销');
+                    showWaiverRevokeDialog.value = false;
+                    await fetchWaivers();
+                }, '撤销失败');
+            }
             const receivableOutstanding = (row) => Math.max(0, Number(row?.amount || 0) - Number(row?.paid_amount || 0));
             function openReceivableScreenshot(row) { receivableTarget.value = row; receivableScreenshotPath.value = row.screenshot_path || ''; showReceivableScreenshotDialog.value = true; }
             function onReceivableScreenshotUpload(res) { if (res.url) receivableScreenshotPath.value = res.url; }
@@ -4364,6 +5305,9 @@
             const showReconDetailDialog = ref(false);
             const reconDetail = ref(null);
             const reconDetailAllocations = ref([]);
+            const reconDetailSummary = ref(null);
+            const reconDetailPeriods = ref([]);
+            const reconDetailLoading = ref(false);
             const verifyTarget = ref(null);
             const verifySerial = ref('');
             const verifyAmount = ref(0);
@@ -4378,6 +5322,21 @@
                 bank_receipt_path: '',
                 comment: ''
             });
+            const showInitialPaymentConfirmDialog = ref(false);
+            const initialPaymentConfirmTarget = ref(null);
+            const initialPaymentConfirmForm = reactive({
+                flow_id: null,
+                payment_id: null,
+                bank_serial: '',
+                bank_receipt_path: '',
+                received_amount: 0,
+                shortage_reason: '',
+                promised_repay_date: '',
+                comment: ''
+            });
+            const showIntentDepositDialog = ref(false);
+            const intentDepositTarget = ref(null);
+            const intentDepositForm = reactive({ order_id: null, serial: '', receipt_path: '' });
             const showReconInitiateDialog = ref(false);
             const reconInitiateTarget = ref(null);
             const reconInitiateAmount = ref(0);
@@ -4661,6 +5620,7 @@
                 wechat_private_fee: 0,
                 gifted_items: '',
                 deposit_amount: 0,
+                intent_deposit_amount: 0,
                 remark: '',
                 // 20260804 大改版：首付前移 / 金融方案
                 finance_plan_id: null,
@@ -4844,12 +5804,15 @@
                 { key: 'orders', label: '销售报单', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 17A2.5 2.5 0 014 14.5V5a2 2 0 012-2h14v14"/><path d="M8 7h8"/><path d="M8 11h8"/></svg>' },
                 { key: 'customer_library', label: '客户库', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
                 { key: 'assets', label: '车辆管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-2-2.1-3.2C13.2 5.9 12.2 5.5 11.1 5.5H5c-1.1 0-2 .9-2 2v7.5c0 .6.4 1 1 1h1"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/></svg>' },
+                { key: 'refurbishment', label: '车辆整备库', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.7-3.7a6 6 0 01-7.9 7.9l-6.9 6.9a2.1 2.1 0 01-3-3l6.9-6.9a6 6 0 017.9-7.9l-3.7 3.7z"/></svg>' },
                 { key: 'completion_history', label: '历史完结', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5"/><path d="M3.6 12a8.4 8.4 0 1 0 2.1-5.6L3 8"/><path d="M12 7v5l3.5 2"/></svg>' },
                 { key: 'approvals', label: '审批中心', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
                 { key: 'bills', label: '账单管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>' },
                 { key: 'receiving_companies', label: '收款公司', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21h18"/><path d="M5 21V8l7-4 7 4v13"/><path d="M9 21v-5h6v5"/><path d="M8 11h.01"/><path d="M12 11h.01"/><path d="M16 11h.01"/></svg>' },
                 { key: 'invoice', label: '发票申请', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>' },
+                { key: 'invoice_records', label: '开票信息', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 3h16v18H4z"/><path d="M8 7h8"/><path d="M8 11h8"/><path d="M8 15h5"/><path d="M17 18l2 2 3-4"/></svg>' },
                 { key: 'reconciliation', label: '对账单', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22,4 12,14.01 9,11.01"/></svg>' },
+                { key: 'waivers', label: '租金减免', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12V7a2 2 0 00-2-2H6a2 2 0 00-2 2v10a2 2 0 002 2h6"/><path d="M8 9h8"/><path d="M8 13h5"/><path d="M17 15l2 2 4-4"/></svg>' },
                 { key: 'risk', label: '锁车管理', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>' },
                 { key: 'profit', label: '利润核算', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>' },
                 { key: 'settings', label: '系统设置', svg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>' },
@@ -4867,12 +5830,15 @@
                 orders: { title: '销售报单', desc: '销售录单锁车、财务确认客户意向，驱动后续线下合同上传', action: '新建报单' },
                 customer_library: { title: '客户库', desc: '客户合同、车辆、应收、逾期、黑名单与催收记录', action: '' },
                 assets: { title: '车辆管理', desc: '上传经销商买断库存 Excel 批量入库，按表格维度展示车辆信息', action: '上传入库' },
+                refurbishment: { title: '车辆整备库', desc: '退车维修完成后进入整备，整备完成方可重新入库', action: '' },
                 completion_history: { title: '历史完结', desc: '已完成退车入库与以租代售过户记录', action: '' },
                 approvals: { title: '审批中心', desc: '报单确认 · 合同上传 · 发票处理 · 锁车审批 · 退车入库与退还押金', action: '' },
                 bills: { title: '账单管理', desc: '查看、核销和管理所有财务账单', action: '' },
                 receiving_companies: { title: '收款公司', desc: '维护收款公司及账户信息', action: '' },
                 invoice: { title: '发票申请', desc: '运营发起开票申请，财务审核开具', action: '' },
+                invoice_records: { title: '开票信息', desc: '查看已成功开具的发票、客户、金额及附件', action: '' },
                 reconciliation: { title: '对账单', desc: '按客户查看待核销款项、已核销记录与处理进度', action: '' },
+                waivers: { title: '租金减免', desc: '销售发起，老板审批，运营核定，财务核销', action: '发起减免' },
                 risk: { title: '锁车管理', desc: '逾期预警与锁车审批管理', action: '' },
                 return: { title: '退车验工', desc: '退还车辆的验收检查与损伤评估（已并入审批中心）', action: '' },
                 profit: { title: '利润核算', desc: '车辆全生命周期盈亏分析', action: '' },
@@ -5040,6 +6006,21 @@
 	                vehiclePageTotal.value = r.total || 0;
 	                assetPage.value = page;
 	            };
+            // 定时器原地刷新车辆资产页：保持当前页码，避免把用户踢回第 1 页
+            const refreshAssetsPage = async () => {
+                const [sRes, vRes, lRes] = await Promise.all([
+                    fetch('/api/dashboard/stats'),
+                    fetch('/api/vehicles?page=' + assetPage.value + '&page_size=20' + (showDeleted.value ? '&show_deleted=1' : '')),
+                    fetch('/api/vehicles/list'),
+                ]);
+                stats.value = await sRes.json();
+                const page = await vRes.json();
+                vehicles.value = await lRes.json();
+                vehiclePageTotal.value = page.total || 0;
+                vehiclePageData.value = page.data || [];
+                const maxPage = Math.max(1, Math.ceil((page.total || 0) / assetPageSize));
+                if (assetPage.value > maxPage) fetchVehiclePage(maxPage);
+            };
             const fetchSalesOrders = async () => {
                 const params = new URLSearchParams();
                 Object.entries(orderFilters).forEach(([key, value]) => {
@@ -5087,14 +6068,18 @@
             const fetchRefurbishmentRecords = async () => {
                 if (!currentUser.value || currentUser.value.role !== '车管') {
                     refurbishmentRecords.value = [];
+                    refurbishmentLoading.value = false;
                     return;
                 }
+                refurbishmentLoading.value = true;
                 try {
                     const res = await fetch('/api/refurbishment-records');
                     const data = await res.json();
                     refurbishmentRecords.value = Array.isArray(data) ? data : [];
                 } catch (e) {
                     refurbishmentRecords.value = [];
+                } finally {
+                    refurbishmentLoading.value = false;
                 }
             };
             function resetOrderFilters() {
@@ -5383,6 +6368,34 @@
                     invoiceRequests.value = [];
                 }
             };
+            const fetchInvoiceRecords = async () => {
+                if (!currentUser.value || !['销售','运营','财务','老板'].includes(currentUser.value.role)) {
+                    invoiceRecords.value = [];
+                    return;
+                }
+                try {
+                    const res = await fetch('/api/invoice-records');
+                    const data = await res.json();
+                    invoiceRecords.value = res.ok && Array.isArray(data) ? data : [];
+                } catch (e) {
+                    invoiceRecords.value = [];
+                }
+            };
+            const filteredInvoiceRecords = computed(() => {
+                const keyword = String(invoiceRecordSearch.value || '').trim().toLowerCase();
+                if (!keyword) return invoiceRecords.value;
+                return invoiceRecords.value.filter(row => [
+                    row.customer_name,
+                    row.customer_phone,
+                    row.plate_number,
+                    row.vin,
+                    row.invoice_no,
+                    row.contract_number,
+                ].some(value => String(value || '').toLowerCase().includes(keyword)));
+            });
+            const invoiceRecordTotalAmount = computed(() => (
+                filteredInvoiceRecords.value.reduce((sum, row) => sum + Number(row.amount || 0), 0)
+            ));
             const fetchBossDashboard = async () => {
                 if (!currentUser.value || currentUser.value.role !== '老板') {
                     bossDashboard.value = {};
@@ -5417,9 +6430,11 @@
 	                fetchMissingGuidanceAlerts();
 	                fetchSalesOrders();
 	                fetchReceivingCompanies();
-	                fetchRecon();
-	                fetchReceivables();
+                fetchRecon();
+                fetchReceivables();
                 fetchInvoices();
+                fetchInvoiceRecords();
+                fetchWaivers();
                 fetchReturns();
                 fetchLockRequests();
                 fetchRenewals();
@@ -5478,16 +6493,19 @@
 		                if (page === 'guidance_board') loadGuidanceBoard();
 		                if (page === 'orders') { fetchSalesOrders(); loadFinancePlans(); }
 		                if (page === 'customer_library') fetchCustomerLibrary();
-		                if (page === 'assets') { fetchAll(); fetchContracts(); loadSkuInventory(); }
+		                if (page === 'assets') { fetchAll(); fetchContracts(); }
+                if (page === 'refurbishment') fetchRefurbishmentRecords();
                 if (page === 'completion_history') { fetchCompletionHistory(); fetchReturns(); }
                 if (page === 'approvals' && !navigatingToPendingApproval) refreshApprovalCenter();
                 if (page === 'risk') { fetchOverdue(); fetchInsuranceWarnings(); fetchLockRequests(); }
                 if (page === 'bills') { fetchBills(); fetchContracts(); fetchInvoices(); fetchReceivingCompanies(); }
                 if (page === 'receiving_companies') fetchReceivingCompanies();
                 if (page === 'invoice') fetchInvoices();
-                if (page === 'profit') { fetchProfit(); fetchVehicleRebates(); }
-                if (page === 'reconciliation') { fetchRecon(); fetchReceivables(); }
-                if (page === 'settings') { fetchAll(); fetchModelGuidancePrices(); fetchMissingGuidanceAlerts(); fetchReceivingCompanies(); fetchCustomerBlacklist(); loadFinancePlans(); loadDictRows(); loadLegacyImportBatches(); }
+                if (page === 'invoice_records') fetchInvoiceRecords();
+		                if (page === 'profit') { fetchProfit(); fetchVehicleRebates(); }
+		                if (page === 'reconciliation') { fetchRecon(); fetchReceivables(); }
+	                if (page === 'waivers') fetchWaivers();
+		                if (page === 'settings') { fetchAll(); fetchModelGuidancePrices(); fetchMissingGuidanceAlerts(); fetchReceivingCompanies(); fetchCustomerBlacklist(); loadFinancePlans(); loadDictRows(); loadLegacyImportBatches(); }
             });
             // 车辆管理筛选选项：优先取启用数据字典，同时合并真实库存规格，
             // 防止历史导入数据尚未回填字典时无法按库存筛选。
@@ -6107,6 +7125,7 @@
                     sales_advisor: (currentUser.value && currentUser.value.display_name) || '',
                     full_package: false, wechat_private_fee: 0, gifted_items: '',
                     deposit_amount: 0,
+                    intent_deposit_amount: 0,
                     remark: `由 SKU 库存发起批量报单：${rows.length} 台`
                 });
                 nextTick(() => {
@@ -6267,13 +7286,15 @@
 	                    fetchReceivables();
 	                    fetchReturns();
 	                    fetchSalesOrders();
-	                    fetchInvoices();
-	                    fetchContracts();
+                    fetchInvoices();
+                    fetchWaivers();
+                    fetchRefurbishmentRecords();
+                    fetchContracts();
 	                    fetchPendingOwnershipTransfers();
 	                    fetchLockRequests();
 	                    if (currentPage.value === 'dashboard') refreshDashboardPanels();
                     if (currentPage.value === 'guidance_board') loadGuidanceBoard();
-                    if (currentPage.value === 'assets') fetchAll();
+                    if (currentPage.value === 'assets') refreshAssetsPage();
                     if (currentPage.value === 'completion_history') fetchCompletionHistory();
                     if (currentPage.value === 'receiving_companies') fetchReceivingCompanies();
                     if (currentPage.value === 'settings') { fetchAll(); fetchModelGuidancePrices(); loadFinancePlans(); }
@@ -6387,7 +7408,7 @@
             watch(assetPage, (p) => { if (p > 0 && !assetFilterActive.value) fetchVehiclePage(p); });
             watch(showDeleted, () => { if (currentPage.value === 'assets') fetchAll(); });
             const returnableAssetRows = computed(() =>
-                assetRows.value.filter(row => row.asset_status === '已经出库（租赁）')
+                assetRows.value.filter(row => canInitiateVehicleReturn(row))
             );
             const filteredContracts = computed(() => {
                 let list = contracts.value;
@@ -6486,11 +7507,35 @@
                 return pendingOwnershipTransfers.value.length;
             });
             const assetMenuCount = computed(() => pendingOwnershipTransferCount.value);
+            const refurbishmentStats = computed(() => {
+                const rows = Array.isArray(refurbishmentRecords.value) ? refurbishmentRecords.value : [];
+                return rows.reduce((summary, row) => {
+                    summary.total += 1;
+                    if (row.status === '待整备') summary.pending += 1;
+                    if (row.status === '整备中') summary.inProgress += 1;
+                    if (row.status === '整备完成') summary.completed += 1;
+                    return summary;
+                }, { total: 0, pending: 0, inProgress: 0, completed: 0 });
+            });
             const pendingRepairVehicles = computed(() => {
                 if (!currentUser.value || currentUser.value.role !== '车管') return [];
                 return refurbishmentRecords.value.filter(r =>
                     ['待整备', '整备中'].includes(r.status)
                 );
+            });
+            const filteredRefurbishmentRows = computed(() => {
+                const keyword = String(refurbishmentFilter.keyword || '').trim().toLowerCase();
+                const status = refurbishmentFilter.status;
+                return (refurbishmentRecords.value || []).filter(row => {
+                    if (status && row.status !== status) return false;
+                    if (!keyword) return true;
+                    return [
+                        row.plate_number,
+                        row.vin,
+                        row.car_type,
+                        row.customer_name,
+                    ].some(value => String(value || '').toLowerCase().includes(keyword));
+                });
             });
             const pendingSalesOrderCount = computed(() => {
                 if (!currentUser.value) return 0;
@@ -6522,7 +7567,6 @@
             const approvalsMenuCount = computed(() =>
                 pendingApprovalCount.value
                 + pendingDeliveryCount.value
-                + pendingRepairVehicles.value.length
             );
             const pendingReceivableReconCount = computed(() => {
                 if (!currentUser.value) return 0;
@@ -6584,6 +7628,8 @@
                     orders: pendingSalesOrderCount.value,
                     approvals: approvalsMenuCount.value,
                     assets: assetMenuCount.value,
+                    refurbishment: pendingRepairVehicles.value.length,
+                    waivers: waiverRolePendingCount.value,
                     invoice: pendingInvoiceCount.value,
                     reconciliation: pendingReconCount.value,
                     risk: pendingLockActionCount.value,
@@ -7311,7 +8357,7 @@
                 const data = await res.json();
                 if (!data.success) return ElementPlus.ElMessage.error(data.message || '维修开始失败');
                 ElementPlus.ElMessage.success(data.message || '车辆已进入维修中');
-                fetchAll(); fetchReturns(); refreshApprovalCenter();
+                fetchRefurbishmentRecords(); fetchAll(); fetchReturns(); refreshApprovalCenter();
             }
             function openRepairCompleteDialog(row) {
                 repairTarget.value = row;
@@ -7354,7 +8400,7 @@
                     const data = await readApiJson(res, '维修完成失败');
                     ElementPlus.ElMessage.success(data.message || '维修已完成');
                     showRepairCompleteDialog.value = false;
-                    fetchAll(); fetchReturns(); refreshApprovalCenter();
+                    fetchRefurbishmentRecords(); fetchAll(); fetchReturns(); refreshApprovalCenter();
                 }, '维修完成失败');
             }
 
@@ -7569,6 +8615,7 @@
                     showOrderDialog.value = true;
                 }
                 if (currentPage.value === 'assets') openVehicleImport();
+                if (currentPage.value === 'waivers') openWaiverApply();
             }
             async function handleContractExpand(row, expandedRows) {
                 const contractId = row.contract_id || row.id;
@@ -7689,6 +8736,12 @@
             function canActivateSalesOrder(row) {
                 if (!row || row.order_status !== '待财务确认') return false;
                 return ['已生成', '已通过', '差异已确认'].includes(row.customer_plan_match_status);
+            }
+            function canConfirmIntentDeposit(row, role) {
+                return ['财务', '老板'].includes(role)
+                    && Number(row && row.intent_deposit_amount || 0) > 0
+                    && !row.intent_deposit_confirmed_at
+                    && row.order_status !== '已作废';
             }
             function salesOrderPlanActionLabel(row) {
                 if (!row || !row.customer_plan_match_status || row.customer_plan_match_status === '未生成') return '生成客户计划';
@@ -7855,6 +8908,7 @@
                     receiving_company: '陕西金聚源汽车服务有限公司', wechat_interest: 0, wechat_registration_fee: 0,
                     wechat_purchase_tax: 0, sales_advisor: '', full_package: false, wechat_private_fee: 0,
                     gifted_items: '', deposit_amount: 0, remark: '',
+                    intent_deposit_amount: 0,
                     finance_plan_id: null, customer_screenshot_path: '',
                     first_payment_received_amount: 0, first_payment_shortage_reason: '', first_payment_promised_date: ''
                 });
@@ -7897,6 +8951,7 @@
                     wechat_private_fee: Number(row.wechat_private_fee || 0),
                     gifted_items: row.gifted_items || '',
                     deposit_amount: Number(row.deposit_amount || 0),
+                    intent_deposit_amount: Number(row.intent_deposit_amount || 0),
                     remark: row.remark || '',
                     finance_plan_id: row.finance_plan_id || null,
                     customer_screenshot_path: row.customer_screenshot_path || '',
@@ -8361,13 +9416,10 @@
                 }, '车辆入库失败');
             }
             async function confirmRepayment(row) {
-                const res = await fetch(`/api/repayments/${row.id}/confirm`, { method: 'POST' });
-                const data = await res.json();
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '客户还款核销失败');
-                ElementPlus.ElMessage.success(data.message || '客户还款核销成功');
-                fetchAll();
-                if (currentPage.value === 'risk') fetchOverdue();
-                if (currentPage.value === 'bills') fetchBills();
+                if (!row || !attachmentList(row.screenshot_path).length) {
+                    return ElementPlus.ElMessage.warning('请先由运营发起对账并上传客户支付凭证');
+                }
+                openVerifyDialog(row);
             }
             async function confirmFactoryRepayment(row) {
                 const res = await fetch(`/api/factory-repayments/${row.id}/confirm`, { method: 'POST' });
@@ -8409,67 +9461,83 @@
                 }, '合同提交失败');
             }
 
-            async function onInitialReceiptUpload(paymentId, res) {
-                if (!res.success) return ElementPlus.ElMessage.error('公司收款回单上传失败');
-                await _submitInitialReceipt(paymentId, res.url);
-            }
-            // 财务仅填银行流水号确认到账（不强制上传公司回单）
-            async function onInitialReceiptSerialOnly(paymentId) {
-                await _submitInitialReceipt(paymentId, '');
-            }
-            async function _submitInitialReceipt(paymentId, receiptPath) {
-                const approval = approvalList.value.find(item => item.initial_payment_id === paymentId) || {};
-                let serial = '';
-                let amount = approval.initial_payment_amount || 0;
-                let shortageReason = approval.shortage_reason || '';
-                let promisedRepayDate = approval.promised_repay_date || '';
-                try {
-                    const serialResult = await ElementPlus.ElMessageBox.prompt('请输入银行流水号', '首次付款到账确认', {
-                        confirmButtonText: '继续',
-                        cancelButtonText: '取消',
-                        inputPattern: /^.{4,}$/,
-                        inputErrorMessage: '银行流水号至少4位'
-                    });
-                    serial = serialResult.value;
-                    const amountResult = await ElementPlus.ElMessageBox.prompt('请输入公司实际到账金额', '首次付款到账确认', {
-                        confirmButtonText: '确认上传',
-                        cancelButtonText: '取消',
-                        inputValue: String(amount || ''),
-                        inputPattern: /^[0-9]+(\.[0-9]{1,2})?$/,
-                        inputErrorMessage: '请输入有效金额'
-                    });
-                    amount = Number(amountResult.value || 0);
-                    if (amount < Number(approval.initial_payment_amount || 0)) {
-                        const reasonResult = await ElementPlus.ElMessageBox.prompt('请填写不足原因', '首次付款不足', {
-                            confirmButtonText: '继续',
-                            cancelButtonText: '取消',
-                            inputValue: shortageReason,
-                            inputPattern: /\S+/,
-                            inputErrorMessage: '不足原因不能为空'
-                        });
-                        shortageReason = reasonResult.value;
-                        const dateResult = await ElementPlus.ElMessageBox.prompt('请填写剩余金额承诺归还时间（YYYY-MM-DD）', '首次付款不足', {
-                            confirmButtonText: '确认上传',
-                            cancelButtonText: '取消',
-                            inputValue: promisedRepayDate || todayString(),
-                            inputPattern: /^\d{4}-\d{2}-\d{2}$/,
-                            inputErrorMessage: '日期格式为 YYYY-MM-DD'
-                        });
-                        promisedRepayDate = dateResult.value;
-                    }
-                } catch (e) {
-                    return ElementPlus.ElMessage.info('已取消回单登记');
-                }
-                const apiRes = await fetch(`/api/initial-payments/${paymentId}/receipt`, {
-                    method: 'POST',
-                    headers: {'Content-Type':'application/json'},
-                    body: JSON.stringify({ bank_receipt_path: receiptPath, bank_serial: serial, received_amount: amount, shortage_reason: shortageReason, promised_repay_date: promisedRepayDate })
+            function openInitialPaymentConfirm(item, flowId) {
+                const paymentId = Number((item && (item.initial_payment_id || item.ref_id)) || 0);
+                if (!paymentId) return ElementPlus.ElMessage.error('未找到首次付款记录');
+                initialPaymentConfirmTarget.value = item;
+                Object.assign(initialPaymentConfirmForm, {
+                    flow_id: flowId || null,
+                    payment_id: paymentId,
+                    bank_serial: (item.bank_serial || '').trim(),
+                    bank_receipt_path: (item.bank_receipt_path || '').trim(),
+                    received_amount: Number(item.initial_payment_received_amount || item.initial_payment_amount || 0),
+                    shortage_reason: item.shortage_reason || '',
+                    promised_repay_date: item.promised_repay_date || '',
+                    comment: ''
                 });
-                const data = await apiRes.json();
-                if (!data.success) return ElementPlus.ElMessage.error(data.message || '公司收款回单上传失败');
-                ElementPlus.ElMessage.success(data.message || '公司收款回单已上传');
-                fetchApprovals();
-                fetchApprovalReminders();
+                showInitialPaymentConfirmDialog.value = true;
+            }
+            function openInitialPaymentConfirmForItem(item) {
+                const flow = (item.steps || []).find(step => step.status === '待审批' && step.required_role === '财务');
+                openInitialPaymentConfirm(item, flow ? flow.id : null);
+            }
+            function onInitialPaymentReceiptUpload(res) {
+                if (!res.success) return ElementPlus.ElMessage.error('公司收款回单上传失败');
+                initialPaymentConfirmForm.bank_receipt_path = res.url;
+                ElementPlus.ElMessage.success('公司收款回单已上传');
+            }
+            async function submitInitialPaymentConfirm() {
+                const target = initialPaymentConfirmTarget.value;
+                if (!target) return;
+                if (!attachmentList(target.customer_screenshot_path).length) {
+                    return ElementPlus.ElMessage.warning('运营尚未上传客户支付凭证，不能确认到账');
+                }
+                const bankSerial = (initialPaymentConfirmForm.bank_serial || '').trim();
+                const receiptPath = (initialPaymentConfirmForm.bank_receipt_path || '').trim();
+                if (bankSerial.length < 4 && !receiptPath) {
+                    return ElementPlus.ElMessage.warning('请填写至少4位银行流水号或上传公司收款回单');
+                }
+                const receivedAmount = Number(initialPaymentConfirmForm.received_amount || 0);
+                if (!Number.isFinite(receivedAmount) || receivedAmount <= 0) {
+                    return ElementPlus.ElMessage.warning('请输入公司实际到账金额');
+                }
+                const expectedAmount = Number(target.initial_payment_amount || 0);
+                if (receivedAmount < expectedAmount) {
+                    if (!String(initialPaymentConfirmForm.shortage_reason || '').trim()) {
+                        return ElementPlus.ElMessage.warning('首次付款不足，请填写不足原因');
+                    }
+                    if (!initialPaymentConfirmForm.promised_repay_date) {
+                        return ElementPlus.ElMessage.warning('首次付款不足，请填写剩余金额承诺归还日期');
+                    }
+                }
+                await runSubmitting(async () => {
+                    const receiptRes = await fetch(`/api/initial-payments/${initialPaymentConfirmForm.payment_id}/receipt`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            bank_receipt_path: receiptPath,
+                            bank_serial: bankSerial,
+                            received_amount: receivedAmount,
+                            shortage_reason: initialPaymentConfirmForm.shortage_reason,
+                            promised_repay_date: initialPaymentConfirmForm.promised_repay_date
+                        })
+                    });
+                    const receiptData = await readApiJson(receiptRes, '公司到账登记失败');
+                    if (!initialPaymentConfirmForm.flow_id) {
+                        throw new Error(receiptData.message || '未找到财务审批节点');
+                    }
+                    const approveRes = await fetch(`/api/approvals/${initialPaymentConfirmForm.flow_id}/approve`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ comment: (initialPaymentConfirmForm.comment || '').trim() })
+                    });
+                    const approveData = await readApiJson(approveRes, '首次付款审核失败');
+                    ElementPlus.ElMessage.success(approveData.message || '首次付款已确认到账');
+                    showInitialPaymentConfirmDialog.value = false;
+                    await fetchApprovals();
+                    await fetchApprovalReminders();
+                    await fetchAll();
+                }, '首次付款审核失败');
             }
 
             // ===== 对账核销操作 =====
@@ -8532,20 +9600,55 @@
                 return row && (row.status === '已还款' || row.status === '预抵');
             }
             function allocTypeLabel(t) {
-                const m = { rent: '租金', late_fee: '滞纳金', late_fee_waiver: '滞纳金减免', fee: '费用', deposit: '押金', overpay: '超额预抵', prepay: '预抵', shortfall: '欠款顺延' };
+                const m = {
+                    rent: '租金',
+                    rent_waiver: '租金减免',
+                    deposit_waiver: '押金减免',
+                    bad_debt: '坏账',
+                    bad_debt_writeoff: '坏账核销',
+                    late_fee: '滞纳金',
+                    late_fee_waiver: '滞纳金减免',
+                    fee: '费用',
+                    deposit: '押金',
+                    overpay: '超额预抵',
+                    prepay: '预抵',
+                    shortfall: '欠款顺延',
+                };
                 return m[t] || t || '—';
             }
             async function openReconDetail(row) {
                 reconDetail.value = row;
                 reconDetailAllocations.value = [];
+                reconDetailSummary.value = null;
+                reconDetailPeriods.value = [];
+                reconDetailLoading.value = true;
                 showReconDetailDialog.value = true;
                 try {
-                    const res = await fetch(`/api/reconciliation/${row.id}/allocations`);
-                    const data = await res.json();
-                    reconDetailAllocations.value = (data && data.allocations) ? data.allocations : (Array.isArray(data) ? data : []);
-                } catch (e) { reconDetailAllocations.value = []; }
+                    const allocationRequest = fetch(`/api/reconciliation/${row.id}/allocations`)
+                        .then(res => res.ok ? res.json() : [])
+                        .catch(() => []);
+                    const detailResponse = await fetch(`/api/reconciliation/${row.id}/detail`);
+                    const detailData = await readApiJson(detailResponse, '加载对账单详情失败');
+                    const allocationData = await allocationRequest;
+                    reconDetailSummary.value = detailData.summary || null;
+                    reconDetailPeriods.value = Array.isArray(detailData.periods) ? detailData.periods : [];
+                    reconDetail.value = { ...row, ...(detailData.selected || {}) };
+                    reconDetailAllocations.value = (allocationData && allocationData.allocations)
+                        ? allocationData.allocations
+                        : (Array.isArray(allocationData) ? allocationData : []);
+                } catch (e) {
+                    ElementPlus.ElMessage.error(e.message || '加载对账单详情失败');
+                } finally {
+                    reconDetailLoading.value = false;
+                }
             }
             async function submitVerify() {
+                if (!verifyTarget.value) {
+                    return ElementPlus.ElMessage.warning('未找到对账记录，请刷新页面后重试');
+                }
+                if (!attachmentList(verifyTarget.value.screenshot_path).length) {
+                    return ElementPlus.ElMessage.warning('请先由运营发起对账并上传客户支付凭证');
+                }
                 if (!verifySerial.value || verifySerial.value.length < 4) {
                     return ElementPlus.ElMessage.warning('请输入至少4位银行流水号');
                 }
@@ -8751,6 +9854,10 @@
             };
 
             async function doApprove(flowId, label, item = null) {
+                if (item && item.ref_type === 'initial_payment') {
+                    openInitialPaymentConfirmForItem(item);
+                    return;
+                }
                 if (item && item.ref_type === 'sale_payment') {
                     openSalesOrderFinanceConfirm(item, flowId);
                     return;
@@ -8789,6 +9896,12 @@
                 ElementPlus.ElMessage.success('公司收款回单已上传');
             }
             async function submitSalesOrderFinanceConfirm() {
+                if (!salesOrderFinanceConfirmTarget.value) {
+                    return ElementPlus.ElMessage.warning('未找到销售报单，请刷新页面后重试');
+                }
+                if (!attachmentList(salesOrderFinanceConfirmTarget.value.customer_screenshot_path).length) {
+                    return ElementPlus.ElMessage.warning('销售尚未上传客户支付凭证，不能确认报单');
+                }
                 const bankSerial = (salesOrderFinanceConfirmForm.bank_serial || '').trim();
                 const receiptPath = (salesOrderFinanceConfirmForm.bank_receipt_path || '').trim();
                 if (bankSerial.length < 4 && !receiptPath) {
@@ -8872,8 +9985,16 @@
                 fetchApprovals(); fetchAll();
             }
             async function initiateCancelOrder(row) {
+                const paidFirst = Number(row.first_payment_received_amount || 0);
+                const intent = Number(row.intent_deposit_amount || 0);
+                if (intent > 0 && !row.intent_deposit_confirmed_at) {
+                    return ElementPlus.ElMessage.warning('该笔意向定金尚未财务确认入账，需财务确认到账后才能发起取消退款');
+                }
+                const refundHint = (paidFirst <= 0 && intent > 0)
+                    ? `客户仅支付意向定金，审批通过后全额退意向定金 ¥${numberFormat(intent)}`
+                    : `客户押金/首付款未足额支付，审批通过后退款 ¥${numberFormat(row.deposit_amount || 0)}`;
                 const { value: reason } = await ElementPlus.ElMessageBox.prompt(
-                    `客户 ${row.customer_name || '-'} 押金/首付款未足额支付，取消原因（必填）`,
+                    `${row.customer_name || '-'}：${refundHint}。取消原因（必填）`,
                     '发起取消订单',
                     { confirmButtonText: '提交老板审批', cancelButtonText: '取消', inputPlaceholder: '取消原因', type: 'warning' }
                 ).catch(() => ({ value: null }));
@@ -8887,6 +10008,51 @@
                 fetchSalesOrders();
                 fetchApprovals();
                 fetchAll();
+            }
+            function openIntentDepositDialog(row) {
+                intentDepositTarget.value = row;
+                Object.assign(intentDepositForm, { order_id: row.id, serial: '', receipt_path: '' });
+                showIntentDepositDialog.value = true;
+            }
+            function onIntentDepositReceiptUpload(res) {
+                if (!res.success) return ElementPlus.ElMessage.error('公司收款回单上传失败');
+                intentDepositForm.receipt_path = res.url || res.path || '';
+                ElementPlus.ElMessage.success('公司收款回单已上传');
+            }
+            async function submitIntentDepositCheck() {
+                if (!intentDepositForm.order_id) {
+                    return ElementPlus.ElMessage.error('未找到报单信息，请关闭弹窗后重新打开');
+                }
+                if (!intentDepositTarget.value || !attachmentList(intentDepositTarget.value.customer_screenshot_path).length) {
+                    return ElementPlus.ElMessage.warning('销售尚未上传客户定金支付凭证，不能确认入账');
+                }
+                const serial = String(intentDepositForm.serial || '').trim();
+                if (serial.length < 4) return ElementPlus.ElMessage.warning('请填写至少4位公司到账银行流水号');
+                submitting.value = true;
+                try {
+                    const res = await fetch(`/api/sales-orders/${intentDepositForm.order_id}/confirm-intent-deposit`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ serial, receipt_path: intentDepositForm.receipt_path })
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (res.status === 401) {
+                        showIntentDepositDialog.value = false;
+                        currentUser.value = null;
+                        return ElementPlus.ElMessage.error('登录状态已失效，请重新登录后再确认定金');
+                    }
+                    if (!res.ok || !data.success) {
+                        return ElementPlus.ElMessage.error(data.message || `确认失败（接口状态 ${res.status}）`);
+                    }
+                    ElementPlus.ElMessage.success(data.message || '已完成定金对账');
+                    showIntentDepositDialog.value = false;
+                    await fetchSalesOrders();
+                } catch (error) {
+                    console.error('确认意向定金失败', error);
+                    ElementPlus.ElMessage.error(`确认失败：${error.message || '网络异常，请稍后重试'}`);
+                } finally {
+                    submitting.value = false;
+                }
             }
             async function executeOrderRefund(item) {
                 const { value: form } = await ElementPlus.ElMessageBox.prompt(
@@ -9194,17 +10360,25 @@
                 canEditReturnSalesSection, canEditReturnFleetSection, canEditReturnOperatorSection, canEditReturnFinanceSection, canEditReturnRemark,
                 // App
                 currentPage, menuItems, visibleMenuItems, pageMeta, roles,
-                search, assetFilter, carTypeFilter, conditionFilter, boxTypeFilter, energyFilter, batteryCapacityFilter, horsepowerFilter, showDeleted, contractSearch, contractFilter,
+                search, assetFilter, carTypeFilter, conditionFilter, boxTypeFilter, energyFilter, batteryCapacityFilter, horsepowerFilter, refurbishmentFilter, refurbishmentLoading, showDeleted, contractSearch, contractFilter,
                 hiddenColumns, toggleColumn, colVisible, ALL_COLUMNS, showColSettings, selectAllColumns, deselectAllColumns,
                 carTypeOptions, carTypeGroups, normalizeOrderBaseCarType, batteryCapacityOptions, horsepowerOptions, assetBoxTypeOptions, assetEnergyOf, assetConditionOf, salesOrderCarOptions, currentSalesOrderCarConfig, currentVehicleCarConfig, availableGearboxOptions, availableColorOptions, availableBoxOptions, availableVehicleGearboxOptions, availableVehicleColorOptions, availableVehicleBoxOptions, boxRemarkPlaceholder, vehicleBoxRemarkPlaceholder,
                 vehicles, contracts, pendingOwnershipTransfers, legacyPendingContracts, legacyPendingSelection, legacyPendingConfirming, fetchLegacyPendingContracts, confirmLegacyPending, confirmAllLegacyPending, stats, dashboardWorkspace, salesOrders, orderFilters, fetchSalesOrders, resetOrderFilters, customerLibrary, customerLibraryFilters, fetchCustomerLibrary, resetCustomerLibraryFilters, overdueList, insuranceWarnings, pendingBills, feeItems, profitData, profitSummary, returnList, completionHistory, completionHistoryFilter, completionHistoryDateRange, returnableAssetRows,
                 invoiceRequests, receivingCompanies, bossDashboard, slaReminders, customerBlacklist, vehicleRebates,
+                invoiceRecords, invoiceRecordSearch, filteredInvoiceRecords, invoiceRecordTotalAmount, fetchInvoiceRecords,
+                waivers, waiverLoading, waiverCounts, waiverRolePendingCount, waiverFilter, waiverStatusOptions, waiverStatusCards, filteredWaivers, waiverStatusClass, waiverPeriodText, waiverRowClass, fetchWaivers,
+                showWaiverApplyDialog, waiverApplyForm, waiverApplyRepayments, waiverApplyLoading, openWaiverApply, loadWaiverApplyPeriods, onWaiverApplyUpload, submitWaiverApply,
+                showWaiverApproveDialog, waiverApproveTarget, waiverApproveForm, openWaiverApprove, submitWaiverApprove,
+                showWaiverOperationsDialog, waiverOperationsTarget, waiverOperationsForm, openWaiverOperations, submitWaiverOperations,
+                showWaiverExecuteDialog, waiverExecuteTarget, openWaiverExecute, submitWaiverExecute,
+                showWaiverRevokeDialog, waiverRevokeTarget, waiverRevokeReason, openWaiverRevoke, submitWaiverRevoke,
                 reconList, reconFilter, reconSearch, reconSummary, filteredGroupedReconList, reconExpandedKeys, reconTableRef,
                 receivablesList, showReceivableScreenshotDialog, showReceivableSettleDialog, receivableTarget, receivableScreenshotPath, receivableSettleForm, receivableOutstanding, openReceivableScreenshot, onReceivableScreenshotUpload, submitReceivableScreenshot, openReceivableSettle, submitReceivableSettle,
                 showVerifyDialog, verifyTarget, verifySerial, verifyAmount, verifyExtraPeriods, verifySelectablePeriods, verifyReceipt, onVerifyReceiptUpload,
                 showSalesOrderFinanceConfirmDialog, salesOrderFinanceConfirmTarget, salesOrderFinanceConfirmForm, openSalesOrderFinanceConfirm, onSalesOrderFinanceReceiptUpload, submitSalesOrderFinanceConfirm,
+                showIntentDepositDialog, intentDepositTarget, intentDepositForm,
                 showReconInitiateDialog, reconInitiateTarget, reconInitiateAmount, reconInitiateScreenshot, openReconInitiate, onReconInitiateUpload, submitReconInitiate,
-                showReconDetailDialog, reconDetail, reconDetailAllocations, openReconDetail, isReconCompleted, allocTypeLabel,
+                showReconDetailDialog, reconDetail, reconDetailAllocations, reconDetailSummary, reconDetailPeriods, reconDetailLoading, openReconDetail, isReconCompleted, allocTypeLabel,
                 currentRepayments, currentFactoryRepayments, currentExternalFinanceRepayments, repaymentTab, currentOrderDraftId,
                 repaymentLoading, showAddVehicle, vehicleImportLoading, vehicleImportResult, showVehicleDetail, vehicleDetail, vehicleDetailRows, showAddContract, showPlanningDialog, showOrderDialog, showFeeDialog, showReturnDialog,
                 showVehicleEditDialog, vehicleEditSaving, vehicleEditForm, vehicleEditHint, vehicleEditFields, openVehicleEdit, saveVehicleEdit,
@@ -9230,9 +10404,9 @@
                 guidanceWorkbenchCarType, guidanceWorkbenchRows, guidanceWorkbenchPlans, guidanceWorkbenchPlanRows, guidanceWorkbenchLegacyPlans, guidanceWorkbenchSummary, guidanceWorkbenchLoading, guidanceSavingKey,
                 guidancePriceForCarType,
                 fetchApprovals, refreshApprovalCenter, fetchApprovalReminders, fetchLockRequests, fetchFeeItems, fetchCompletionHistory, syncCompletionHistoryDateRange, resetCompletionHistoryFilter,
-                doApprove, doReject, doResubmit, doDeliver, planText, initiateOrderRefund, initiateCancelOrder, executeOrderRefund, approveOrderRefund, rejectOrderRefund, cancelOrderRefund,
+                doApprove, doReject, doResubmit, doDeliver, planText, initiateOrderRefund, initiateCancelOrder, openIntentDepositDialog, onIntentDepositReceiptUpload, submitIntentDepositCheck, executeOrderRefund, approveOrderRefund, rejectOrderRefund, cancelOrderRefund,
                 // UI
-                statCards, statusDistribution, dashboardCardValue, dashboardCardTone, dashboardCardMark, dashboardTaskTagType, openDashboardTask, filteredAssetRows, pagedAssetRows, assetDisplayTotal, assetFilterActive, resetAssetFilters, filteredContracts, pendingApprovalItems, pendingApprovalCount, pendingDeliveryCount, pendingDeliveryContracts, pendingOwnershipTransferCount, assetMenuCount, pendingRepairVehicles, pendingSalesOrderCount, pendingLockActions, approvalsMenuCount, pendingReconCount, pendingReturnCount, menuActionCount, menuWarningCount,
+                statCards, statusDistribution, dashboardCardValue, dashboardCardTone, dashboardCardMark, dashboardTaskTagType, openDashboardTask, filteredAssetRows, pagedAssetRows, assetDisplayTotal, assetFilterActive, resetAssetFilters, filteredContracts, pendingApprovalItems, pendingApprovalCount, pendingDeliveryCount, pendingDeliveryContracts, pendingOwnershipTransferCount, assetMenuCount, refurbishmentStats, filteredRefurbishmentRows, fetchRefurbishmentRecords, pendingRepairVehicles, pendingSalesOrderCount, pendingLockActions, approvalsMenuCount, pendingReconCount, pendingReturnCount, menuActionCount, menuWarningCount,
                 vehiclePageTotal, vehiclePageData, assetTotalPages, assetPageSize, assetPage, fetchVehiclePage,
                 numberFormat, statusClass, repayClass, calcOverdueDays, riskLevel,
                 approvalTypeLabel, approvalTypeClass, approvalVehicleLabel, deliveryStatusClass, paymentCategoryClass, defaultPaymentCategory, assetStatusClass, returnStatusClass,
@@ -9251,10 +10425,12 @@
                 deliverVehicle, matchContractVehicle, openSalesOrderFromVehicle,
                 openPlanningDialog, onPlanningFactoryUpload, savePlanningContract, importPlanningFactory, confirmPlanningDifference,
                 onFactoryPlanUpload, submitFactoryImport, submitFeeItem,
-                onInitialReceiptUpload, onInitialReceiptSerialOnly, openDeliveryDialog, onDeliveryFileUpload, saveDeliveryFiles, submitDelivery,
+                showInitialPaymentConfirmDialog, initialPaymentConfirmTarget, initialPaymentConfirmForm,
+                openInitialPaymentConfirm, openInitialPaymentConfirmForItem, onInitialPaymentReceiptUpload, submitInitialPaymentConfirm,
+                openDeliveryDialog, onDeliveryFileUpload, saveDeliveryFiles, submitDelivery,
                 openReturnForm, onReturnVehicleSelect, submitReturnInspection, submitReturnFleet, submitReturnOperator, submitReturnFinance, submitReturnBoss, submitReturnBossReject, resubmitReturnInspection, submitReturnPay, viewReturnDetail, gotoReturnDetail, openReturnFromApproval,
                 attachmentList, isImageAttachment, attachmentTypeLabel,
-                salesOrderContractType, isInstallmentSalesOrder, canActivateSalesOrder, salesOrderPlanActionLabel,
+                salesOrderContractType, isInstallmentSalesOrder, canActivateSalesOrder, canConfirmIntentDeposit, salesOrderPlanActionLabel,
                 approvalSalesOrderRow, canApproveApprovalStep,
                 salesOrderHasContract, salesOrderContractUploaded, salesOrderContractActionLabel, isSupplementContract, contractDialogTitle, contractDialogHint, contractCustomerPlanSource,
                 onInvoiceUploadSuccess, beforeInvoiceUpload, onContractFileSuccess, beforeContractFileUpload,
